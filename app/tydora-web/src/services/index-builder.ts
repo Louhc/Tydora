@@ -17,10 +17,25 @@ const LINK_INDEX_KEY = "zmd-link-index";
 /** 缓存所属仓库标记：切换到不同仓库时丢弃缓存并全量重建，避免跨仓库条目混入 */
 const INDEX_VAULT_KEY = "zmd-index-vault";
 
+/**
+ * 索引缓存格式版本。
+ *
+ * 解析逻辑变更时必须 +1，否则旧缓存会被"信任"而不再重新解析（增量模式的保守策略：
+ * 已索引的文件直接跳过，见下方 buildIndexesTogether 步骤 3），脏条目就会一直留在
+ * localStorage 里 —— 例如标签解析曾经把彩色文字里的 `#e03131` 当成标签建进索引。
+ * 版本不符时清空索引并返回 false，调用方会走全量重建。
+ */
+const INDEX_CACHE_VERSION = 2;
+
 function normalizeVaultPath(p: string | null | undefined): string | null {
   if (!p) return null;
   const norm = p.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
   return norm || null;
+}
+
+/** 缓存归属标记：版本 + 仓库路径（都做归一化，避免盘符大小写/斜杠差异误判） */
+function cacheMarker(vaultPath: string): string {
+  return `${INDEX_CACHE_VERSION}|${normalizeVaultPath(vaultPath) ?? ""}`;
 }
 
 export interface IndexBuildOptions {
@@ -50,15 +65,20 @@ export interface IndexBuildResult {
 /** 策略 A：从 localStorage 反序列化恢复两个索引。返回是否恢复成功。
  *  传入 vaultPath 时校验缓存归属：缓存属于其他仓库则清空索引并返回 false（触发全量重建）。 */
 export function restoreIndexesFromCache(vaultPath?: string): boolean {
+  const cachedMarker = localStorage.getItem(INDEX_VAULT_KEY);
   if (vaultPath) {
-    const cachedVault = localStorage.getItem(INDEX_VAULT_KEY);
-    if (cachedVault !== null) {
-      if (normalizeVaultPath(cachedVault) !== normalizeVaultPath(vaultPath)) {
-        LinkIndexService.clear();
-        TagIndexService.clear();
-        return false;
-      }
+    // 标记缺失（老版本写的纯路径、或从未写过）或版本不符 → 一律视为不可用，
+    // 清空后由调用方全量重建。这样解析逻辑修好后，旧缓存不会再"带病续命"。
+    if (cachedMarker !== cacheMarker(vaultPath)) {
+      LinkIndexService.clear();
+      TagIndexService.clear();
+      return false;
     }
+  } else if (!cachedMarker?.startsWith(`${INDEX_CACHE_VERSION}|`)) {
+    // 没传仓库路径时至少校验版本（buildIndexesTogether 直接调用的那条路径）
+    LinkIndexService.clear();
+    TagIndexService.clear();
+    return false;
   }
   let ok = false;
   try {
@@ -97,7 +117,7 @@ export function persistIndexesToStorage(vaultPath?: string): void {
   }
   if (vaultPath) {
     try {
-      localStorage.setItem(INDEX_VAULT_KEY, vaultPath);
+      localStorage.setItem(INDEX_VAULT_KEY, cacheMarker(vaultPath));
     } catch {
       /* ignore */
     }

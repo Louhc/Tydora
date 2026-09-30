@@ -1,10 +1,10 @@
-import { useRef, useEffect, forwardRef, useImperativeHandle, useCallback, useState } from "react";
+import { useRef, useEffect, forwardRef, useImperativeHandle, useCallback, useState, useSyncExternalStore } from "react";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import { markInputRule } from "@tiptap/core";
 import type { EditorView } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 import Paragraph from "@tiptap/extension-paragraph";
-import { TextSelection } from "@tiptap/pm/state";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import Placeholder from "@tiptap/extension-placeholder";
 import Bold from "@tiptap/extension-bold";
 import Italic from "@tiptap/extension-italic";
@@ -38,6 +38,16 @@ import { Mermaid } from "./extensions/mermaid";
 import { WikiLink } from "./extensions/wiki-link";
 import { Tag } from "./extensions/tag";
 import { SearchHighlight } from "./extensions/search-highlight";
+import {
+  HIGHLIGHT_COLORS,
+  getHighlighterColor,
+  getHighlighterMode,
+  highlightColorOption,
+  setHighlighterMode,
+  subscribeHighlighter,
+} from "./highlighter";
+import i18n from "../i18n";
+import { TextColor } from "./extensions/text-color";
 import { HeadingHighlight } from "./extensions/heading-highlight";
 import { CodeBlockToolbar } from "./extensions/code-block-toolbar";
 import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
@@ -186,6 +196,31 @@ function isEditorAlive(editor: Editor | null | undefined): editor is Editor {
   } catch {
     return false;
   }
+}
+
+/**
+ * 丢弃 ProseMirror 的撤销/重做历史。
+ *
+ * `setContent` 走的是普通事务、会进 undo 栈，所以切换文件后按 Ctrl+Z 会把
+ * **上一个文件**的内容"撤"回来。history 插件的栈没有公开的重置接口，官方
+ * 建议（discuss.ProseMirror「Reset history plugin state」）是重建 EditorState
+ * 再交给 view：新 state 会重新 init 全部插件，撤销栈即为空。
+ *
+ * 用 view.updateState 而不是 dispatch，避免经 dispatchTransaction 触发
+ * onUpdate → onChange（否则会被当成用户编辑回写磁盘）。
+ * 复用原 state 的 schema / plugins / selection，只换掉插件内部状态。
+ */
+function dropUndoHistory(editor: Editor): void {
+  if (!isEditorAlive(editor)) return;
+  const { state, view } = editor;
+  view.updateState(
+    EditorState.create({
+      schema: state.schema,
+      doc: state.doc,
+      plugins: state.plugins,
+      selection: state.selection,
+    }),
+  );
 }
 
 /**
@@ -591,7 +626,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       (state: { anchor: number; head: number; ratio: number; scrollRatio: number }) => {
         sourceViewStateRef.current = state;
       }, []);
-    const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+    const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number; placement?: "above" } | null>(null);
     const [tableToolbar, setTableToolbar] = useState<{ table: HTMLElement } | null>(null);
     const linkEditRef = useRef<{ from: number; to: number } | null>(null);
     const [linkDialog, setLinkDialog] = useState<{ defaultText: string } | null>(null);
@@ -1397,14 +1432,34 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         TaskItem.configure({
           nested: true,
         }),
-        // 高亮标记（==text==）同样去掉 (?:^|\s) 前缀限制，支持行中即时渲染
+        // 高亮标记（==text==）同样去掉 (?:^|\s) 前缀限制，支持行中即时渲染；
+        // multicolor 打开多色高亮（荧光笔）。
         Highlight.extend({
           addInputRules() {
             return [
               markInputRule({ find: /(==(?!\s+==)((?:[^=]+))==(?!\s+==))$/, type: this.type }),
             ];
           },
-        }),
+          // 去掉默认 renderHTML 里的 `color: inherit`：荧光笔底色是浅色，
+          // 前景统一交给 theme.css 的深墨色（否则深色主题下会变成浅字浅底，
+          // 而行内 style 优先级高于样式表，改不动）。
+          addAttributes() {
+            const parent = (this.parent?.() ?? {}) as Record<string, any>;
+            if (!parent.color) return parent;
+            return {
+              ...parent,
+              color: {
+                ...parent.color,
+                renderHTML: (attributes: Record<string, any>) =>
+                  attributes.color
+                    ? { "data-color": attributes.color, style: `background-color: ${attributes.color}` }
+                    : {},
+              },
+            };
+          },
+        }).configure({ multicolor: true }),
+        // 文字颜色（渲染成 <span style="color: …">，见 extensions/text-color.ts）
+        TextColor,
         Typography,
         Markdown.configure({
           html: true,
@@ -1468,6 +1523,13 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         }
       },
       onSelectionUpdate: ({ editor: ed }) => {
+        // 选区收起时关掉「划选弹出的格式菜单」。
+        // 只关这一类（placement === "above"）：右键菜单没这个标记，不能被误关 ——
+        // 右键本身会改变选区，若在这里无条件关闭，右键菜单会立刻消失。
+        if (ed.state.selection.empty) {
+          setContextMenuPos((cur) => (cur && cur.placement === "above" ? null : cur));
+        }
+
         // macOS WebKit：折叠后清原生残留（跨块选区后尤其明显）
         if (isPlatformMacos() && ed.state.selection.empty) {
           requestAnimationFrame(() => syncCollapsedDomSelection(getEditorView(ed), macPointerHadDomRange));
@@ -2488,6 +2550,58 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       },
     }));
 
+    // ── 荧光笔（多色高亮） ──────────────────────────────────────────────
+    // 当前颜色 / 是否处于荧光笔模式放在模块级 store（Editor/highlighter.ts），
+    // 右键菜单与快捷键派发共用同一份，这里订阅即可拿到最新值，无需层层透传 props。
+    const highlighterColor = useSyncExternalStore(subscribeHighlighter, getHighlighterColor);
+    const highlighterMode = useSyncExternalStore(subscribeHighlighter, getHighlighterMode);
+
+    // 荧光笔模式：在编辑器上「划」完一次（mouseup）就给这个选区上色。
+    // 用 mouseup 而不是 selectionUpdate —— 拖选过程中 selectionUpdate 会连续触发，
+    // 一次划选会灌进几十条撤销记录。
+    useEffect(() => {
+      if (!editor || !highlighterMode || mode !== "ir") return;
+      const dom = editor.view.dom;
+      // 必须区分「这一下是按在正文上」还是「刚点了菜单按钮」：
+      // 菜单项的 onMouseDown 会立刻关闭菜单，紧接着的 mouseup 就落到了正文上，
+      // 若不区分，点「清除高亮」后高亮会被这次 mouseup 立刻加回来。
+      let gestureStartedInEditor = false;
+      const onMouseDown = (e: MouseEvent) => {
+        gestureStartedInEditor = e.button === 0;
+      };
+      const applyHighlight = () => {
+        const startedHere = gestureStartedInEditor;
+        gestureStartedInEditor = false;
+        if (!startedHere) return;
+        if (!isEditorAlive(editor)) return;
+        const { empty } = editor.state.selection;
+        if (empty) return;
+        // 已经是该颜色就不重复写事务（省掉无谓的撤销记录与重渲染）
+        if (editor.isActive("highlight", { color: highlighterColor })) return;
+        editor.chain().setHighlight({ color: highlighterColor }).run();
+      };
+      dom.addEventListener("mousedown", onMouseDown);
+      dom.addEventListener("mouseup", applyHighlight);
+      return () => {
+        dom.removeEventListener("mousedown", onMouseDown);
+        dom.removeEventListener("mouseup", applyHighlight);
+      };
+    }, [editor, highlighterMode, highlighterColor, mode]);
+
+    // Esc 退出荧光笔模式：它是「工具」语义，避免忘了还开着、之后每次划选都上色
+    useEffect(() => {
+      if (!highlighterMode) return;
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") setHighlighterMode(false);
+      };
+      window.addEventListener("keydown", onKeyDown, true);
+      return () => window.removeEventListener("keydown", onKeyDown, true);
+    }, [highlighterMode]);
+
+    const highlighterColorName = i18n.t(
+      highlightColorOption(highlighterColor)?.labelKey ?? HIGHLIGHT_COLORS[0].labelKey,
+    );
+
     // 外部 value 同步
     // 追踪上一次的 mode，用于检测 SV→IR 切换
     const prevModeRef = useRef(mode);
@@ -2501,13 +2615,20 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       const modeSwitchedToIR = prevModeRef.current === "sv" && mode === "ir";
       prevModeRef.current = mode;
 
-      if (isInternalRef.current) {
-        isInternalRef.current = false;
-        if (!modeSwitchedToIR) return;
-        // mode 切换导致的 isInternalRef 残留：清除标志但继续同步
-      }
       const fileChanged = prevFilePathRef.current !== currentFilePath;
       prevFilePathRef.current = currentFilePath;
+
+      // isInternalRef 的语义只是「这一次程序化改动别回传给 onChange」，它靠 onUpdate 清除。
+      // 但程序化 setContent 若没让文档发生变化（内容等价、或被规范化成同一个文档），
+      // @tiptap/core 不会发 update —— dispatchTransaction 里
+      // `prevState.doc.eq(state.doc)` 时直接 return（见 @tiptap/core 的 dispatchTransaction）。
+      // 这时标志就残留下来，把**下一次**外部同步静默吞掉，表现为
+      // 「点了另一个文件，编辑器还停在旧文件的内容上」。
+      // 所以 fileChanged 必须在吞标志之前算出来：真正的文件切换（以及 SV→IR）优先级更高。
+      if (isInternalRef.current) {
+        isInternalRef.current = false;
+        if (!fileChanged && !modeSwitchedToIR) return;
+      }
 
       if (fileChanged || modeSwitchedToIR) {
         // 文件切换或从 SV 切换回 IR 时强制更新内容
@@ -2518,6 +2639,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           // 注意：SV → IR 的模式切换不再在这里重置——光标与滚动位置由上方
           // 「跨模式位置保持」逻辑按切换前记录的位置恢复。
           editor.commands.setTextSelection(1);
+          // 丢弃上一个文件的撤销历史：否则切文件后按 Ctrl+Z 会把旧文件内容撤回来。
+          // 必须放在 setContent 之后 —— 换文档那次事务本身也不能留在栈里。
+          dropUndoHistory(editor);
           requestAnimationFrame(() => {
             const scrollContainer = containerRef.current?.querySelector('.tiptap-editor');
             if (scrollContainer) {
@@ -2551,6 +2675,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           }
         }
       }
+
+      // 兜底清标志：这一次程序化改动若没产生 update（内容等价 / 只改了选区），
+      // onUpdate 不会被调用，标志会一直挂着去吞下一次同步。
+      // onUpdate 是同步派发的（view.dispatch → Editor.dispatchTransaction → emit），
+      // 正常路径在上面已经清掉了，这里再清一次，保证标志绝不跨过本次 effect。
+      isInternalRef.current = false;
     }, [value, editor, currentFilePath, mode]);
 
     // 在 IR ↔ SV 之间切换时保留焦点、光标与滚动位置：
@@ -2707,10 +2837,83 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         e.preventDefault();
         openContextMenuAt(e.clientX, e.clientY);
       };
+      /**
+       * 点正文下方的空白（ProseMirror 自己的 padding / min-height 区域）：
+       * 最后一行不是空行时补一行空行，并把光标放进这一行（Typora / Obsidian 的手感）。
+       *
+       * 用冒泡阶段而不是捕获：ProseMirror 自己的 mousedown 会先把光标放到最近的合法位置，
+       * 我们再补段落、最后 focus("end")，顺序才对。
+       */
+      const onBlankAreaMouseDown = (e: MouseEvent) => {
+        if (e.button !== 0) return;
+        if (!isEditorAlive(editor) || !editor.isEditable) return;
+        const view = getEditorView(editor);
+        if (!view) return;
+        // 只有「点在 ProseMirror 自己身上」才算空白：点在段落/列表里时 target 是那些元素；
+        // 点在正文左右两侧的居中留白（max-width 之外）时 target 是滚动容器 —— 都不该触发。
+        if (e.target !== view.dom) return;
+        // 再按纵坐标确认确实在正文最后一块的**下面**：上方 padding 里点也会命中 view.dom
+        let lastEl = view.dom.lastElementChild as HTMLElement | null;
+        while (lastEl && lastEl.classList.contains("ProseMirror-gapcursor")) {
+          lastEl = lastEl.previousElementSibling as HTMLElement | null;
+        }
+        if (!lastEl || e.clientY <= lastEl.getBoundingClientRect().bottom) return;
+
+        const last = editor.state.doc.lastChild;
+        // 末尾已经是空行（空段落/空代码块）就别再加，把光标放进去即可
+        const alreadyBlank = !!last && last.isTextblock && last.content.size === 0;
+        if (!alreadyBlank) {
+          // 在文档末尾追加空段落（不用 splitBlock：那会把最后一块的内容切成两半）
+          editor.chain().insertContentAt(editor.state.doc.content.size, { type: "paragraph" }).run();
+        }
+        editor.chain().focus("end").run();
+      };
+      /**
+       * 划选文本后自动弹出格式菜单（不用右键）：浮在选区上方。
+       *
+       * 用 mouseup 驱动而不是监听 selectionUpdate，是为了避免「点菜单里的加粗 → 菜单又弹回来」：
+       * 点菜单按钮不会触发编辑器的 mouseup，所以不会重新打开；而重新划选一定会再 mouseup。
+       */
+      const onSelectionMouseUp = (e: MouseEvent) => {
+        if (e.button !== 0) return;
+        if (!isEditorAlive(editor) || !editor.isEditable) return;
+        // 荧光笔模式下划选本身就是在上色，弹菜单会挡住正文，那种模式不弹
+        if (getHighlighterMode()) return;
+        const view = getEditorView(editor);
+        if (!view) return;
+        const { selection } = editor.state;
+        if (selection.empty) {
+          // 松开时没有选中内容（普通点击）：收起之前因划选弹出的菜单
+          setContextMenuPos((cur) => (cur && cur.placement === "above" ? null : cur));
+          return;
+        }
+        try {
+          const start = view.coordsAtPos(selection.from);
+          const end = view.coordsAtPos(selection.to);
+          setContextMenuPos({
+            x: Math.min(start.left, end.left),
+            y: Math.min(start.top, end.top),
+            placement: "above",
+          });
+        } catch {
+          // 视图正在重建等情况下取不到坐标：保持原菜单状态即可
+        }
+      };
+      /** 左键按下就开始新的选择/取消选择：先收起划选菜单，mouseup 时再按新选区决定是否弹出。 */
+      const onEditorMouseDownForBubble = (e: MouseEvent) => {
+        if (e.button !== 0) return;
+        setContextMenuPos((cur) => (cur && cur.placement === "above" ? null : cur));
+      };
       el.addEventListener("mousedown", onMouseDownCapture, true);
+      el.addEventListener("mousedown", onBlankAreaMouseDown);
+      el.addEventListener("mousedown", onEditorMouseDownForBubble);
+      el.addEventListener("mouseup", onSelectionMouseUp);
       el.addEventListener("contextmenu", onContextMenuCapture, true);
       return () => {
         el.removeEventListener("mousedown", onMouseDownCapture, true);
+        el.removeEventListener("mousedown", onBlankAreaMouseDown);
+        el.removeEventListener("mousedown", onEditorMouseDownForBubble);
+        el.removeEventListener("mouseup", onSelectionMouseUp);
         el.removeEventListener("contextmenu", onContextMenuCapture, true);
       };
     }, [openContextMenuAt, mode, editor]);
@@ -2718,6 +2921,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     if (mode === "sv") {
       return (
         <CodeMirrorEditor
+          // 源码模式：把编辑器实例绑定到文件身份上。
+          // CodeMirror 的 undo 历史存在 StateField 里，重挂载是唯一干净的清空方式
+          // （setState 需要重建 extensions，会丢掉 Compartment 里动态注入的
+          // vim / 高亮配置）。不换 key 的话，切到另一个 .md 时 languageExtension
+          // 不变、view 被复用，Ctrl+Z 同样会把上一个文件的内容撤回来。
+          key={currentFilePath ?? ""}
           ref={sourceEditorRef}
           value={value}
           onChange={onChange}
@@ -2731,7 +2940,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
 
     return (
       <div
-        className={`editor-wrapper${typewriterMode ? ' typewriter-mode' : ''}${irLineNumbers === false ? ' hide-ir-line-numbers' : ''}`}
+        className={`editor-wrapper${typewriterMode ? ' typewriter-mode' : ''}${irLineNumbers === false ? ' hide-ir-line-numbers' : ''}${highlighterMode ? ' highlighter-mode' : ''}`}
         style={{
           '--editor-max-width': previewMaxWidth ? `${previewMaxWidth}px` : '880px',
           '--editor-line-height': lineHeight ?? 1.6,
@@ -2739,6 +2948,13 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           '--code-line-height': codeLineHeight ?? 1.5,
         } as React.CSSProperties}
       >
+        {highlighterMode && (
+          <div className="highlighter-indicator">
+            <span className="highlighter-indicator-dot" style={{ background: highlighterColor }} />
+            <span>{i18n.t("editor.highlighter.activeHint", { color: highlighterColorName })}</span>
+            <kbd>Esc</kbd>
+          </div>
+        )}
         <div
           ref={containerRef}
           className="editor-container"

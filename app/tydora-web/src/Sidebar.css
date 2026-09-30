@@ -8,17 +8,39 @@
   flex-direction: column;
   overflow: hidden;
   flex-shrink: 0;
+  /* 折叠/展开的平滑收放：width 由内联 style 驱动，分割线宽度同步过渡，
+     内容被 overflow:hidden 逐步裁切，看上去就是"慢慢展开"。
+     App.tsx 里 sidebarOpen 变化后会补一次 resize（过渡结束后）。 */
+  transition: width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+              border-right-width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+              border-left-width 0.26s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .sidebar.collapsed {
   width: 0;
   min-width: 0;
-  border-right: none;
+  border-right-width: 0;
 }
 
+/* 右栏的分割线在左侧 */
+.sidebar.sidebar-right.collapsed {
+  border-left-width: 0;
+}
+
+/* 拖拽调整宽度时必须即时跟手，不能有过渡 */
 .sidebar.resizing {
+  transition: none;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* 折叠/展开时内容淡入淡出，避免宽度还在动、内容已经"跳"没了 */
+.sidebar > * {
+  transition: opacity 0.18s ease;
+}
+
+.sidebar.collapsed > * {
+  opacity: 0;
 }
 
 /* ── 顶部透明栏（默认无高度；macOS 红绿灯占位见 global.css） ── */

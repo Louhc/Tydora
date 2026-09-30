@@ -52,7 +52,7 @@ import PublishConfigDialog from "./publish/PublishConfigDialog";
 import { CONFIG_FILE } from "./publish/PublishService";
 import { buildIndexesTogether, persistIndexesToStorage, restoreIndexesFromCache } from "./services/index-builder";
 import { setWelcomeVaultDir } from "./services/welcomeVault";
-
+import { consumeEditorFocusSuppression } from "./services/editorFocusIntent";
 // 关系图谱 / 白板仅在打开时渲染，按需加载（避免 d3、@xyflow 进入首屏 bundle）
 const GraphView = lazy(() => import("./graph").then((m) => ({ default: m.GraphView })));
 const EmbeddedCanvasView = lazy(async () => {
@@ -1295,9 +1295,19 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     });
   }, []);
 
-  useEffect(() => { notifyResize(); }, [sidebarOpen]);
+  // 折叠/展开是 260ms 的宽度过渡（见 Sidebar.css），动画中途量到的宽度不是最终值，
+  // 所以过渡结束后再补一次 resize，避免编辑器宽度停在中间态。
+  useEffect(() => {
+    notifyResize();
+    const timer = window.setTimeout(notifyResize, 300);
+    return () => window.clearTimeout(timer);
+  }, [sidebarOpen, notifyResize]);
   useEffect(() => { notifyResize(); }, [sidebarWidth]);
-  useEffect(() => { notifyResize(); }, [rightSidebarOpen]);
+  useEffect(() => {
+    notifyResize();
+    const timer = window.setTimeout(notifyResize, 300);
+    return () => window.clearTimeout(timer);
+  }, [rightSidebarOpen, notifyResize]);
   useEffect(() => { notifyResize(); }, [rightSidebarWidth]);
 
   // 激活窗格变化后自动聚焦该窗格的编辑器（统一处理分屏/关闭/导航/点击等所有场景）。
@@ -1900,6 +1910,9 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
 
   const openFile = useCallback(async (path: string, line?: number, query?: string) => {
     const myGeneration = openFileGenerationRef.current;
+    // 侧栏新建文件后会立刻打开它，但紧接着要让用户留在文件名输入框里改名。
+    // 这种「程序化打开」不要抢焦点（见 services/editorFocusIntent）。
+    const keepFocusOutsideEditor = consumeEditorFocusSuppression(path);
     try {
       setPreviewFilePath(null); // 关闭预览模式
       setCanvasFilePath(null); // 关闭白板模式
@@ -1991,16 +2004,19 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
       }
 
       // 文件打开完成后：延迟 focus 到目标编辑器窗格（等 React re-render 完，handle 已注册到 paneHandlesRef）
-      setTimeout(() => {
-        const h = paneHandlesRef.current[targetPaneId];
-        if (h) {
-          h.focus();
-          if (targetPaneId === activePaneIdRef.current) editorHandleRef.current = h;
-        } else {
-          // 兜底：单编辑器模式（没有 panes / renderPane），直接 codeMirrorRef
-          codeMirrorRef.current?.focus();
-        }
-      }, 60);
+      // 例外：新建文件后的程序化打开要把焦点留给侧栏的文件名输入框，否则用户敲的字会落进正文。
+      if (!keepFocusOutsideEditor) {
+        setTimeout(() => {
+          const h = paneHandlesRef.current[targetPaneId];
+          if (h) {
+            h.focus();
+            if (targetPaneId === activePaneIdRef.current) editorHandleRef.current = h;
+          } else {
+            // 兜底：单编辑器模式（没有 panes / renderPane），直接 codeMirrorRef
+            codeMirrorRef.current?.focus();
+          }
+        }, 60);
+      }
     } catch (e) {
       console.error(t("app.error.openFileFailed"), e);
     }
@@ -3130,6 +3146,41 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
 
   // Vim 窗口导航：Ctrl+w h/j/k/l 切换焦点
   useWindowNavigation();
+
+  // 监听文件树里的重命名 / 移动：把已打开该文件（或其后代）的 buffer 指向新路径。
+  // 不改的话 buffer 还留着旧路径，自动保存会照着旧路径再写一份文件出来
+  // （典型场景：新建文件后紧接着在内联输入框里改名，见 Sidebar 的 rename() 包装）。
+  useEffect(() => {
+    const handleFileRenamed = (e: Event) => {
+      const detail = (e as CustomEvent<{ oldPath?: string; newPath?: string }>).detail;
+      const oldPath = detail?.oldPath;
+      const newPath = detail?.newPath;
+      if (!oldPath || !newPath || oldPath === newPath) return;
+
+      // 目录改名时其后代路径也要跟着改；文件改名不会有以 `文件路径 + 分隔符`
+      // 开头的 buffer，所以统一做前缀匹配是安全的，不需要区分文件/目录。
+      const prefix = oldPath + (oldPath.includes("\\") ? "\\" : "/");
+      setBuffers((bs) => {
+        let changed = false;
+        const next = bs.map((b) => {
+          if (!b.fileName) return b;
+          if (b.fileName === oldPath) {
+            changed = true;
+            return { ...b, fileName: newPath };
+          }
+          if (b.fileName.startsWith(prefix)) {
+            changed = true;
+            return { ...b, fileName: newPath + b.fileName.slice(oldPath.length) };
+          }
+          return b;
+        });
+        // 没有匹配到就返回原引用，避免无谓的重渲染
+        return changed ? next : bs;
+      });
+    };
+    window.addEventListener("file-renamed", handleFileRenamed);
+    return () => window.removeEventListener("file-renamed", handleFileRenamed);
+  }, []);
 
   // 监听 wikilink 点击
   useEffect(() => {

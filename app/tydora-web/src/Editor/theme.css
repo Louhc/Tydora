@@ -1740,6 +1740,65 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   -webkit-box-decoration-break: clone;
 }
 
+/* 多色高亮（荧光笔）：颜色由行内 style 的 background-color 提供
+   （renderHTML 同时写 data-color，Markdown 往返靠它）。
+   必须关掉上面那条渐变 —— background-image 画在 background-color 之上，
+   不关掉就完全看不见颜色。 */
+.tiptap-editor mark[data-color] {
+  background-image: none;
+  /* 调色板都是浅色底，前景固定深墨色：沿用主题前景色的话，
+     深色主题下会变成浅字浅底。 */
+  color: var(--highlight-ink, #26282c);
+}
+
+/* 荧光笔模式：提示当前处于「划选即高亮」状态 */
+.editor-wrapper.highlighter-mode {
+  /* 给悬浮提示条做定位参照 */
+  position: relative;
+}
+
+.editor-wrapper.highlighter-mode .ProseMirror {
+  cursor: crosshair;
+}
+
+.highlighter-indicator {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #e0e0e0);
+  background: var(--bg-primary, #fff);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  white-space: nowrap;
+  /* 悬浮在正文之上，绝不能挡住划选（会吃掉 mouseup） */
+  pointer-events: none;
+}
+
+.highlighter-indicator-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border, #e0e0e0);
+  flex-shrink: 0;
+}
+
+.highlighter-indicator kbd {
+  font-size: 10px;
+  font-family: inherit;
+  padding: 1px 5px;
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 3px;
+  color: var(--text-primary, #333);
+}
+
 /* 代码块工具栏 — 纵向间距由编辑器 flex gap 负责 */
 .code-block-toolbar-wrapper {
   position: relative;
@@ -2502,6 +2561,24 @@ html:not([data-code-block-toolbar="classic"]) .code-block-content {
   color: var(--text-secondary, #999);
   font-size: 11px;
   margin-left: 16px;
+}
+
+/* 荧光笔调色板：色块 + 勾选态 */
+.context-menu-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--border, #e0e0e0);
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.context-menu-check {
+  display: flex;
+  align-items: center;
+  color: var(--accent, #3b82f6);
+  margin-left: 16px;
+  flex-shrink: 0;
 }
 
 .context-menu-arrow {

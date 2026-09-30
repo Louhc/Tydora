@@ -1001,6 +1001,7 @@
       "deleteFailed": "删除失败:",
       "openLocationFailed": "打开文件位置失败:",
       "renameFailed": "重命名失败:",
+      "nameExists": "该位置已存在同名文件或文件夹：{{name}}",
       "duplicateFailed": "创建副本失败:",
       "duplicateAndCopyFailed": "创建副本并复制到剪切板失败:",
       "copyToClipboardFailed": "复制到剪切板失败:",
@@ -1066,7 +1067,30 @@
       "codeBlock": "代码块",
       "mathBlock": "公式块",
       "toc": "内容目录",
-      "wikiLink": "WikiLink"
+      "wikiLink": "WikiLink",
+      "highlighterMode": "荧光笔",
+      "clearHighlight": "清除高亮",
+      "textColor": "文字颜色",
+      "defaultColor": "默认颜色"
+    },
+    "textColor": {
+      "red": "红色",
+      "orange": "橙色",
+      "green": "绿色",
+      "blue": "蓝色",
+      "violet": "紫色",
+      "pink": "粉色"
+    },
+    "highlightColor": {
+      "yellow": "黄色",
+      "green": "绿色",
+      "blue": "蓝色",
+      "pink": "粉色",
+      "purple": "紫色",
+      "orange": "橙色"
+    },
+    "highlighter": {
+      "activeHint": "荧光笔（{{color}}）· 划选文字即高亮"
     },
     "tocBlock": {
       "title": "目录",

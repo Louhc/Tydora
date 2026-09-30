@@ -1,13 +1,26 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { executeCommand } from "./extensions/custom-commands";
 import { loadShortcuts, formatShortcutDisplay } from "./shortcuts";
 import type { ShortcutItem } from "./shortcuts";
 import type { Editor } from "@tiptap/core";
 import { useTranslation } from "react-i18next";
+import {
+  HIGHLIGHT_COLORS,
+  getHighlighterColor,
+  getHighlighterMode,
+  setHighlighterColor,
+  subscribeHighlighter,
+} from "./highlighter";
+import { TEXT_COLORS } from "./extensions/text-color";
 
 interface ContextMenuProps {
   editor: Editor | null;
-  position: { x: number; y: number } | null;
+  /**
+   * 菜单锚点。
+   * - 不带 placement：锚点 = 鼠标落点，向右下展开（右键菜单）；
+   * - placement: "above"：菜单浮在锚点**上方**，锚点取选区的左上角（划选文本时自动弹出）。
+   */
+  position: { x: number; y: number; placement?: "above" } | null;
   onClose: () => void;
 }
 
@@ -18,12 +31,29 @@ interface IconItem {
   icon: React.ReactNode;
 }
 
+interface SubmenuEntry {
+  name: string;
+  label: string;
+  shortcutId: string | null;
+  icon?: React.ReactNode;
+  /** 颜色色块（荧光笔调色板用）*/
+  swatch?: string;
+  /** 勾选态（当前荧光笔颜色/ 模式开关） */
+  checked?: boolean;
+}
+
 interface SubmenuItem {
   name: string;
   label: string;
   icon?: React.ReactNode;
-  submenu?: Array<{ name: string; label: string; shortcutId: string | null; icon?: React.ReactNode } | { divider: true; label: string }>;
+  submenu?: Array<SubmenuEntry | { divider: true; label: string }>;
 }
+
+/** 荧光笔调色板选项的name 前缀，点击时由本组件直接处理（不进executeCommand）。*/
+const HIGHLIGHT_COLOR_PREFIX = "highlight-color:";
+
+/** 文字颜色调色板选项的name 前缀（同上）。*/
+const TEXT_COLOR_PREFIX = "text-color:";
 
 const ICONS = {
   cut: (
@@ -149,6 +179,26 @@ const ICONS = {
       <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="14" y2="12" /><line x1="4" y1="18" x2="17" y2="18" />
     </svg>
   ),
+  pen: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15.5 3.5a2.12 2.12 0 013 3L9 16l-4 1 1-4z" /><path d="M4 21h16" />
+    </svg>
+  ),
+  eraser: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 20H8.5L3 14.5a1.5 1.5 0 010-2.1l6.9-6.9a1.5 1.5 0 012.1 0l7 7a1.5 1.5 0 010 2.1z" /><line x1="9" y1="9" x2="16" y2="16" />
+    </svg>
+  ),
+  check: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  ),
+  textColor: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5.5 16.5 11 4.5h1.2l5.5 12" /><line x1="7.8" y1="12.6" x2="15.6" y2="12.6" /><line x1="4" y1="20.5" x2="20" y2="20.5" />
+    </svg>
+  ),
 };
 
 // 三行图标按钮配置（使用工厂函数以便 i18n）
@@ -231,8 +281,69 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   const [submenuPos, setSubmenuPos] = useState<{ x: number; y: number } | null>(null);
   const [shortcuts, setShortcuts] = useState<ShortcutItem[]>([]);
 
+  // 荧光笔的当前颜色 / 模式与编辑器共用同一份模块级状态（Editor/highlighter.ts）
+  const highlighterColor = useSyncExternalStore(subscribeHighlighter, getHighlighterColor);
+  const highlighterMode = useSyncExternalStore(subscribeHighlighter, getHighlighterMode);
+
   const iconRows = createIconRows(t);
-  const submenuItems = createSubmenuItems(t);
+
+  // 「高亮/ 荧光笔」子菜单：模式开关+ 6 色调色板（带勾选态）+ 清除
+  const highlightSubmenu = useMemo<SubmenuItem>(() => ({
+    name: "highlight",
+    label: t("editor.contextMenu.highlight"),
+    icon: ICONS.pen,
+    submenu: [
+      {
+        name: "highlighter-mode",
+        label: t("editor.contextMenu.highlighterMode"),
+        shortcutId: null,
+        icon: ICONS.pen,
+        checked: highlighterMode,
+      },
+      { divider: true, label: "" },
+      ...HIGHLIGHT_COLORS.map((c) => ({
+        name: `${HIGHLIGHT_COLOR_PREFIX}${c.color}`,
+        label: t(c.labelKey),
+        shortcutId: null,
+        swatch: c.color,
+        checked: c.color.toLowerCase() === highlighterColor.toLowerCase(),
+      })),
+      { divider: true, label: "" },
+      {
+        name: "highlight-clear",
+        label: t("editor.contextMenu.clearHighlight"),
+        shortcutId: null,
+        icon: ICONS.eraser,
+      },
+    ],
+  }), [t, highlighterColor, highlighterMode]);
+
+  // 「文字颜色」子菜单：6 色（中间调，明暗主题都能读）+ 默认色
+  const textColorSubmenu = useMemo<SubmenuItem>(() => ({
+    name: "text-color",
+    label: t("editor.contextMenu.textColor"),
+    icon: ICONS.textColor,
+    submenu: [
+      ...TEXT_COLORS.map((c) => ({
+        name: `${TEXT_COLOR_PREFIX}${c.color}`,
+        label: t(c.labelKey),
+        shortcutId: null,
+        swatch: c.color,
+      })),
+      { divider: true, label: "" },
+      {
+        name: "text-color-clear",
+        label: t("editor.contextMenu.defaultColor"),
+        shortcutId: null,
+        icon: ICONS.eraser,
+      },
+    ],
+  }), [t]);
+
+  const submenuItems = useMemo(
+    () => [...createSubmenuItems(t), highlightSubmenu, textColorSubmenu],
+    [t, highlightSubmenu, textColorSubmenu],
+  );
 
   useEffect(() => {
     if (position) {
@@ -284,12 +395,13 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       const GAP = 4;
 
       let left = position.x;
-      let top = position.y;
+      // 划选弹出时浮在选区上方（锚点是选区左上角）；右键时锚点就是鼠标落点、向右下展开
+      let top = position.placement === "above" ? position.y - rect.height - 8 : position.y;
 
       if (left + rect.width > window.innerWidth - GAP) {
         left = position.x - rect.width;
       }
-      if (top + rect.height > window.innerHeight - GAP) {
+      if (position.placement !== "above" && top + rect.height > window.innerHeight - GAP) {
         top = position.y - rect.height;
       }
       if (left < GAP) left = GAP;
@@ -303,6 +415,31 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   const handleItemClick = (name: string) => {
     if (!editor) return;
     executeCommand(name, editor);
+    onClose();
+    setActiveSubmenu(null);
+  };
+
+  /**
+   * 荧光笔调色板：选中颜色即设为「当前颜色」，并在有选区时立刻给选区内文字上色。
+   * 没有选区时只记住颜色，配合「荧光笔模式」使用。
+   */
+  const handleHighlightColor = (color: string) => {
+    setHighlighterColor(color);
+    if (editor && !editor.state.selection.empty) {
+      editor.chain().focus().setHighlight({ color }).run();
+    }
+    onClose();
+    setActiveSubmenu(null);
+  };
+
+  /**
+   * 文字颜色：直接给选区上色。
+   * 没有选区时 setMark 会记进 storedMarks，接着输入的文字就用这个颜色（符合预期）。
+   */
+  const handleTextColor = (color: string) => {
+    if (editor) {
+      editor.chain().focus().setTextColor(color).run();
+    }
     onClose();
     setActiveSubmenu(null);
   };
@@ -427,18 +564,31 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
                 if ('divider' in sub && sub.divider) {
                   return <div key={`sub-div-${subIdx}`} className="context-menu-divider" />;
                 }
-                const subItem = sub as { name: string; label: string; shortcutId: string | null; icon?: React.ReactNode };
+                const subItem = sub as SubmenuEntry;
                 return (
                   <button
                     key={subItem.name}
                     className="context-menu-item"
                     onMouseDown={(e) => {
                       e.preventDefault();
+                      if (subItem.name?.startsWith(HIGHLIGHT_COLOR_PREFIX)) {
+                        handleHighlightColor(subItem.name.slice(HIGHLIGHT_COLOR_PREFIX.length));
+                        return;
+                      }
+                      if (subItem.name?.startsWith(TEXT_COLOR_PREFIX)) {
+                        handleTextColor(subItem.name.slice(TEXT_COLOR_PREFIX.length));
+                        return;
+                      }
                       if (subItem.name) handleItemClick(subItem.name);
                     }}
                   >
-                    {subItem.icon && <span className="context-menu-icon">{subItem.icon}</span>}
+                    {subItem.swatch ? (
+                      <span className="context-menu-swatch" style={{ background: subItem.swatch }} />
+                    ) : subItem.icon ? (
+                      <span className="context-menu-icon">{subItem.icon}</span>
+                    ) : null}
                     <span className="context-menu-label">{subItem.label}</span>
+                    {subItem.checked && <span className="context-menu-check">{ICONS.check}</span>}
                     {getShortcutLabel(subItem.shortcutId, shortcuts) && (
                       <span className="context-menu-shortcut">
                         {getShortcutLabel(subItem.shortcutId, shortcuts)}
@@ -454,3 +604,4 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     </div>
   );
 }
+

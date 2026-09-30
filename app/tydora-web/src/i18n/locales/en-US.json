@@ -1001,6 +1001,7 @@
       "deleteFailed": "Delete failed:",
       "openLocationFailed": "Failed to open file location:",
       "renameFailed": "Rename failed:",
+      "nameExists": "A file or folder with this name already exists here: {{name}}",
       "duplicateFailed": "Failed to duplicate file:",
       "duplicateAndCopyFailed": "Failed to duplicate and copy to clipboard:",
       "copyToClipboardFailed": "Failed to copy to clipboard:",
@@ -1066,7 +1067,30 @@
       "codeBlock": "Code Block",
       "mathBlock": "Math Block",
       "toc": "Table of Contents",
-      "wikiLink": "WikiLink"
+      "wikiLink": "WikiLink",
+      "highlighterMode": "Highlighter",
+      "clearHighlight": "Clear highlight",
+      "textColor": "Text Color",
+      "defaultColor": "Default color"
+    },
+    "textColor": {
+      "red": "Red",
+      "orange": "Orange",
+      "green": "Green",
+      "blue": "Blue",
+      "violet": "Violet",
+      "pink": "Pink"
+    },
+    "highlightColor": {
+      "yellow": "Yellow",
+      "green": "Green",
+      "blue": "Blue",
+      "pink": "Pink",
+      "purple": "Purple",
+      "orange": "Orange"
+    },
+    "highlighter": {
+      "activeHint": "Highlighter ({{color}}) · select text to highlight"
     },
     "tocBlock": {
       "title": "Table of Contents",

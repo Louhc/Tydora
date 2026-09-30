@@ -1,15 +1,22 @@
 // src/tags/TagIndexService.ts
 
 import { readDir, readTextFile } from "@tauri-apps/plugin-fs";
+import { stripInlineHtml } from "../utils/markdownText";
 
 /** 解析 Markdown 文本中的所有 #标签 */
 export function parseTags(content: string): string[] {
   const tags = new Set<string>();
   // 匹配 #标签：以 # 开头，后面跟着非空白、非 #、非标点的字符
   // 支持中文、英文、数字、下划线、连字符、斜杠（如 #状态/待整理）
+  //
+  // 必须先剥掉行内 HTML：下面这个 lookbehind 把 `"` 也算作合法的前置字符，
+  // 是为了让 `他说"#重要"` 这种写法也能被识别；但彩色文字/高亮在 Markdown 里是
+  // `<span data-color="#e03131" …>` / `<mark data-color="#ffe58f" …>`，
+  // 于是 `#e03131`、`#ffe58f` 会被当成标签建进索引（颜色被误认成标签）。
   const regex = /(?<=^|\s|[\(\[\{，,。！？；;：:"'`])#([^\s#\]\)\}，,。！？；;：:"'`、/\\]+(?:\/[^\s#\]\)\}，,。！？；;：:"'`、/\\]+)*)/g;
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
+  const text = stripInlineHtml(content);
+  while ((match = regex.exec(text)) !== null) {
     const tag = match[1].trim();
     if (tag && !/^\d+$/.test(tag)) { // 排除纯数字（避免时间戳等误匹配）
       tags.add(tag);

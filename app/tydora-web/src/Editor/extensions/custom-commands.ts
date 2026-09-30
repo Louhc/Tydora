@@ -1,6 +1,7 @@
 import type { Editor } from "@tiptap/core";
 import { TextSelection } from "prosemirror-state";
 import type { Node } from "prosemirror-model";
+import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 
 export function executeCommand(name: string, editor: Editor | null) {
   if (!editor) return;
@@ -104,7 +105,19 @@ export function executeCommand(name: string, editor: Editor | null) {
       chain.toggleCode().run();
       break;
     case "highlight":
-      chain.toggleHighlight().run();
+      // 用当前荧光笔颜色：再按一次同样的颜色会取消高亮（toggle 语义）
+      chain.toggleHighlight({ color: getHighlighterColor() }).run();
+      break;
+    case "highlight-clear":
+      chain.unsetHighlight().run();
+      break;
+    case "text-color-clear":
+      chain.unsetTextColor().run();
+      break;
+    case "highlighter-mode":
+      // 荧光笔模式（划选即上色）由 Editor/highlighter.ts 的模块级状态驱动，
+      // TipTapEditor 订阅后自行挂/摘 mouseup 监听
+      toggleHighlighterMode();
       break;
     case "link": {
       const sel = window.getSelection();

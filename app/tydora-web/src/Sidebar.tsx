@@ -4,7 +4,7 @@ bootStamp("sidebar_module_imported");
 import { useTranslation } from "react-i18next";
 import i18n from "./i18n";
 import { createPortal } from "react-dom";
-import { readDir, readTextFile, writeTextFile, mkdir, remove, rename, exists } from "@tauri-apps/plugin-fs";
+import { readDir, readTextFile, writeTextFile, mkdir, remove, rename as fsRename, exists } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "./components";
 import { UpdateLinkDialog } from "./components";
@@ -179,14 +179,14 @@ function sortTreeNodes(nodes: TreeNode[], settings: FileSortSettings = currentSo
     switch (sortBy) {
       case "created": {
         const cmp = (a.ctime ?? 0) - (b.ctime ?? 0);
-        return cmp === 0 ? a.name.localeCompare(b.name) : cmp * dir;
+        return cmp === 0 ? compareTreeNames(a, b) : cmp * dir;
       }
       case "modified": {
         const cmp = (a.mtime ?? 0) - (b.mtime ?? 0);
-        return cmp === 0 ? a.name.localeCompare(b.name) : cmp * dir;
+        return cmp === 0 ? compareTreeNames(a, b) : cmp * dir;
       }
       default:
-        return a.name.localeCompare(b.name) * dir;
+        return compareTreeNames(a, b) * dir;
     }
   });
 }
@@ -219,6 +219,8 @@ function pathSep(): string {
 // ── 介绍仓库（welcome-vault）：文档按界面语言过滤显示 ────────────────
 
 import { isWelcomeVaultPath, welcomeVaultVisibleDocs } from "./services/welcomeVault";
+import { suppressEditorFocusForPath } from "./services/editorFocusIntent";
+import { stripInlineHtml } from "./utils/markdownText";
 
 /** 介绍仓库内按当前语言过滤文件节点：目录保留，文件只保留当前语言的文档。
  *  文件顺序强制按文档清单排列（欢迎/Welcome 恒在最上），不受文件树排序设置影响。 */
@@ -299,6 +301,39 @@ async function uniqueDirPath(dirPath: string, dirName: string): Promise<string> 
     const candidate = joinPath(dirPath, `${dirName} ${i}`);
     if (!(await exists(candidate))) return candidate;
   }
+}
+
+/**
+ * 目标路径是否已被**另一个**文件/文件夹占用。
+ *
+ * 必须自己挡这一道：Windows 上 rename 底层是
+ * `MoveFileEx(..., MOVEFILE_REPLACE_EXISTING)`，目标已存在时会**静默覆盖**
+ * 而不是报错（重命名/移动一个文件到已有同名文件上 = 直接毁掉对方内容）。
+ *
+ * 忽略大小写比较：仅改大小写时（`Foo.md` → `foo.md`）在 Windows 上仍是
+ * 同一个文件，属于合法操作，必须放行。
+ */
+async function conflictsWithExisting(fromPath: string, toPath: string): Promise<boolean> {
+  if (fromPath.toLowerCase() === toPath.toLowerCase()) return false;
+  return await exists(toPath);
+}
+
+/**
+ * 重命名 / 移动文件或目录的唯一出口（替代直接调用 fs 的 rename）。
+ *
+ * 成功之后广播新旧路径，让**已经打开**该文件（或其后代）的编辑器把 buffer 指到新路径。
+ * 不广播的话 buffer 还指着旧路径，之后的自动保存会照着旧路径再写一份文件出来 ——
+ * 新建文件后紧接着的内联重命名正是这条路径（`untitled.md` → 你输入的名字）。
+ *
+ * 用 window 事件而不是层层透传 props：与项目里 wiki-link-click / code-theme-changed
+ * 等既有做法一致，而且能一次性覆盖本文件里全部 10 多处 rename 调用点
+ * （内联重命名、移动到文件夹、拖拽移动、链接更新对话框）。
+ */
+async function rename(fromPath: string, toPath: string): Promise<void> {
+  await fsRename(fromPath, toPath);
+  window.dispatchEvent(
+    new CustomEvent("file-renamed", { detail: { oldPath: fromPath, newPath: toPath } }),
+  );
 }
 
 // ── Search ──────────────────────────────────────────────────────────
@@ -940,6 +975,39 @@ function isMarkdownFileName(name: string): boolean {
   return ["md", "markdown", "mdx"].includes(ext);
 }
 
+/**
+ * 文件树里展示用的名字：Markdown 文件隐藏扩展名（.md / .markdown / .mdx）。
+ *
+ * 只用于展示。内联重命名输入框、右键菜单、删除确认、排序都仍用完整文件名 ——
+ * 排序是按真实文件名（1.5.md / 1.md）比较的，展示名只影响观感；
+ * 重命名若用去掉扩展名的名字，直接失焦就会把 .md 改没。
+ */
+function displayFileName(name: string, isDirectory: boolean): string {
+  if (isDirectory || !isMarkdownFileName(name)) return name;
+  return name.replace(/\.(md|markdown|mdx)$/i, "");
+}
+
+/**
+ * 文件树排序用的比较器。
+ *
+ * 按**展示名**（去后缀）比较，所以 `1.md` 排在 `1.5.md` 之前 —— 按完整文件名
+ * 比较时差在 `.md` 的 `m` 与 `.5` 的 `5`，数字排在字母前，`1.5.md` 反而更靠前。
+ *
+ * `numeric: true` 打开数字自然排序：不然 `1.10.md` 会排到 `1.5.md` 前面
+ * （逐字符比较时 `1` < `5`）。不想要这个副作用的话去掉这个选项即可。
+ *
+ * 展示名相同时（如 `foo.md` 与 `foo.canvas`）用完整文件名兜底，保证排序稳定。
+ */
+const treeNameCollator = new Intl.Collator(undefined, { numeric: true });
+
+function compareTreeNames(a: TreeNode, b: TreeNode): number {
+  const byDisplay = treeNameCollator.compare(
+    displayFileName(a.name, a.isDirectory),
+    displayFileName(b.name, b.isDirectory),
+  );
+  return byDisplay !== 0 ? byDisplay : treeNameCollator.compare(a.name, b.name);
+}
+
 function getFileMenuItems(
   actions: FileActions,
   t: (key: string) => string,
@@ -1151,14 +1219,18 @@ function SearchResults({
   const highlightQuery = parsedTagQuery?.keyword || trimmedQuery;
 
   const highlight = (text: string, q: string) => {
-    if (!q) return text;
-    const idx = text.toLowerCase().indexOf(q.toLowerCase());
-    if (idx < 0) return text;
+    // 结果显示的是原始 Markdown 行，先剥掉行内 HTML：否则彩色文字会以
+    // `<span data-color="…">` 的形式出现在搜索结果里（同大纲那个问题）。
+    // 命中高亮在剥好的文本上重新算下标，所以不会错位。
+    const clean = stripInlineHtml(text);
+    if (!q) return clean;
+    const idx = clean.toLowerCase().indexOf(q.toLowerCase());
+    if (idx < 0) return clean;
     return (
       <>
-        {text.slice(0, idx)}
-        <mark>{text.slice(idx, idx + q.length)}</mark>
-        {text.slice(idx + q.length)}
+        {clean.slice(0, idx)}
+        <mark>{clean.slice(idx, idx + q.length)}</mark>
+        {clean.slice(idx + q.length)}
       </>
     );
   };
@@ -1316,9 +1388,16 @@ function TreeNodeComp({
     const targetDir = node.isDirectory ? node.path : parentPath(node.path);
     try {
       const filePath = await uniqueFilePath(targetDir, "untitled", ".md");
-      await writeTextFile(filePath, ""); await onReload(targetDir); onStartEdit(filePath);
+      await writeTextFile(filePath, "");
+      await onReload(targetDir);
+      // 新建后立刻打开：否则编辑器还停在上一个文件上，看起来像"没建成功"。
+      // 打开后再进内联重命名；改完名由 App 的 file-renamed 监听把 buffer 指到新路径。
+      // 打开时不要抢焦点，焦点要留给下面的文件名输入框。
+      suppressEditorFocusForPath(filePath);
+      onSelect(filePath);
+      onStartEdit(filePath);
     } catch (err) { console.error(i18n.t("sidebar.error.newFileFailed"), err); }
-  }, [node, onReload, onStartEdit]);
+  }, [node, onReload, onStartEdit, onSelect]);
 
   const handleNewFolder = useCallback(async () => {
     const targetDir = node.isDirectory ? node.path : parentPath(node.path);
@@ -1505,7 +1584,7 @@ function TreeNodeComp({
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="tree-name">{node.name}</span>
+          <span className="tree-name">{displayFileName(node.name, node.isDirectory)}</span>
         )}
       </div>
 
@@ -1889,6 +1968,12 @@ function FileTree({
     const p = parentPath(path);
     const newPath = joinPath(p, newName);
 
+    // 重名保护：命中时中止重命名并提示，绝不能落到 rename —— 那会覆盖同名文件的内容。
+    if (await conflictsWithExisting(path, newPath)) {
+      showToast(i18n.t("sidebar.error.nameExists", { name: newName }));
+      return;
+    }
+
     // 检查是否有受影响的 wiki links 和图片路径
     if (isDirectory) {
       // 文件夹：检查内部所有 .md 文件（wiki 链接 + 图片路径）
@@ -1932,6 +2017,14 @@ function FileTree({
     
     // 不能移动到自身所在目录
     if (targetFolder === parentPath(moveSourcePath)) {
+      setFolderPickerOpen(false);
+      setMoveSourcePath(null);
+      return;
+    }
+
+    // 目标目录已有同名项：与重命名同理（rename 会静默覆盖），中止并提示。
+    if (await conflictsWithExisting(moveSourcePath, targetPath)) {
+      showToast(i18n.t("sidebar.error.nameExists", { name: fileName }));
       setFolderPickerOpen(false);
       setMoveSourcePath(null);
       return;
@@ -2003,13 +2096,24 @@ function FileTree({
 
   const handleClearSelection = useCallback(() => {
     setSelectedPaths(new Set());
-  }, []);
+    // 点空白处 = 取消选择，并视作「选中仓库根目录」：
+    // 之后的「新建文件 / 文件夹 / 白板」落在仓库根目录，而不是继续落在上一次点过的
+    // 文件夹里（落点逻辑见 targetDirPathFor / selectionDir）。
+    // 顺带一提，根节点在树上是不可见的（rootNodes 装的是它的子项），所以这里不会
+    // 产生一个多余的选中高亮；键盘导航遇到不在列表里的路径也会自动落到第一项。
+    setPendingActivePath(rootPath);
+    pendingActivePathRef.current = rootPath;
+  }, [rootPath]);
 
   // ── Mouse-based Drag & Drop ──
   const handleMouseDown = useCallback((e: React.MouseEvent, nodePath: string, isDirectory: boolean) => {
     // Only left button
     if (e.button !== 0) return;
     dragStartRef.current = { x: e.clientX, y: e.clientY, path: nodePath, isDirectory };
+    // 登记为「树上当前节点」：文件夹点击只展开/折叠、不会走 onSelect，
+    // 不在 mousedown 这里登记的话，新建文件/文件夹的落点就永远算不到那个文件夹。
+    setPendingActivePath(nodePath);
+    pendingActivePathRef.current = nodePath;
   }, []);
 
   useEffect(() => {
@@ -2082,7 +2186,10 @@ function FileTree({
               const isDir = isDragDirectoryRef.current;
 
               // 检查是否有受影响的 wiki links 和图片路径
-              if (isDir) {
+              if (await conflictsWithExisting(srcPath, targetPath)) {
+                // 目标目录已有同名项：中止拖拽移动并提示（rename 会静默覆盖同名文件）。
+                showToast(i18n.t("sidebar.error.nameExists", { name: fileName }));
+              } else if (isDir) {
                 // 文件夹：检查内部所有 .md 文件（wiki 链接 + 图片路径）
                 const [wikiTotal, imgTotal] = await Promise.all([
                   !LinkIndexService.isEmpty() ? getAffectedLinkCountForFolder(srcPath, targetPath, rootPath) : Promise.resolve({ filesCount: 0, linksCount: 0 }),
@@ -2165,19 +2272,93 @@ function FileTree({
     return () => el.removeEventListener("selectstart", onSelectStart);
   }, []);
 
+  // ── Vim 键盘光标（pendingActivePath）：j/k 上下不打开文件，l/Enter 才打开 ──
+  // 同时充当「树上当前节点」：新建文件/文件夹的落点目录按它来算，
+  // 所以点文件夹也要登记（见 handleMouseDown）—— 点文件夹只展开/折叠，不会走 onSelect。
+  const [pendingActivePath, setPendingActivePath] = useState<string | null>(null);
+  const pendingActivePathRef = useRef<string | null>(null);
+  pendingActivePathRef.current = pendingActivePath;
+
   // ── Blank area actions ──
-  /** 当前选中文件所在目录；未选中或不在本仓库内时回退到根目录。 */
-  const selectionDir = activePath && activePath.startsWith(rootPath)
-    ? parentPath(activePath)
-    : rootPath;
+  /**
+   * 新建项的落点目录：树上当前节点是**文件夹** → 该文件夹内；是文件 → 它所在目录；
+   * 没有当前节点或不在本仓库内 → 仓库根目录。
+   *
+   * 关键是别统一取 parentPath：选中文件夹时那是它的父目录，新建的东西会跑到同级去
+   * （"点了文件夹却建在旁边"就是这么来的）。
+   * 当前节点优先用 pendingActivePath（树上最近交互的节点，文件/文件夹都会登记），
+   * 没有时回退到当前打开的文档路径。
+   */
+  /** 在已加载的树里按路径找节点；找不到返回 null（可能已被删除，或不在本仓库）。 */
+  const findNodeByPath = useCallback((nodes: TreeNode[], path: string): TreeNode | null => {
+    const stack = [...nodes];
+    while (stack.length) {
+      const cur = stack.shift()!;
+      if (cur.path === path) return cur;
+      if (cur.children) for (const c of cur.children) stack.unshift(c);
+    }
+    return null;
+  }, []);
+
+  /**
+   * 新建项的落点目录：当前节点是**文件夹** → 该文件夹内；是文件 → 它所在目录；
+   * 没有当前节点、或不在本仓库内 → 仓库根目录。
+   * 新建文件 / 文件夹 / 白板都走这里。
+   *
+   * 关键是别统一取 parentPath：选中文件夹时那是它的父目录，新建的东西会跑到同级去
+   * （"点了文件夹却建在旁边"就是这么来的）。
+   *
+   * 两处单独特判，都是为了别把东西建到仓库外面：
+   *   1) 仓库根目录本身：它不在 rootNodes 里（那里装的是根的子项），漏判会走到
+   *      parentPath(root) —— 仓库的上一级；
+   *   2) 仓库之外的路径（例如双击打开的仓库外文件）：落回根目录。
+   *      比较前统一分隔符并补 `/` 边界，否则 `C:\vault-old` 会被 `C:\vault` 前缀骗过。
+   */
+  const targetDirPathFor = useCallback((path: string | null): string => {
+    if (!path) return rootPath;
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+    const root = norm(rootPath);
+    const target = norm(path);
+    if (target === root) return rootPath;
+    if (!target.startsWith(`${root}/`)) return rootPath;
+    const n = findNodeByPath(rootNodesRef.current, path);
+    if (n?.isDirectory) return path;
+    return parentPath(path) || rootPath;
+  }, [findNodeByPath, rootPath]);
+
+  /**
+   * 落点目录 = 树上当前节点（最近交互的文件/文件夹）优先，没有则回退到当前打开的文档。
+   * 点空白处会把当前节点设为仓库根目录，所以「新建」就落在仓库下（见 handleClearSelection）。
+   */
+  const selectionDir = useMemo(
+    () => targetDirPathFor(pendingActivePath ?? activePath),
+    [targetDirPathFor, pendingActivePath, activePath],
+  );
+
+  /**
+   * 新建文件后在编辑器里立刻打开它，并把「最近交互节点」指过去
+   * （供键盘导航 h/j/k/l 等使用，与鼠标点击的行为保持一致）。
+   */
+  const openCreatedFile = useCallback((filePath: string) => {
+    // 接下来要用户留在文件名输入框里改名，这次打开不要抢焦点
+    suppressEditorFocusForPath(filePath);
+    setPendingActivePath(filePath);
+    pendingActivePathRef.current = filePath;
+    onSelect(filePath);
+  }, [onSelect]);
 
   const handleNewRootFile = useCallback(async () => {
     const targetDir = selectionDir;
     try {
       const filePath = await uniqueFilePath(targetDir, "untitled", ".md");
-      await writeTextFile(filePath, ""); await handleReload(ancestorDirs(targetDir, rootPath)); handleStartEdit(filePath);
+      await writeTextFile(filePath, "");
+      await handleReload(ancestorDirs(targetDir, rootPath));
+      // 新建后立刻打开：否则编辑器还停在上一个文件上，看起来像"没建成功"。
+      // 打开后再进内联重命名；改完名由 App 的 file-renamed 监听把 buffer 指到新路径。
+      openCreatedFile(filePath);
+      handleStartEdit(filePath);
     } catch (err) { console.error(i18n.t("sidebar.error.newFileFailed"), err); }
-  }, [selectionDir, rootPath, handleReload, handleStartEdit]);
+  }, [selectionDir, rootPath, handleReload, handleStartEdit, openCreatedFile]);
 
   const handleNewRootFolder = useCallback(async () => {
     const targetDir = selectionDir;
@@ -2189,10 +2370,13 @@ function FileTree({
 
   const handleNewRootWhiteboard = useCallback(async () => {
     try {
-      const filePath = await uniqueFilePath(rootPath, "untitled", ".canvas");
-      await writeTextFile(filePath, '{"nodes":[],"edges":[]}'); await handleReload(); handleStartEdit(filePath);
+      // 与新建文件/文件夹保持一致：落在当前选中项所在目录（选中文件夹则在其内）
+      const filePath = await uniqueFilePath(selectionDir, "untitled", ".canvas");
+      await writeTextFile(filePath, '{"nodes":[],"edges":[]}');
+      await handleReload(ancestorDirs(selectionDir, rootPath));
+      handleStartEdit(filePath);
     } catch (err) { console.error(i18n.t("sidebar.error.newCanvasFailed"), err); }
-  }, [rootPath, handleReload, handleStartEdit]);
+  }, [selectionDir, rootPath, handleReload, handleStartEdit]);
 
   const handleCopyRootPath = useCallback(() => {
     navigator.clipboard.writeText(rootPath).then(() => {
@@ -2291,11 +2475,6 @@ function FileTree({
     saveExpandedPaths(vaultPath, current);
   }, [vaultPath]);
 
-  // ── Vim 键盘光标（pendingActivePath）：j/k 上下不打开文件，l/Enter 才打开 ──
-  const [pendingActivePath, setPendingActivePath] = useState<string | null>(null);
-  const pendingActivePathRef = useRef<string | null>(null);
-  pendingActivePathRef.current = pendingActivePath;
-
   // 先序遍历，只把「当前可见」的项放入列表（目录未 expanded 时子项不进入）
   const flattenVisible = useCallback((nodes: TreeNode[]): TreeNode[] => {
     const out: TreeNode[] = [];
@@ -2308,23 +2487,6 @@ function FileTree({
     walk(nodes);
     return out;
   }, []);
-
-  const findNodeByPath = useCallback((nodes: TreeNode[], path: string): TreeNode | null => {
-    const stack = [...nodes];
-    while (stack.length) {
-      const cur = stack.shift()!;
-      if (cur.path === path) return cur;
-      if (cur.children) for (const c of cur.children) stack.unshift(c);
-    }
-    return null;
-  }, []);
-
-  const targetDirPathFor = useCallback((path: string | null): string => {
-    if (!path) return rootPath;
-    const n = findNodeByPath(rootNodesRef.current, path);
-    if (n?.isDirectory) return path;
-    return parentPath(path) || rootPath;
-  }, [findNodeByPath, rootPath]);
 
   // expand dir 并等待 loadDirectory 完成 + setState 完成
   const toggleDirExpanded = useCallback(async (path: string): Promise<boolean> => {
@@ -2562,7 +2724,8 @@ function FileTree({
               const filePath = await uniqueFilePath(target, "untitled", ".md");
               await writeTextFile(filePath, "");
               await handleReload(target);
-              setP(filePath);
+              // 新建后立刻打开（与工具栏 / 右键菜单一致）
+              openCreatedFile(filePath);
               handleStartEdit(filePath);
             } catch (err) { console.error(i18n.t("sidebar.error.newFileFailed"), err); }
           })();
@@ -2638,7 +2801,7 @@ function FileTree({
   }, [
     flattenVisible, findNodeByPath, targetDirPathFor, toggleDirExpanded, collapseDescendants,
     doConfirmOpen, handleCollapseAll, handleExpandAll, rootPath, handleReload, handleStartEdit,
-    handleMoveTo, handleMultiSelect, selectedPaths,
+    handleMoveTo, handleMultiSelect, selectedPaths, openCreatedFile,
   ]);
 
   const handleScroll = useCallback(() => {
@@ -2953,6 +3116,13 @@ interface OutlineNode {
   hasChildren: boolean;
 }
 
+/**
+ * 大纲标题文本：剥掉行内 HTML（彩色文字在 Markdown 里是 <span …> 标签，
+ * 详见 utils/markdownText.ts）。不剥的话：
+ *   1) 大纲直接把 `<span …>` 当标题文字显示出来；
+ *   2) 点击跳转是按标题文本匹配的（TipTapEditor 的 scrollToHeading 忽略行号），
+ *      带标签时精确匹配失效，只剩得分很低的"包含"匹配，同名前缀的标题还可能跳错。
+ */
 function parseOutline(markdown: string): OutlineItem[] {
   const items: OutlineItem[] = [];
   const lines = markdown.split("\n");
@@ -2989,7 +3159,8 @@ function parseOutline(markdown: string): OutlineItem[] {
     const m = rawLine.match(/^ {0,3}(#{1,6})(?:\s+(.+?))?\s*#*\s*$/);
     if (m) {
       // 文本部分可以为空（如 "###   " 也算合法空标题），但大纲里我们跳过空文本
-      const text = (m[2] ?? "").trim();
+      // 剥掉内联 HTML：彩色文字在 Markdown 里是 <span …> 标签，详见 stripInlineHtml
+      const text = stripInlineHtml((m[2] ?? "").trim());
       if (text) {
         items.push({ level: m[1].length, text, line: i + 1 });
       } else {
