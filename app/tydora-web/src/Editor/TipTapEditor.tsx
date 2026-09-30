@@ -2657,32 +2657,46 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           // 必须放在 setContent 之后 —— 换文档那次事务本身也不能留在栈里。
           dropUndoHistory(editor);
           requestAnimationFrame(() => {
-            const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
-            if (!scrollContainer) return;
-            // 先按惯例回到顶部，紧接着恢复「上次离开这个文件时的位置」。
-            // 放在同一个 rAF 里，顺序才确定：上一句刚置 0，下面覆盖成存档里的位置。
-            scrollContainer.scrollTop = 0;
-            const saved = loadFileViewPosition(currentFilePath);
-            let cursorOk = false;
-            if (saved) {
-              if (saved.mode === "ir") {
-                try {
-                  const size = editor.state.doc.content.size;
-                  const cursor = Math.max(1, Math.min(saved.cursor, size));
-                  editor.commands.setTextSelection(cursor);
-                  cursorOk = true;
-                  restoreIrScrollToRatio(cursor, saved.ratio, saved.scrollRatio);
-                } catch {
-                  cursorOk = false;
+            // 容器与视图可能还没就绪（TipTap 是延迟挂载的，首帧 DOM 里可能还没有 .tiptap-editor），
+            // 所以最多重试几帧。**无论最终成功与否都要解除写保护** —— 否则这个文件的
+            // 位置再也不会被记录，表现就是「每次刷新都回到文件开头」。
+            let attempts = 0;
+            const applyRestore = () => {
+              const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
+              if (!scrollContainer || !getEditorView(editor)) {
+                if (attempts++ < 12) {
+                  requestAnimationFrame(applyRestore);
+                  return;
+                }
+                pendingRestorePathRef.current = null;
+                return;
+              }
+              // 先按惯例回到顶部，紧接着恢复「上次离开这个文件时的位置」。
+              // 放在同一帧里，顺序才确定：上一句刚置 0，下面覆盖成存档里的位置。
+              scrollContainer.scrollTop = 0;
+              const saved = loadFileViewPosition(currentFilePath);
+              let cursorOk = false;
+              if (saved) {
+                if (saved.mode === "ir") {
+                  try {
+                    const size = editor.state.doc.content.size;
+                    const cursor = Math.max(1, Math.min(saved.cursor, size));
+                    editor.commands.setTextSelection(cursor);
+                    cursorOk = true;
+                    restoreIrScrollToRatio(cursor, saved.ratio, saved.scrollRatio);
+                  } catch {
+                    cursorOk = false;
+                  }
+                }
+                if (!cursorOk) {
+                  // 存档来自源码模式、或文档变化后取不到该位置：只按滚动比例恢复
+                  restoreIrScrollToRatio(-1, -1, saved.scrollRatio);
                 }
               }
-              if (!cursorOk) {
-                // 存档来自源码模式、或文档变化后取不到该位置：只按滚动比例恢复
-                restoreIrScrollToRatio(-1, -1, saved.scrollRatio);
-              }
-            }
-            // 恢复完成（或本来就没有存档）：解除写保护，此后正常记录位置
-            pendingRestorePathRef.current = null;
+              // 恢复完成（或本来就没有存档）：解除写保护，此后正常记录位置
+              pendingRestorePathRef.current = null;
+            };
+            applyRestore();
           });
         }
       } else {
