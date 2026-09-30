@@ -125,6 +125,12 @@ const WINDOW_STATE_KEY = "zmd-window-state";
 // 避免与主窗口互相覆盖位置/尺寸
 const EDITOR_WINDOW_STATE_KEY = "zmd-editor-window-state";
 const RECENT_FILES_KEY = "zmd-recent-files";
+/**
+ * 上次会话：打开了哪个仓库 / 哪个文件 / 什么编辑模式。
+ * 重启软件或刷新页面时据此回到原处（具体的光标与滚动位置存在
+ * `zmd-file-positions`，由编辑器组件自己读写）。
+ */
+const SESSION_KEY = "zmd-session";
 const PINNED_ITEMS_KEY = "zmd-pinned-toolbar-items";
 
 // 最近访问文件的最大数量
@@ -752,6 +758,26 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     }
   });
   const [sidebarOpen, setSidebarOpen] = useState(!initialFilePath);
+
+  // 记住本次会话（仓库 / 文件 / 模式），供重启或刷新后恢复。
+  // 第二个窗口（?window=editor，路径来自 URL）不写会话，免得覆盖主窗口的记录。
+  useEffect(() => {
+    if (initialFilePath) return;
+    const filePath = activeBuffer?.fileName ?? null;
+    if (!filePath) return; // 没打开文件时保留上一次的会话，别把它清掉
+    const vaultPath = activeVaultIndex >= 0 ? vaults[activeVaultIndex]?.path ?? null : null;
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(
+          SESSION_KEY,
+          JSON.stringify({ vaultPath, filePath, mode: activePane.mode }),
+        );
+      } catch {
+        /* 配额等异常：记不住会话不影响使用 */
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [activeBuffer?.fileName, activePane.mode, activeVaultIndex, vaults, initialFilePath]);
   // 外部启动（双击 .md 文件）解析状态：settled = 外部文件二次拉取兜底已完成，
   // 可以最终决定主窗口可见性（避免竞态提前关闭）
   const [externalLaunchSettled, setExternalLaunchSettled] = useState(false);
@@ -1843,6 +1869,44 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   // 并延迟二次拉取兜底（应用启动初期的外部打开请求可能落在首次拉取之后、事件监听注册之前）
   // 注意：这个延迟已**不再阻塞窗口显示**（窗口可见性在单独的 effect 中立即执行），
   // 因此这里的 250ms 仅影响"无仓库且无外部文件时"管理仓库窗口出现的时机。
+  /**
+   * 恢复上次会话：重新打开上次的文件（光标与滚动位置由编辑器按文件存档恢复）。
+   * 外部双击 .md 打开的文件优先（调用处只在没有外部文件时才恢复）；
+   * 且要求该文件仍在某个已注册仓库内 —— 仓库被移除 / 路径失效时就不恢复，
+   * 否则会无谓地把「管理仓库」窗口弹出来。
+   */
+  const restoreLastSession = useCallback((): boolean => {
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(SESSION_KEY);
+    } catch {
+      return false;
+    }
+    if (!raw) return false;
+    try {
+      const saved = JSON.parse(raw) as {
+        vaultPath?: string | null;
+        filePath?: string | null;
+        mode?: EditorMode;
+      };
+      const filePath = saved?.filePath;
+      if (!filePath) return false;
+      const normalize = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+      const normFile = normalize(filePath);
+      const idx = vaults.findIndex((v) => {
+        const vp = normalize(v.path);
+        return normFile === vp || normFile.startsWith(vp + "/");
+      });
+      if (idx < 0) return false;
+      setActiveVaultIndex(idx);
+      handleSelectFile(filePath);
+      if (saved.mode) setViewMode(saved.mode);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [vaults, handleSelectFile, setViewMode]);
+
   useEffect(() => {
     if (initialFilePath) {
       // 新窗口模式（window=editor）：文件路径来自 URL 参数，不走外部队列
@@ -1862,6 +1926,9 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         bootEnd("external_launch_pending_queue_fetch");
         return;
       }
+      // 没有外部打开的文件：恢复上次会话（上次的文件 + 光标/滚动位置）。
+      // 放在 250ms 兜底拉取之前：万一真有迟到的外部文件，仍会被它覆盖（外部优先）。
+      restoreLastSession();
       // 250ms 兜底（之前是 1200ms）：
       //   - 用户没双击 .md：250ms 后 settled，"无仓库时"才能跳管理窗口
       //   - 用户双击了但 first fetch 竞态漏掉：250ms 内再次拉取到队列

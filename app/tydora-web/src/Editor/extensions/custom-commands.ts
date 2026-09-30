@@ -3,6 +3,23 @@ import { TextSelection } from "prosemirror-state";
 import type { Node } from "prosemirror-model";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 
+/**
+ * 收掉选区（折叠到原选区 head）。
+ * 颜色 / 高亮是直接改变文字外观的操作，选区留着的话浏览器会用蓝色覆盖层盖住效果，
+ * 等于「点了没反应」。只处理非折叠选区：折叠选区不能动，
+ * 否则会清掉 setMark 记进 storedMarks 的待用颜色。
+ */
+function collapseSelection(editor: Editor) {
+  if (!editor.isEditable) return;
+  const { selection } = editor.state;
+  if (selection.empty) return;
+  try {
+    editor.commands.setTextSelection(selection.head);
+  } catch {
+    /* 表格单元格等特殊选区取不到合法文本位置：保持原样 */
+  }
+}
+
 export function executeCommand(name: string, editor: Editor | null) {
   if (!editor) return;
 
@@ -107,12 +124,15 @@ export function executeCommand(name: string, editor: Editor | null) {
     case "highlight":
       // 用当前荧光笔颜色：再按一次同样的颜色会取消高亮（toggle 语义）
       chain.toggleHighlight({ color: getHighlighterColor() }).run();
+      collapseSelection(editor);
       break;
     case "highlight-clear":
       chain.unsetHighlight().run();
+      collapseSelection(editor);
       break;
     case "text-color-clear":
       chain.unsetTextColor().run();
+      collapseSelection(editor);
       break;
     case "highlighter-mode":
       // 荧光笔模式（划选即上色）由 Editor/highlighter.ts 的模块级状态驱动，

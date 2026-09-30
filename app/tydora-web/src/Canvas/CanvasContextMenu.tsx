@@ -197,10 +197,13 @@ export default function CanvasContextMenu({ x, y, onClose }: ContextMenuProps) {
     return () => document.removeEventListener('mousedown', handler);
   }, [onClose, showNotePicker, showMediaPicker, showLinkInput]);
 
-  // Close on Escape
+  // 任意按键都收起菜单；但菜单里可能正在输入（链接 / 笔记名等），
+  // 焦点在输入框内时不关，否则打字会被打断
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      onClose();
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);

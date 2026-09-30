@@ -99,8 +99,11 @@ export function TerminalContextMenu({
         onClose();
       }
     };
+    // 任意按键都收起菜单；但焦点在输入框里时不能关，否则打字会被打断
     const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      onClose();
     };
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", keyHandler);

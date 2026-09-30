@@ -57,6 +57,7 @@ import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFl
 import { executeCommand } from "./extensions/custom-commands";
 import { Math as MathExtension } from "./extensions/math";
 import { saveImageToLocal, loadImageSettings, resolveRelativePath, dirName, ImageSaveCancelledError, IMAGE_SETTINGS_KEY, readImageAsBlobUrl } from "../services";
+import { loadFileViewPosition, saveFileViewPosition } from "../services/editorViewPosition";
 import { LinkIndexService } from "../wikilink";
 import { loadShortcuts, matchShortcut } from "./shortcuts";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
@@ -618,6 +619,13 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       from: 1, to: 1, ratio: 0, scrollRatio: 0,
     });
     const prevFilePathForViewStateRef = useRef(currentFilePath);
+    /**
+     * 正在等待恢复视图位置的文件。
+     * 切文件后到位置恢复完成之前不能往存档里写：那一刻文档里还是上一个文件的内容、
+     * 光标又被临时置到开头，写进去会把「这个文件上次的位置」冲掉。
+     * 由内容同步 effect 在恢复完之后清空。
+     */
+    const pendingRestorePathRef = useRef<string | null | undefined>(null);
     // SV 侧：源码偏移 + ratio/scrollRatio → SV → IR 时恢复
     const sourceViewStateRef = useRef<{ anchor: number; head: number; ratio: number; scrollRatio: number }>({
       anchor: 0, head: 0, ratio: 0, scrollRatio: 0,
@@ -2579,6 +2587,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         // 已经是该颜色就不重复写事务（省掉无谓的撤销记录与重渲染）
         if (editor.isActive("highlight", { color: highlighterColor })) return;
         editor.chain().setHighlight({ color: highlighterColor }).run();
+        // 上完色顺手收掉选区：蓝色覆盖层盖着就看不见刚上的颜色
+        try {
+          editor.commands.setTextSelection(editor.state.selection.head);
+        } catch {
+          /* 表格单元格等特殊选区：忽略 */
+        }
       };
       dom.addEventListener("mousedown", onMouseDown);
       dom.addEventListener("mouseup", applyHighlight);
@@ -2643,10 +2657,32 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           // 必须放在 setContent 之后 —— 换文档那次事务本身也不能留在栈里。
           dropUndoHistory(editor);
           requestAnimationFrame(() => {
-            const scrollContainer = containerRef.current?.querySelector('.tiptap-editor');
-            if (scrollContainer) {
-              scrollContainer.scrollTop = 0;
+            const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
+            if (!scrollContainer) return;
+            // 先按惯例回到顶部，紧接着恢复「上次离开这个文件时的位置」。
+            // 放在同一个 rAF 里，顺序才确定：上一句刚置 0，下面覆盖成存档里的位置。
+            scrollContainer.scrollTop = 0;
+            const saved = loadFileViewPosition(currentFilePath);
+            let cursorOk = false;
+            if (saved) {
+              if (saved.mode === "ir") {
+                try {
+                  const size = editor.state.doc.content.size;
+                  const cursor = Math.max(1, Math.min(saved.cursor, size));
+                  editor.commands.setTextSelection(cursor);
+                  cursorOk = true;
+                  restoreIrScrollToRatio(cursor, saved.ratio, saved.scrollRatio);
+                } catch {
+                  cursorOk = false;
+                }
+              }
+              if (!cursorOk) {
+                // 存档来自源码模式、或文档变化后取不到该位置：只按滚动比例恢复
+                restoreIrScrollToRatio(-1, -1, saved.scrollRatio);
+              }
             }
+            // 恢复完成（或本来就没有存档）：解除写保护，此后正常记录位置
+            pendingRestorePathRef.current = null;
           });
         }
       } else {
@@ -2741,11 +2777,35 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           scrollRatio = max > 0 ? container.scrollTop / max : 0;
         }
         irViewStateRef.current = { from: sel.from, to: sel.to, ratio, scrollRatio };
+        // 记下这个文件的视图位置，供重开文件 / 重启软件后回到原处（存储内部有节流）。
+        // 正在等待恢复位置的文件先不写，免得把归零值或上一个文件的位置覆盖上去。
+        if (pendingRestorePathRef.current !== currentFilePath) {
+          saveFileViewPosition(currentFilePath, {
+            mode: "ir",
+            cursor: sel.head,
+            ratio,
+            scrollRatio,
+          });
+        }
       };
       const fileChanged = prevFilePathForViewStateRef.current !== currentFilePath;
       if (fileChanged) {
-        // 文件切换：状态归零（与内容同步 effect 的"滚动回顶部"同义）。
-        // 那边在 rAF 里才把 scrollTop 置 0，故下一帧再补记一次真实位置。
+        // 离开上一个文件：把它最后的位置存进存档。
+        // 用 irViewStateRef（选区变更 / 滚动时已持续记录）而不是读 DOM ——
+        // 此刻 DOM 里其实已经是新文件的内容了。
+        const prevPath = prevFilePathForViewStateRef.current;
+        if (prevPath && prevPath !== currentFilePath) {
+          const st = irViewStateRef.current;
+          saveFileViewPosition(prevPath, {
+            mode: "ir",
+            cursor: st.from,
+            ratio: st.ratio,
+            scrollRatio: st.scrollRatio,
+          });
+        }
+        // 文件切换：状态归零（与内容同步 effect 的"滚动回顶部"同义）；
+        // 位置恢复完成前禁止写存档（由内容同步 effect 清掉这个标记）。
+        pendingRestorePathRef.current = currentFilePath;
         prevFilePathForViewStateRef.current = currentFilePath;
         irViewStateRef.current = { from: 1, to: 1, ratio: 0, scrollRatio: 0 };
         requestAnimationFrame(() => capture());

@@ -688,9 +688,8 @@ function ContextMenu({
       if (menuRef.current?.contains(target) || subRef.current?.contains(target)) return;
       onClose();
     };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
+    // 任意按键都收起菜单：浮层不该在按键之后还赖在屏幕上（Esc 自然也在内）
+    const keyHandler = () => onClose();
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", keyHandler);
     return () => {

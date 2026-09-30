@@ -388,6 +388,40 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     }
   }, [position, handleClickOutside]);
 
+  /**
+   * 菜单打开时，按任意键都收起它（Esc 也在内）：菜单是浮层，
+   * 按了键它还赖在屏幕上会挡住正文。
+   * 用捕获阶段，抢在编辑器 keymap 与 App 级快捷键之前。
+   */
+  useEffect(() => {
+    if (!position) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Esc 是「取消」语义；焦点在菜单里时 Enter/空格会「再次激活」那个按钮，
+      // 这两种情况要吞掉这次按键，否则菜单刚关就被自己的按钮又点开。
+      // 其它按键只收菜单、不拦截 —— 输入的字符照常进入编辑器。
+      const focusInMenu = !!menuRef.current?.contains(e.target as Node);
+      if (e.key === "Escape" || (focusInMenu && (e.key === "Enter" || e.key === " "))) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      // 收起菜单的同时取消选择：这个菜单是「对选区做事」的浮层，
+      // 只把菜单收掉、留下一整片蓝色选区，会让人以为还没退出选择状态。
+      // 落点取选区 head（鼠标松开的那一端），接着敲的键就在这个位置生效。
+      //
+      // 但有两类按键要放过，否则会把「对选区做事」的操作打断：
+      //   1) Ctrl/Cmd/Alt 组合键 —— Ctrl+C 要复制这段选区、Ctrl+B 要加粗它，
+      //      先把选区收掉的话，复制就拿不到东西了；
+      //   2) 单独按修饰键 —— 用户往往正要 Shift+点击去扩展选区。
+      const modifierOnly = ["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock"].includes(e.key);
+      const isShortcut = e.ctrlKey || e.metaKey || e.altKey;
+      if (!modifierOnly && !isShortcut) collapseSelection();
+      onClose();
+      setActiveSubmenu(null);
+    };
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [position, onClose, editor]);
+
   useEffect(() => {
     if (position && menuRef.current) {
       const menu = menuRef.current;
@@ -420,14 +454,33 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   };
 
   /**
+   * 把选区折叠到 head（鼠标松开的那一端）：用于「用完就收」的场景。
+   * 表格单元格选区等特殊情形取不到合法文本位置，保持原样即可。
+   */
+  const collapseSelection = () => {
+    if (!editor?.isEditable) return;
+    const { selection } = editor.state;
+    if (selection.empty) return;
+    try {
+      editor.commands.setTextSelection(selection.head);
+    } catch {
+      /* 特殊选区：不处理 */
+    }
+  };
+
+  /**
    * 荧光笔调色板：选中颜色即设为「当前颜色」，并在有选区时立刻给选区内文字上色。
    * 没有选区时只记住颜色，配合「荧光笔模式」使用。
+   *
+   * 上完色要顺手收掉选区：浏览器用蓝色覆盖层画选中区域，选区还在就看不见刚上的颜色。
+   * （加粗 / 斜体这类不遮内容，所以那类操作保持选中，方便连着套多个格式。）
    */
   const handleHighlightColor = (color: string) => {
     setHighlighterColor(color);
     if (editor && !editor.state.selection.empty) {
       editor.chain().focus().setHighlight({ color }).run();
     }
+    collapseSelection();
     onClose();
     setActiveSubmenu(null);
   };
@@ -435,11 +488,13 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   /**
    * 文字颜色：直接给选区上色。
    * 没有选区时 setMark 会记进 storedMarks，接着输入的文字就用这个颜色（符合预期）。
+   * 同样在上色后收掉选区，否则看不到颜色效果。
    */
   const handleTextColor = (color: string) => {
     if (editor) {
       editor.chain().focus().setTextColor(color).run();
     }
+    collapseSelection();
     onClose();
     setActiveSubmenu(null);
   };
@@ -507,6 +562,9 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     <div
       ref={menuRef}
       className="editor-context-menu"
+      // 点菜单里的任何东西都不把焦点从编辑器抢走（按钮默认会抢）：
+      // 这样按任意键收起菜单后继续打字，字符仍然落在编辑器里
+      onMouseDown={(e) => e.preventDefault()}
       style={{ left: position.x, top: position.y }}
     >
       {/* 三行图标按钮 */}
@@ -577,6 +635,13 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
                       }
                       if (subItem.name?.startsWith(TEXT_COLOR_PREFIX)) {
                         handleTextColor(subItem.name.slice(TEXT_COLOR_PREFIX.length));
+                        return;
+                      }
+                      // 「清除高亮 / 默认色」也直接作用在文字外观上：
+                      // 清完同样收掉选区，否则蓝色覆盖层还盖着，看不出已经清掉
+                      if (subItem.name === "highlight-clear" || subItem.name === "text-color-clear") {
+                        handleItemClick(subItem.name);
+                        collapseSelection();
                         return;
                       }
                       if (subItem.name) handleItemClick(subItem.name);
