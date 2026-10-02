@@ -61,6 +61,27 @@
       "analytics": "Together, we'll go the distance 🌿",
       "analyticsDesc": "A steadier journey together. Anonymously collects usage & error data to improve the app. Your privacy stays untouched; you can turn it off anytime."
     },
+    "trash": {
+      "title": "Recycle Bin",
+      "desc": "Deleted files/folders are moved here first (one shared bin for all vaults). Only the most recent data is kept, up to {{limit}}; the oldest is purged first. Restoring treats the item as a new file and adds a number on name conflicts.",
+      "location": "Recycle bin location",
+      "defaultLocation": "Default location (recycle-bin inside the app data directory)",
+      "select": "Choose folder",
+      "useDefault": "Use default",
+      "open": "Open location",
+      "usage": "{{count}} item(s) · {{size}} total",
+      "refresh": "Refresh",
+      "empty": "Empty recycle bin",
+      "emptyList": "The recycle bin is empty.",
+      "emptyDone": "Recycle bin emptied.",
+      "deleteOneDone": "Permanently deleted from the recycle bin.",
+      "restore": "Restore",
+      "deleteOne": "Delete permanently",
+      "restoredTo": "Restored as: {{path}}",
+      "restoreFailed": "Restore failed: {{error}}",
+      "emptyConfirmTitle": "Empty Recycle Bin",
+      "emptyConfirmMessage": "The {{count}} item(s) in the recycle bin ({{size}}) will be permanently deleted and cannot be recovered. Continue?"
+    },
     "consent": {
       "title": "Together, we'll go the distance 🌿",
       "description": "We have a simple wish: for this app to stay with you for the long run, growing steadier with every step.\n\nAlong the way, it may stumble from time to time. And we'd like to be the one who gently helps it back up.\nThat's why we want to collect a little crash log — just the technical details from the moment something goes wrong, so we can find the issue and keep moving forward.\n\nRest assured: your privacy stays completely untouched.\n\nThese logs are used only to improve your experience, and you can turn them off anytime in Settings → About.\n\nIf you have any thoughts or run into any trouble, feel free to write to us at [zuorn@qq.com](mailto:zuorn@qq.com).\nEvery word you share means a lot to us.",
@@ -940,17 +961,19 @@
       "moveTo": "Move to {{side}}"
     },
     "dialog": {
-      "deleteConfirmTitle": "Confirm Delete",
-      "deleteMultiConfirm": "Delete {{count}} selected item(s)?",
-      "deleteFolderConfirm": "Delete folder \"{{name}}\" and all its contents?",
-      "deleteFileConfirm": "Delete file \"{{name}}\"?",
+      "permanentDeleteTitle": "Exceeds recycle bin capacity",
+      "permanentDeleteMessage": "The selection is {{size}}, over the recycle bin limit of {{limit}}, so it will be permanently deleted and cannot be recovered. Continue?",
       "confirm": "Confirm",
       "cancel": "Cancel"
     },
     "toast": {
       "pathCopied": "Path copied to clipboard",
       "duplicated": "Duplicate created",
-      "fileCopiedToClipboard": "File copied to clipboard, paste it in your file manager"
+      "fileCopiedToClipboard": "File copied to clipboard, paste it in your file manager",
+      "movedToTrash": "Moved to recycle bin: {{count}} item(s)",
+      "trashPartial": "{{count}} item(s) could not be moved to the recycle bin",
+      "trashEvicted": "Recycle bin over capacity: removed the oldest {{count}} item(s)",
+      "permanentlyDeleted": "Permanently deleted: {{count}} item(s)"
     },
     "bookmarks": {
       "dialog": {

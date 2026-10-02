@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { applyNodeChanges, applyEdgeChanges, type Node, type Edge } from '@xyflow/react';
-import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { readTextFile, writeTextFile, exists } from '@tauri-apps/plugin-fs';
 import type { JsonCanvasFile, CanvasNodeType } from './canvas-utils';
 import { jsonCanvasToReactFlow, reactFlowToJsonCanvas, generateId } from './canvas-utils';
 
@@ -17,6 +17,15 @@ interface CanvasState {
   isModified: boolean;
   isLoaded: boolean;
   loadGeneration: number;
+  /**
+   * 是否允许「保存时凭空新建文件」。
+   *
+   * writeTextFile 会把不存在的文件创建出来 —— 白板的「新建 / 另存为」正是靠它建文件，
+   * 但也导致：删掉一个正开着的 .canvas 后，一次防抖自动保存就把文件写了回来，
+   * 看起来就是「白板删不掉」。所以只有明确新建/另存为的流程把它置 true，
+   * 其余情况保存前先确认文件还在，不在就断开文件指向（见 saveCanvas）。
+   */
+  allowCreate: boolean;
 
   // History for undo/redo
   history: HistoryEntry[];
@@ -69,6 +78,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   isModified: false,
   isLoaded: false,
   loadGeneration: 0,
+  allowCreate: false,
   history: [],
   historyIndex: -1,
   clipboard: { nodes: [], edges: [] },
@@ -159,6 +169,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       const { nodes, edges } = jsonCanvasToReactFlow(canvas);
       set({
         nodes, edges, filePath, vaultPath, isLoaded: true, isModified: false,
+        allowCreate: false,
         history: [{ nodes, edges }], historyIndex: 0
       });
     } catch (err) {
@@ -166,19 +177,41 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       console.error('Failed to load canvas:', err);
       set({
         nodes: [], edges: [], filePath, vaultPath, isLoaded: true, isModified: false,
+        allowCreate: false,
         history: [], historyIndex: -1
       });
     }
   },
 
   saveCanvas: async () => {
-    const { filePath, nodes, edges, vaultPath } = get();
+    const { filePath, nodes, edges, vaultPath, allowCreate } = get();
     if (!filePath) return;
+
+    // 文件已被删除时**不要**顺手写回来（writeTextFile 会新建文件）：
+    // 那会让「删除白板」看起来永远失败。只有新建/另存为流程才允许凭空创建。
+    if (!allowCreate) {
+      try {
+        if (!(await exists(filePath))) {
+          console.warn('[canvas] 目标文件已不存在，跳过保存并断开文件指向：', filePath);
+          set({
+            filePath: null,
+            vaultPath: null,
+            isModified: false,
+            allowCreate: false,
+            loadGeneration: get().loadGeneration + 1,
+          });
+          return;
+        }
+      } catch {
+        // exists 自身失败（权限/路径异常等）时不拦，交给下面的写入按原逻辑报错
+      }
+    }
 
     try {
       const canvas = reactFlowToJsonCanvas(nodes, edges, vaultPath || undefined);
       await writeTextFile(filePath, JSON.stringify(canvas, null, 2));
-      set({ isModified: false });
+      // 首次创建完成后就不必再允许凭空新建了
+      set({ isModified: false, allowCreate: false });
     } catch (err) {
       console.error('Failed to save canvas:', err);
     }

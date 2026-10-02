@@ -61,6 +61,27 @@
       "analytics": "陪你走得更远 🌿",
       "analyticsDesc": "陪你走得更远、更稳。匿名收集使用与出错信息以改进产品，绝不碰你的隐私，可随时关闭。"
     },
+    "trash": {
+      "title": "回收站",
+      "desc": "删除的文件/文件夹会先移到这里（所有仓库共用一个回收站），只保留最近的数据、总量不超过 {{limit}}，超出时按最旧优先清理。恢复时视为新建文件，重名会自动加数字。",
+      "location": "回收站位置",
+      "defaultLocation": "默认位置（应用数据目录下的 recycle-bin）",
+      "select": "选择文件夹",
+      "useDefault": "使用默认",
+      "open": "打开位置",
+      "usage": "当前 {{count}} 个条目 · 共 {{size}}",
+      "refresh": "刷新",
+      "empty": "清空回收站",
+      "emptyList": "回收站是空的。",
+      "emptyDone": "回收站已清空。",
+      "deleteOneDone": "已从回收站彻底删除。",
+      "restore": "恢复",
+      "deleteOne": "彻底删除",
+      "restoredTo": "已恢复为：{{path}}",
+      "restoreFailed": "恢复失败：{{error}}",
+      "emptyConfirmTitle": "清空回收站",
+      "emptyConfirmMessage": "回收站里的 {{count}} 个条目（共 {{size}}）将被永久删除、无法恢复。确定继续吗？"
+    },
     "consent": {
       "title": "陪你走得更远 🌿",
       "description": "我们有一个美好的愿望：让这个 App 能长久地陪伴你，越走越稳，越走越远。\n\n成长的路上，它偶尔也会踉跄。而我们，想做那个在它跌倒时，轻轻扶一把的人。\n所以，我们需要收集一点崩溃日志——只是出错时的技术信息，用来找到问题，陪它继续向前。\n\n请放心，你的隐私，我们一概不碰。\n\n这些日志只用于优化体验，你随时可以在「设置 → 关于」里关闭。\n\n如果你有任何想法，或遇到了什么困扰，也欢迎写信到 [zuorn@qq.com](mailto:zuorn@qq.com)。\n你的每一句话，我们都放在心上。",
@@ -939,10 +960,8 @@
       "moveTo": "移到{{side}}"
     },
     "dialog": {
-      "deleteConfirmTitle": "删除确认",
-      "deleteMultiConfirm": "确定要删除选中的 {{count}} 个项目吗？",
-      "deleteFolderConfirm": "确定要删除文件夹 \"{{name}}\" 及其所有内容吗？",
-      "deleteFileConfirm": "确定要删除文件 \"{{name}}\" 吗？",
+      "permanentDeleteTitle": "超过回收站容量",
+      "permanentDeleteMessage": "所选内容共 {{size}}，超过回收站上限 {{limit}}，将直接永久删除、无法恢复。确定继续吗？",
       "confirm": "确定",
       "cancel": "取消"
     },
@@ -950,7 +969,11 @@
       "pathCopied": "路径已复制到剪贴板",
       "duplicated": "已创建副本",
       "duplicatedAndCopied": "已创建副本并复制到剪切板，可在文件管理器中粘贴",
-      "fileCopiedToClipboard": "文件已复制到剪切板，可在文件管理器中粘贴"
+      "fileCopiedToClipboard": "文件已复制到剪切板，可在文件管理器中粘贴",
+      "movedToTrash": "已移入回收站：{{count}} 项",
+      "trashPartial": "{{count}} 项未能移入回收站",
+      "trashEvicted": "回收站超出容量，已清理最旧的 {{count}} 项",
+      "permanentlyDeleted": "已永久删除：{{count}} 项"
     },
     "bookmarks": {
       "dialog": {

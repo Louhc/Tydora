@@ -15,7 +15,13 @@ const CodeMirrorEditor = lazy(() => import("./Editor/CodeMirrorEditor").then(m =
 const TerminalView = lazy(() => import("./Terminal/TerminalView").then(m => ({ default: m.TerminalView })));
 import { killTerminal, unregisterTerminal } from "./Terminal/terminalApi";
 import { startTerminalSettingsSync } from "./Terminal/terminal-settings";
-import Sidebar, { VaultInfo } from "./Sidebar";
+import Sidebar, {
+  VaultInfo,
+  SIDEBAR_MIN_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_COLLAPSE_THRESHOLD,
+  SIDEBAR_DRAG_THRESHOLD,
+} from "./Sidebar";
 import { baseNameOf, displayFileName, joinDirLike, normalizePathKey, replaceBaseNameLike, restoreExtension } from "./utils/fileName";
 import VaultManagerModal from "./VaultManager/VaultManagerModal";
 import AppModal from "./components/AppModal";
@@ -118,6 +124,7 @@ const ACTIVE_VAULT_KEY = "zmd-active-vault";
 /** 首次启动已初始化"介绍仓库"标记（只执行一次，无论成功与否不再重试） */
 const WELCOME_VAULT_INITIALIZED_KEY = "zmd-welcome-vault-initialized";
 const SIDEBAR_WIDTH_KEY = "zmd-sidebar-width";
+const LEFT_SIDEBAR_OPEN_KEY = "zmd-sidebar-open";
 const RIGHT_SIDEBAR_OPEN_KEY = "zmd-right-sidebar-open";
 const RIGHT_SIDEBAR_WIDTH_KEY = "zmd-right-sidebar-width";
 const XHS_PREVIEW_WIDTH_KEY = "zmd-xhs-preview-width";
@@ -758,7 +765,21 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
       return -1;
     }
   });
-  const [sidebarOpen, setSidebarOpen] = useState(!initialFilePath);
+  /**
+   * 左侧栏展开状态。以前是 `useState(!initialFilePath)`，即**不持久化** ——
+   * 收起左栏后一刷新（F5 / 重启）它就自己弹回来。现在与右栏一样存 localStorage：
+   * 有存档用存档，没存档才回退到旧行为（带文件路径开新窗口时默认收起）。
+   */
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try {
+      const saved = localStorage.getItem(LEFT_SIDEBAR_OPEN_KEY);
+      if (saved === "1") return true;
+      if (saved === "0") return false;
+    } catch {
+      /* localStorage 不可用：用默认值 */
+    }
+    return !initialFilePath;
+  });
 
   // 记住本次会话（仓库 / 文件 / 模式），供重启或刷新后恢复。
   // 第二个窗口（?window=editor，路径来自 URL）不写会话，免得覆盖主窗口的记录。
@@ -831,6 +852,62 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   }, []);
   const [autoHideTopbar, setAutoHideTopbar] = useState(() => s.autoHideTopbar ?? false);
   const [autoHideTopbarOnCollapse, setAutoHideTopbarOnCollapse] = useState(() => s.autoHideTopbarOnCollapse ?? true);
+  /** 顶栏处于「自动隐藏」模式（侧栏收起自动隐藏，或用户显式开启） */
+  const topbarAutoHide = autoHideTopbar || (!sidebarOpen && autoHideTopbarOnCollapse);
+  /**
+   * 自动隐藏模式下顶栏是否处于滑出状态（由下面的鼠标监听驱动）。
+   *
+   * 为什么不用纯 CSS `:hover`：触发带高度恰好等于顶栏高度（36px），鼠标停在
+   * 顶栏下沿 1~2px 外就完全不算悬停 —— 用户朝顶部的文件标题移动时会看到
+   * 「滑出 → 稍微停低一点又缩回 → 再滑出」，表现为顶栏上的按钮（更多、
+   * 右侧栏切换…）不停闪烁。这里改成带**迟滞**的判定：进入 54px 内即滑出，
+   * 离开后延迟 240ms 才缩回，中途的小幅抖动不再造成反复显隐。
+   */
+  const [topbarPinned, setTopbarPinned] = useState(false);
+  const topbarPinnedRef = useRef(false);
+  useEffect(() => {
+    if (!topbarAutoHide) {
+      topbarPinnedRef.current = false;
+      setTopbarPinned(false);
+      return;
+    }
+    const SHOW_BAND = 54;   // 触发带 + 余量（顶栏 36px 高，再留 ~18px 迟滞）
+    const HIDE_DELAY = 240;
+    let hideTimer: number | null = null;
+    const clearHideTimer = () => {
+      if (hideTimer != null) {
+        window.clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    };
+    const setPinned = (v: boolean) => {
+      if (topbarPinnedRef.current === v) return;
+      topbarPinnedRef.current = v;
+      setTopbarPinned(v);
+    };
+    const onMove = (e: MouseEvent) => {
+      if (e.clientY <= SHOW_BAND) {
+        clearHideTimer();
+        setPinned(true);
+      } else if (hideTimer == null) {
+        hideTimer = window.setTimeout(() => {
+          hideTimer = null;
+          setPinned(false);
+        }, HIDE_DELAY);
+      }
+    };
+    const onLeaveWindow = () => {
+      clearHideTimer();
+      setPinned(false);
+    };
+    window.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseleave", onLeaveWindow);
+    return () => {
+      clearHideTimer();
+      window.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseleave", onLeaveWindow);
+    };
+  }, [topbarAutoHide]);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     try {
       const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
@@ -946,6 +1023,28 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     });
     return unsub;
   }, [canvasFilePath, activeVaultIndex, vaults]);
+
+  /**
+   * 白板文件被删除（应用内右键删除、或在资源管理器/终端里删）后，别让界面继续停在
+   * 「打开着一个已不存在的白板」的状态。文件真的没了才关；exists 出错时不动作。
+   *
+   * 注意：真正阻止「删掉又被自动保存写回来」的是 canvas-store 的 saveCanvas
+   * （文件不存在且非新建/另存为流程时会跳过写入并断开指向），这里只负责收尾界面。
+   */
+  useEffect(() => {
+    if (!canvasFilePath) return;
+    let cancelled = false;
+    exists(canvasFilePath)
+      .then((ok) => {
+        if (!cancelled && !ok) setCanvasFilePath(null);
+      })
+      .catch(() => {
+        /* 忽略：exists 失败不代表文件被删 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canvasFilePath, treeRefreshKey]);
 
   // 快速打开文件弹窗状态
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1302,6 +1401,14 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   }, [rightSidebarOpen]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(LEFT_SIDEBAR_OPEN_KEY, sidebarOpen ? "1" : "0");
+    } catch {
+      /* 写入失败不阻塞界面 */
+    }
+  }, [sidebarOpen]);
+
+  useEffect(() => {
     localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(rightSidebarWidth));
   }, [rightSidebarWidth]);
 
@@ -1372,6 +1479,64 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     return () => window.clearTimeout(timer);
   }, [rightSidebarOpen, notifyResize]);
   useEffect(() => { notifyResize(); }, [rightSidebarWidth]);
+
+  /**
+   * 从折叠态「拉出来」：编辑器侧探出条按下后，宽度逐帧跟随鼠标。
+   * 宽度只存在 pullWidth 里，不写回 sidebarWidth —— 避免把「拉到一半」的值持久化；
+   * 松手时才决定是提交宽度（≥ 阈值）还是缩回折叠（拉得不够）。
+   */
+  const [pulling, setPulling] = useState<{ side: "left" | "right"; startX: number } | null>(null);
+  const [pullWidth, setPullWidth] = useState(0);
+  const pullWidthRef = useRef(0);
+  const pullMovedRef = useRef(false);
+
+  const startSidebarPull = useCallback(
+    (side: "left" | "right") => (e: React.MouseEvent) => {
+      e.preventDefault();
+      pullMovedRef.current = false;
+      pullWidthRef.current = 0;
+      setPullWidth(0);
+      setPulling({ side, startX: e.clientX });
+      // 按下即展开（宽度从 0 开始跟手），松手没拉动就停在记住的宽度上
+      if (side === "left") setSidebarOpen(true);
+      else setRightSidebarOpen(true);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!pulling) return;
+    const onMove = (e: MouseEvent) => {
+      const delta = e.clientX - pulling.startX;
+      if (Math.abs(delta) >= SIDEBAR_DRAG_THRESHOLD) pullMovedRef.current = true;
+      // 左栏往右拉、右栏往左拉，才是「拉出来」
+      const outward = pulling.side === "left" ? delta : -delta;
+      const live = Math.max(0, Math.min(SIDEBAR_MAX_WIDTH, outward));
+      pullWidthRef.current = live;
+      setPullWidth(live);
+    };
+    const onUp = () => {
+      const live = pullWidthRef.current;
+      const moved = pullMovedRef.current;
+      setPulling(null);
+      if (!moved) return; // 只是按了一下：已展开，宽度保持记忆值
+      if (live < SIDEBAR_COLLAPSE_THRESHOLD) {
+        // 拉得不够 → 缩回去（抽屉没拉出来）
+        if (pulling.side === "left") setSidebarOpen(false);
+        else setRightSidebarOpen(false);
+      } else {
+        const w = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, live));
+        if (pulling.side === "left") setSidebarWidth(w);
+        else setRightSidebarWidth(w);
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [pulling]);
 
   // 激活窗格变化后自动聚焦该窗格的编辑器（统一处理分屏/关闭/导航/点击等所有场景）。
   // —— 实现思路：不用 React 的 handle，直接模拟 Tab 键的原生焦点遍历：
@@ -1689,6 +1854,16 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         const activeVault = activeVaultIndex >= 0 ? vaults[activeVaultIndex] : null;
         for (const b of buffersRef.current) {
           if (!b.modified || !b.fileName) continue;
+          // 文件已不在（被删除/移入回收站/外部重命名）：不要把它写回来。
+          // writeTextFile 会新建缺失的文件 —— 表现就是「删掉的笔记又冒出来」。
+          try {
+            if (!(await exists(b.fileName))) {
+              updateBuffer(b.id, { modified: false });
+              continue;
+            }
+          } catch {
+            // exists 自身失败时不拦，交给下面的写入按原逻辑报错
+          }
           await writeTextFile(b.fileName, b.content);
           updateBuffer(b.id, { savedContent: b.content, modified: false });
           if (b.id === activeBufferIdRef.current) setSaveStatus("saved");
@@ -3924,8 +4099,12 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
           collapsed={!sidebarOpen}
           refreshKey={treeRefreshKey}
           graphRefreshKey={graphRefreshKey}
-          width={sidebarWidth}
+          width={pulling?.side === "left" ? pullWidth : sidebarWidth}
           onWidthChange={setSidebarWidth}
+          // 由编辑器侧探出条拉出时，宽度由上层逐帧驱动 → 关掉 width 过渡
+          boundaryDragging={pulling?.side === "left"}
+          // 只点了一下边界（没拖动）→ 收起左侧栏；往里推过头也会收起
+          onCollapseByHandle={() => setSidebarOpen(false)}
           onBookmark={handleShowBookmarkDialog}
           outlineTrigger={outlineTrigger}
           side="left"
@@ -3939,7 +4118,31 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         />
 
         {/* 编辑区域 */}
-        <main className={`editor-container${!sidebarOpen ? " sidebar-is-closed" : ""}${(autoHideTopbar || (!sidebarOpen && autoHideTopbarOnCollapse)) ? " sidebar-collapsed" : ""}`}>
+        <main className={`editor-container${!sidebarOpen ? " sidebar-is-closed" : ""}${topbarAutoHide ? " sidebar-collapsed" : ""}${topbarPinned ? " topbar-pinned" : ""}`}>
+          {/* 侧栏边界：编辑器左侧的补强热区（单击收起，与侧栏手柄拼成跨边界命中带）。
+              右栏不需要 —— 它的手柄已整体收进侧栏内且覆盖边界像素。 */}
+          {sidebarOpen && (
+            <div
+              className="editor-edge-grab left"
+              title={t("app.toolbar.collapseSidebar")}
+              onClick={() => setSidebarOpen(false)}
+            />
+          )}
+          {/* 侧栏收起后，在编辑器边缘按下并往外拉 = 拉出来（跟手）；轻按一下 = 展开到记忆宽度 */}
+          {!sidebarOpen && (
+            <div
+              className="editor-edge-reveal left"
+              title={t("app.toolbar.expandSidebar")}
+              onMouseDown={startSidebarPull("left")}
+            />
+          )}
+          {!rightSidebarOpen && (
+            <div
+              className="editor-edge-reveal right"
+              title={t("app.toolbar.expandSidebar")}
+              onMouseDown={startSidebarPull("right")}
+            />
+          )}
           <div className="editor-topbar-trigger" />
           {/* 顶部透明栏 */}
           <div className="editor-topbar" data-tauri-drag-region="deep">
@@ -4737,8 +4940,12 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
             collapsed={!rightSidebarOpen}
             refreshKey={treeRefreshKey}
             graphRefreshKey={graphRefreshKey}
-            width={rightSidebarWidth}
+            width={pulling?.side === "right" ? pullWidth : rightSidebarWidth}
             onWidthChange={setRightSidebarWidth}
+            // 同上：由探出条拉出时宽度由上层驱动
+            boundaryDragging={pulling?.side === "right"}
+            // 同上：点一下右侧栏边界即收起
+            onCollapseByHandle={() => setRightSidebarOpen(false)}
             onBookmark={handleShowBookmarkDialog}
             outlineTrigger={outlineTrigger}
             side="right"

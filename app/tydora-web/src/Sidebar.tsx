@@ -17,6 +17,8 @@ import { TagPanel, parseTagSearchQuery, resolveTagFileSet } from "./tags";
 import { type SidebarTab } from "./Settings";
 import { FileTreeIcon } from "./SidebarFileIcons";
 import { displayFileName, isMarkdownFileName, restoreExtension } from "./utils/fileName";
+import { formatBytes } from "./utils/formatBytes";
+import { TRASH_MAX_BYTES, measureTotalUsage, moveToTrash } from "./services/recycleBin";
 import "./Sidebar.css";
 
 // 大纲标签页顶部的本地图谱：d3 依赖较重，动态加载避免拖慢首屏
@@ -158,7 +160,32 @@ interface SidebarProps {
   onOpenSettings?: () => void;
   /** 是否显示文件类型图标（通用设置） */
   showFileIcons?: boolean;
+  /**
+   * 只点了一下宽度调节边界、并没有拖动时触发 —— 用来收起本侧侧栏。
+   * 拖动调宽度的老行为不变（移动超过阈值就完全不算点击）。
+   */
+  onCollapseByHandle?: () => void;
+  /**
+   * 由外部（编辑器侧「探出条」）发起的拉出拖动：宽度由外部逐帧驱动，
+   * 这里需要同步关掉 width 过渡，否则侧栏会慢半拍地追着鼠标。
+   */
+  boundaryDragging?: boolean;
 }
+
+/** 侧栏宽度范围（App 的探出条复用同一组常量，避免两处数字漂移） */
+export const SIDEBAR_MIN_WIDTH = 180;
+export const SIDEBAR_MAX_WIDTH = 800;
+/**
+ * 松手时的实时宽度低于此值 → 判定为「推回去 / 没拉出来」，直接收起，
+ * 而不是停在一个极窄的宽度上；同时不写宽度，保留记住的值供下次展开。
+ */
+export const SIDEBAR_COLLAPSE_THRESHOLD = 120;
+/**
+ * 判定「算拖动」的位移阈值（px）：留足余量 —— 光标是 col-resize 形状时，
+ * 用户按下后手往往会带几像素位移，阈值太小会把「点击」误判成拖动，
+ * 表现就是「点了边界没反应」。App 从折叠态「拉出来」时也用同一阈值。
+ */
+export const SIDEBAR_DRAG_THRESHOLD = 10;
 
 interface ContextMenuItem {
   label: string;
@@ -1277,6 +1304,7 @@ function TreeNodeComp({
   onToggleExpand,
   onMoveTo,
   showFileIcons,
+  onRequestDelete,
 }: {
   node: TreeNode;
   depth: number;
@@ -1301,9 +1329,10 @@ function TreeNodeComp({
   onToggleExpand: (path: string, expanded: boolean) => void;
   onMoveTo: (path: string, isDirectory: boolean) => void;
   showFileIcons: boolean;
+  /** 删除（右键菜单 / Delete 键）：交给 FileTree 统一处理（移入回收站，或超配额时二次确认） */
+  onRequestDelete?: (node: TreeNode) => void;
 }) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const nodeRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const isEditing = editingPath === node.path;
@@ -1408,22 +1437,8 @@ function TreeNodeComp({
   }, [node, onStartEdit]);
 
   const handleDelete = useCallback(() => {
-    setDeleteConfirmOpen(true);
-  }, []);
-
-  const handleDeleteConfirm = useCallback(async () => {
-    setDeleteConfirmOpen(false);
-    try {
-      const pathsToDelete = selectedPaths.size > 0 && selectedPaths.has(node.path)
-        ? Array.from(selectedPaths)
-        : [node.path];
-      for (const p of pathsToDelete) {
-        await remove(p, { recursive: true });
-      }
-      onMultiSelect([], 'replace');
-      onReload();
-    } catch (err) { console.error(i18n.t("sidebar.error.deleteFailed"), err); }
-  }, [node, onReload, selectedPaths, onMultiSelect]);
+    onRequestDelete?.(node);
+  }, [onRequestDelete, node]);
 
   const handleCopyPath = useCallback(() => {
     navigator.clipboard.writeText(node.path).then(() => {
@@ -1603,6 +1618,7 @@ function TreeNodeComp({
               onSelect={onSelect}
               onRefresh={onRefresh}
               onReload={onReload}
+              onRequestDelete={onRequestDelete}
               rootPath={rootPath}
               dragOverPath={dragOverPath}
               onMouseDown={onMouseDown}
@@ -1633,18 +1649,7 @@ function TreeNodeComp({
         />
       )}
 
-      <ConfirmDialog
-        isOpen={deleteConfirmOpen}
-        title={i18n.t("sidebar.dialog.deleteConfirmTitle")}
-        message={selectedPaths.size > 1 && selectedPaths.has(node.path)
-          ? i18n.t("sidebar.dialog.deleteMultiConfirm", { count: selectedPaths.size })
-          : node.isDirectory
-            ? i18n.t("sidebar.dialog.deleteFolderConfirm", { name: node.name })
-            : i18n.t("sidebar.dialog.deleteFileConfirm", { name: node.name })}
-        type="danger"
-        onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteConfirmOpen(false)}
-      />
+      {/* 删除确认已取消：删除默认移入回收站（超配额时由 FileTree 弹「永久删除」确认） */}
     </div>
   );
 }
@@ -1700,7 +1705,13 @@ function FileTree({
   const hoveredPathRef = useRef<string | null>(null);
   const lastTreeInteractRef = useRef(0);
   const lastEditorInteractRef = useRef(0);
-  const [kbdDeleteTarget, setKbdDeleteTarget] = useState<TreeNode | null>(null);
+  /**
+   * 「永久删除」二次确认的目标路径：**只有**待删总量超过回收站配额（TRASH_MAX_BYTES）时才会设置。
+   * 正常删除直接移入回收站、不再弹确认 —— 回收站本身就是保护措施。
+   */
+  const [permanentDeletePaths, setPermanentDeletePaths] = useState<string[] | null>(null);
+  /** 上面那次「永久删除」确认对应的实际体量，仅用于在确认框里显示大小 */
+  const permanentDeleteTotalBytesRef = useRef(0);
 
   const markTreeInteract = useCallback(() => {
     interactUntilRef.current = Date.now() + 450;
@@ -2096,6 +2107,76 @@ function FileTree({
       return next;
     });
   }, []);
+
+  /**
+   * ── 删除（移入回收站） ──
+   * 放在 handleMultiSelect / handleReload 之后：本块的 useCallback 依赖数组会在渲染期
+   * 读取这两个变量，声明顺序反了会触发 TDZ。
+   */
+  /** 移入回收站（正常删除路径） */
+  const movePathsToTrash = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return;
+    try {
+      const { moved, failed, evicted } = await moveToTrash(
+        paths.map((p) => ({ path: p })),
+        rootPath,
+      );
+      if (failed.length > 0) {
+        showToast(i18n.t("sidebar.toast.trashPartial", { count: failed.length }));
+      } else if (moved.length > 0) {
+        showToast(i18n.t("sidebar.toast.movedToTrash", { count: moved.length }));
+      }
+      if (evicted > 0) showToast(i18n.t("sidebar.toast.trashEvicted", { count: evicted }));
+    } catch (err) {
+      console.error(i18n.t("sidebar.error.deleteFailed"), err);
+      showToast(`${i18n.t("sidebar.error.deleteFailed")}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    handleMultiSelect([], "replace");
+    await handleReload();
+  }, [rootPath, handleMultiSelect, handleReload]);
+
+  /** 由节点推导要删的路径：选中了它就连同整个多选一起删 */
+  const pathsForDelete = useCallback((node: TreeNode) => (
+    selectedPaths.size > 0 && selectedPaths.has(node.path) ? Array.from(selectedPaths) : [node.path]
+  ), [selectedPaths]);
+
+  /**
+   * 删除请求的唯一入口（右键菜单、Delete 键、vim 动作都走这里）。
+   *
+   * 规则：默认**直接移入回收站、不再确认**（回收站本身就是保护措施）；
+   * 只有待删总量超过回收站配额时，才弹确认框告知「将永久删除、无法恢复」。
+   */
+  const requestDeletePaths = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return;
+    const total = await measureTotalUsage(paths);
+    if (total > TRASH_MAX_BYTES) {
+      permanentDeleteTotalBytesRef.current = total;
+      setPermanentDeletePaths(paths);
+      return;
+    }
+    await movePathsToTrash(paths);
+  }, [movePathsToTrash]);
+
+  const requestDelete = useCallback((node: TreeNode) => {
+    void requestDeletePaths(pathsForDelete(node));
+  }, [requestDeletePaths, pathsForDelete]);
+
+  /** 确认「永久删除」（超配额时） */
+  const confirmPermanentDelete = useCallback(async () => {
+    const paths = permanentDeletePaths ?? [];
+    setPermanentDeletePaths(null);
+    try {
+      for (const p of paths) {
+        await remove(p, { recursive: true });
+      }
+      showToast(i18n.t("sidebar.toast.permanentlyDeleted", { count: paths.length }));
+    } catch (err) {
+      console.error(i18n.t("sidebar.error.deleteFailed"), err);
+      showToast(`${i18n.t("sidebar.error.deleteFailed")}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    handleMultiSelect([], "replace");
+    await handleReload();
+  }, [permanentDeletePaths, handleMultiSelect, handleReload]);
 
   const handleClearSelection = useCallback(() => {
     setSelectedPaths(new Set());
@@ -2608,11 +2689,11 @@ function FileTree({
       if (!node || node.path === rootPath) return;
       e.preventDefault();
       e.stopPropagation();
-      setKbdDeleteTarget(node);
+      void requestDelete(node);
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
-  }, [findNodeByPath, rootPath]);
+  }, [findNodeByPath, rootPath, requestDelete]);
 
   // ── F2 重命名（作用于树上当前选中的文件 / 文件夹） ──
   // 目标 = pendingActivePath（树上当前选中项：鼠标点击、vim j/k、新建后都会登记），
@@ -2670,22 +2751,6 @@ function FileTree({
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [activePath, findNodeByPath, rootPath, startRenameFromTree]);
-
-  const handleKbdDeleteConfirm = useCallback(async () => {
-    const node = kbdDeleteTarget;
-    setKbdDeleteTarget(null);
-    if (!node) return;
-    try {
-      const pathsToDelete = selectedPaths.size > 0 && selectedPaths.has(node.path)
-        ? Array.from(selectedPaths)
-        : [node.path];
-      for (const p of pathsToDelete) {
-        await remove(p, { recursive: true });
-      }
-      handleMultiSelect([], "replace");
-      await handleReload();
-    } catch (err) { console.error(i18n.t("sidebar.error.deleteFailed"), err); }
-  }, [kbdDeleteTarget, selectedPaths, handleMultiSelect, handleReload]);
 
   // 监听 Vim 侧栏动作事件
   useEffect(() => {
@@ -2812,16 +2877,11 @@ function FileTree({
         case "delete": {
           const p = pendingActivePathRef.current;
           if (!p) return;
-          (async () => {
-            try {
-              const paths = selectedPaths.size > 0 && selectedPaths.has(p)
-                ? Array.from(selectedPaths)
-                : [p];
-              for (const q of paths) { await remove(q, { recursive: true }); }
-              handleMultiSelect([], 'replace');
-              await handleReload();
-            } catch (err) { console.error(i18n.t("sidebar.error.deleteFailed"), err); }
-          })();
+          // 与右键 / Delete 键同一入口：移入回收站；超配额才弹「永久删除」确认
+          const paths = selectedPaths.size > 0 && selectedPaths.has(p)
+            ? Array.from(selectedPaths)
+            : [p];
+          void requestDeletePaths(paths);
           break;
         }
         case "duplicate": {
@@ -2861,7 +2921,7 @@ function FileTree({
   }, [
     flattenVisible, findNodeByPath, targetDirPathFor, toggleDirExpanded, collapseDescendants,
     doConfirmOpen, handleCollapseAll, handleExpandAll, rootPath, handleReload, handleStartEdit,
-    handleMoveTo, handleMultiSelect, selectedPaths, openCreatedFile,
+    handleMoveTo, handleMultiSelect, selectedPaths, openCreatedFile, requestDeletePaths,
   ]);
 
   const handleScroll = useCallback(() => {
@@ -3097,6 +3157,7 @@ function FileTree({
             }}
             onRefresh={handleRefresh}
             onReload={handleReload}
+            onRequestDelete={requestDelete}
             rootPath={rootPath}
             dragOverPath={dragOverPath}
             onMouseDown={handleMouseDown}
@@ -3142,19 +3203,18 @@ function FileTree({
         onCancel={handleFolderPickerCancel}
       />
 
-      {/* Delete 键删除确认弹窗（与右键删除同一文案 / 同一流程） */}
-      {kbdDeleteTarget && (
+      {/* 永久删除二次确认：仅当待删总量超过回收站配额时出现 */}
+      {permanentDeletePaths && (
         <ConfirmDialog
           isOpen
-          title={i18n.t("sidebar.dialog.deleteConfirmTitle")}
-          message={selectedPaths.size > 1 && selectedPaths.has(kbdDeleteTarget.path)
-            ? i18n.t("sidebar.dialog.deleteMultiConfirm", { count: selectedPaths.size })
-            : kbdDeleteTarget.isDirectory
-              ? i18n.t("sidebar.dialog.deleteFolderConfirm", { name: kbdDeleteTarget.name })
-              : i18n.t("sidebar.dialog.deleteFileConfirm", { name: kbdDeleteTarget.name })}
+          title={i18n.t("sidebar.dialog.permanentDeleteTitle")}
+          message={i18n.t("sidebar.dialog.permanentDeleteMessage", {
+            size: formatBytes(permanentDeleteTotalBytesRef.current),
+            limit: formatBytes(TRASH_MAX_BYTES),
+          })}
           type="danger"
-          onConfirm={handleKbdDeleteConfirm}
-          onCancel={() => setKbdDeleteTarget(null)}
+          onConfirm={confirmPermanentDelete}
+          onCancel={() => setPermanentDeletePaths(null)}
         />
       )}
       </div>
@@ -3725,11 +3785,19 @@ export default function Sidebar({
   /** 打开"设置"（主窗口内的模态弹框） */
   onOpenSettings,
   showFileIcons = true,
+  onCollapseByHandle,
+  boundaryDragging = false,
 }: SidebarProps) {
   bootStart("sidebar_component_render");
   bootStamp("sidebar_component_entered");
   const activeVault = activeVaultIndex >= 0 ? vaults[activeVaultIndex] : null;
   const [isResizing, setIsResizing] = useState(false);
+  /**
+   * 拖动过程中的实时宽度：允许低于 SIDEBAR_MIN_WIDTH（一路到 0），松手时再决定
+   * 「提交宽度」还是「收起」。只活在拖动期间，不写进 App 的持久化宽度。
+   */
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const dragWidthRef = useRef<number | null>(null);
   // 本侧栏可渲染的 tab 列表（默认全部 4 个，顺序固定 files→search→outline→bookmarks）
   const visibleTabs = useMemo<SidebarTab[]>(
     () => tabs ?? ["files", "search", "outline", "bookmarks"],
@@ -4038,31 +4106,59 @@ export default function Sidebar({
   // Resize logic
   const [startX, setStartX] = useState(0);
   const [startWidth, setStartWidth] = useState(0);
+  /**
+   * 这一次按住边界有没有真的拖动过。
+   * 没拖动 = 用户只是「点了一下边界」（鼠标在边界上本来就是 col-resize 形状，看着可点），
+   * 那就收起侧栏；拖过则按老行为调宽度，不再算点击。
+   */
+  const resizeMovedRef = useRef(false);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    resizeMovedRef.current = false;
     setIsResizing(true);
     setStartX(e.clientX);
     setStartWidth(width);
+    setDragWidth(width);
+    dragWidthRef.current = width;
   }, [width]);
 
   useEffect(() => {
     if (!isResizing) return;
     const handleMouseMove = (e: MouseEvent) => {
       const deltaX = e.clientX - startX;
+      if (Math.abs(deltaX) >= SIDEBAR_DRAG_THRESHOLD) resizeMovedRef.current = true;
       // 右侧栏往左拖（deltaX 负）应变宽，故方向取反；左侧栏保持 +deltaX
       const newWidth = startWidth + (side === "right" ? -deltaX : deltaX);
-      const clampedWidth = Math.max(180, Math.min(800, newWidth));
-      onWidthChange(clampedWidth);
+      // 拖动期间**不**夹到最小宽度：允许一路压到 0，做出「推回去」的手感
+      const liveWidth = Math.max(0, Math.min(SIDEBAR_MAX_WIDTH, newWidth));
+      dragWidthRef.current = liveWidth;
+      setDragWidth(liveWidth);
     };
-    const handleMouseUp = () => { setIsResizing(false); };
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      const liveWidth = dragWidthRef.current ?? width;
+      setDragWidth(null);
+      dragWidthRef.current = null;
+      if (!resizeMovedRef.current) {
+        // 位移在阈值内 = 单击：原有行为，收起本侧栏
+        onCollapseByHandle?.();
+        return;
+      }
+      if (liveWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
+        // 推过头 → 收起；不提交宽度，保留记住的值供下次「拉出来」
+        onCollapseByHandle?.();
+      } else {
+        onWidthChange(Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, liveWidth)));
+      }
+    };
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
     return () => {
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isResizing, onWidthChange, startX, startWidth, side]);
+  }, [isResizing, onWidthChange, startX, startWidth, side, onCollapseByHandle, width]);
 
   bootStamp("sidebar_component_rendered");
   bootEnd("sidebar_component_render");
@@ -4070,8 +4166,8 @@ export default function Sidebar({
     <div
       ref={sidebarRef}
       tabIndex={-1}
-      className={`sidebar${collapsed ? " collapsed" : ""}${isResizing ? " resizing" : ""}${side === "right" ? " sidebar-right" : ""}`}
-      style={{ width: collapsed ? 0 : width }}
+      className={`sidebar${collapsed ? " collapsed" : ""}${isResizing || boundaryDragging ? " resizing" : ""}${!collapsed && dragWidth !== null && dragWidth < SIDEBAR_MIN_WIDTH ? " pushing-in" : ""}${side === "right" ? " sidebar-right" : ""}`}
+      style={{ width: collapsed ? 0 : (dragWidth ?? width) }}
       onMouseDownCapture={(e) => {
         // 用户点击侧栏时：若点击的是「非可聚焦」元素，把焦点交给当前 Tab 的主内容容器。
         // 若用户点了 tab 按钮、搜索 input、tree-node 内 input（重命名态）等原生可聚焦元素，
@@ -4092,8 +4188,8 @@ export default function Sidebar({
       <div className="sidebar-topbar" data-tauri-drag-region="deep" />
 
       {visibleTabs.length >= 1 && (
-        <div className="sidebar-header">
-          <div className="sidebar-tabs-wrapper">
+        <div className="sidebar-header" data-tauri-drag-region="deep">
+          <div className="sidebar-tabs-wrapper" data-tauri-drag-region="false">
             {visibleTabs.map((tab) => (
               <button
                 key={tab}

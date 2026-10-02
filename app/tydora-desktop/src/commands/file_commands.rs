@@ -41,3 +41,38 @@ pub fn list_dir_with_meta(dir_path: String) -> Result<Vec<DirEntryWithMeta>, Str
     }
     Ok(entries)
 }
+
+/// 递归统计路径占用字节数（目录累加其内容；符号链接按链接自身计，不跟随）。
+///
+/// `max_bytes` 给一个上限：一旦累计超过它就**提前返回**。回收站只需要判断
+/// 「放不放得下 / 该淘汰多少」，没必要为了一个超大目录把整棵子树翻完。
+#[tauri::command]
+pub fn path_usage(path: String, max_bytes: Option<u64>) -> Result<u64, String> {
+    let limit = max_bytes.unwrap_or(u64::MAX);
+    Ok(usage_of(std::path::Path::new(&path), limit))
+}
+
+fn usage_of(path: &std::path::Path, limit: u64) -> u64 {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    let mut total: u64 = 0;
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        total = total.saturating_add(usage_of(&entry.path(), limit));
+        if total > limit {
+            return total;
+        }
+    }
+    total
+}

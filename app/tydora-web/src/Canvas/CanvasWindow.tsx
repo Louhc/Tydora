@@ -127,7 +127,8 @@ export default function CanvasWindow() {
           defaultPath: 'untitled.canvas',
         });
         if (!path) return; // 用户取消另存为，中止关闭
-        useCanvasStore.setState({ filePath: path });
+        // 另存为：明确允许保存时创建文件，否则 saveCanvas 会因文件不存在而跳过
+        useCanvasStore.setState({ filePath: path, allowCreate: true });
         localStorage.setItem(CANVAS_STORAGE_KEY, path);
         setCanvasTitle(path.split(/[/\\]/).pop() || '白板');
       }
@@ -212,7 +213,8 @@ export default function CanvasWindow() {
       });
       if (filePath) {
         await saveCanvas();
-        useCanvasStore.setState({ filePath });
+        // 另存为到新路径：同样允许创建文件
+        useCanvasStore.setState({ filePath, allowCreate: true });
         localStorage.setItem(CANVAS_STORAGE_KEY, filePath);
       }
     } catch (err) {

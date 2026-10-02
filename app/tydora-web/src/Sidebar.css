@@ -8,6 +8,14 @@
   flex-direction: column;
   overflow: hidden;
   flex-shrink: 0;
+  /* ⚠️ 这里**不要**加 `isolation: isolate`。
+     曾为了把毛玻璃（tab 条 / 仓库控件，见 --sidebar-chrome-opacity）的 backdrop 采样范围
+     收进侧栏而加过它，结果侧栏变成层叠上下文：渲染在侧栏内部的对话框
+     （如文件树删除确认 `.confirm-dialog-overlay`，position:fixed + z-index:1000）
+     再也压不过右侧编辑区 —— 被编辑区盖住的恰好是对话框右下角的「确认」按钮，
+     点它事件落到编辑区上，表现为「右键删除点了没反应、不报错、文件也还在」。
+     右键菜单不受影响，因为它 createPortal 到了 body。
+     真正的闪烁根因是 Chromium 非客户区拖拽区（见 .sidebar-header 的注释），已另行修掉。 */
   /* 折叠/展开的平滑收放：width 由内联 style 驱动，分割线宽度同步过渡，
      内容被 overflow:hidden 逐步裁切，看上去就是"慢慢展开"。
      App.tsx 里 sidebarOpen 变化后会补一次 resize（过渡结束后）。 */
@@ -53,6 +61,9 @@
 }
 
 /* ── Resize Handle ── */
+/* 命中带 = 这条手柄 + 编辑器一侧的镜像热区（App.css 的 .editor-edge-grab）。
+   左栏：手柄 right:-4px/宽 8px，边界外侧那 4px 会被 .sidebar 的 overflow:hidden 裁掉，
+   真正可点只有内侧 4px，另外 8px 由镜像热区补齐 → 跨边界共 12px 连续命中带。 */
 .sidebar-resize-handle {
   position: absolute;
   top: 0;
@@ -62,6 +73,32 @@
   cursor: col-resize;
   z-index: 10;
   background: transparent;
+}
+
+/* 悬停 / 拖动中在边界上画一条 2px 主题色线（常态是 .sidebar 的 1px border）。
+   热区本身是透明的，没有这条线用户根本不知道有没有对准边界。 */
+.sidebar-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background 0.15s ease;
+  pointer-events: none;
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar.resizing .sidebar-resize-handle::after {
+  background: var(--accent, #4a90e2);
+}
+
+/* 「推回去」的临界反馈：宽度已压到最小宽度以下（松手即收起），内容淡出提示。
+   手柄本身排除在外 —— 用户正握着它拖。 */
+.sidebar.pushing-in > *:not(.sidebar-resize-handle) {
+  opacity: 0.15;
 }
 
 /* ── Header ── */
@@ -713,7 +750,13 @@
   padding: 0px 8px 6px;
   border-bottom: none;
   flex-shrink: 0;
-  -webkit-app-region: drag;
+  /* 这里**故意不写** `-webkit-app-region: drag`：
+     本项目在 Windows 上启用了 WebView2 的非客户区支持
+     （vendor/wry/src/webview2/mod.rs 的 SetIsNonClientRegionSupportEnabled(true)），
+     所以 `drag` 是**真的**会生成 Chromium 非客户区。tab 行里就是毛玻璃的页签按钮，
+     它们被 .sidebar-tabs-wrapper 的 `no-drag` 挖出一个洞 —— 侧栏宽度动画 / 顶栏显隐时
+     Chromium 每帧重算这个掩码，WebView2 上就表现为「大纲 / 标签页签在闪」。
+     窗口拖动改由 Sidebar.tsx 上的 data-tauri-drag-region（走 Tauri JS，不产生非客户区）。 */
 }
 
 /* Windows/Linux：去掉 macOS 顶栏占位后，保留 tab 上方正常边距 */
@@ -726,7 +769,6 @@ html:not(.platform-macos) .sidebar-header {
   display: flex;
   align-items: center;
   width: 100%;
-  -webkit-app-region: no-drag;
   gap: 0;
   padding: 3px;
   border-radius: 14px;
@@ -1693,9 +1735,17 @@ html:not(.platform-macos) .sidebar-header {
   border-left: 1px solid var(--border);
 }
 
+/* 右栏的内侧（左边缘）没有滚动条 —— 各面板的滚动条都落在它们自己的右侧（即窗口外侧），
+   所以这里可以把整个手柄收进侧栏内部：命中带直接翻倍到 8px，不依赖镜像热区。 */
 .sidebar.sidebar-right .sidebar-resize-handle {
-  left: -4px;
+  left: 0;
   right: auto;
+}
+
+/* 右栏的提示线贴侧栏左边缘（= 边界），不是手柄中心 */
+.sidebar.sidebar-right .sidebar-resize-handle::after {
+  left: 0;
+  transform: none;
 }
 
 /* macOS 红绿灯占位仅在左栏顶部生效；右栏顶栏留 0 高度，与 Windows/Linux 一致 */

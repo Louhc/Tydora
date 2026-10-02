@@ -3051,3 +3051,63 @@ input.ui-scale-stepper-input {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+
+/* ── 回收站条目列表（设置 → 通用） ── */
+.trash-entry-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.trash-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.trash-entry:last-child {
+  border-bottom: none;
+}
+
+.trash-entry-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.trash-entry-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trash-entry-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+}
+
+.trash-entry-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.trash-status-error {
+  color: var(--danger-color, #d9534f);
+}
+
+.trash-status-ok {
+  color: var(--accent, #40a37e);
+}

@@ -10,6 +10,7 @@ import { PublishSettings } from "./publish";
 import CliMcpSettings from "./cli/CliMcpSettings";
 import { findSettingsSearchItem } from "./settings/settingsSearchIndex";
 import { loadCanvasSettings, saveCanvasSettings, type CanvasSettings } from "./Canvas/canvas-settings";
+import { TrashSettings } from "./components/TrashSettings";
 import { TerminalSettingsContent } from "./Terminal/TerminalSettingsContent";
 import { VimSettingsPanel } from "./vim/settings/VimSettingsPanel";
 import { loadTerminalSettings, type TerminalSettings } from "./Terminal/terminal-settings";
@@ -663,6 +664,9 @@ function GeneralSettingsContent({
           </label>
         </div>
       </div>
+
+      {/* 回收站：删除的保护措施（位置 / 占用 / 恢复 / 清空） */}
+      <TrashSettings />
 
       <div className="canvas-settings-card sidebar-settings-card">
         <div className="sidebar-settings-card-header">

@@ -13,7 +13,20 @@ export function isMarkdownFileName(name: string): boolean {
 }
 
 /**
- * 展示用的名字：Markdown 文件隐藏扩展名（.md / .markdown / .mdx）。
+ * 展示时隐藏哪些扩展名：Markdown 之外还有白板 `.canvas`。
+ * 重命名提交时按原扩展名原样接回（见 restoreExtension），所以这里只是观感。
+ */
+const HIDDEN_EXTENSIONS = ["md", "markdown", "mdx", "canvas"];
+
+/** 取「需要隐藏的扩展名」原文（含点，保留原始大小写）；不需要隐藏时返回空串。 */
+function hiddenExtensionOf(name: string): string {
+  const m = name.match(/\.[A-Za-z0-9]+$/);
+  if (!m) return "";
+  return HIDDEN_EXTENSIONS.includes(m[0].slice(1).toLowerCase()) ? m[0] : "";
+}
+
+/**
+ * 展示用的名字：隐藏 Markdown（.md / .markdown / .mdx）与白板（.canvas）的扩展名。
  *
  * 用于树标签 / 顶部标题，也用作内联重命名输入框的初始值（输入框同样只显示基名，
  * 提交时由 restoreExtension() 把原扩展名接回去）。
@@ -21,8 +34,9 @@ export function isMarkdownFileName(name: string): boolean {
  * （1.5.md / 1.md）比较的，展示名只影响观感。
  */
 export function displayFileName(name: string, isDirectory: boolean): string {
-  if (isDirectory || !isMarkdownFileName(name)) return name;
-  return name.replace(/\.(md|markdown|mdx)$/i, "");
+  if (isDirectory) return name;
+  const ext = hiddenExtensionOf(name);
+  return ext ? name.slice(0, -ext.length) : name;
 }
 
 /**
@@ -32,15 +46,16 @@ export function displayFileName(name: string, isDirectory: boolean): string {
  * 提交时必须还原成 `笔记.md` —— 否则一次失焦就把 .md 改没了。
  *
  * 两种情况不追加：
- *   1) 目录 / 非 Markdown 文件：displayFileName 本就没隐藏后缀，用户输入的就是全名；
- *   2) 用户自己把后缀打回来了（也包括改成 .markdown / .mdx）：以用户输入为准。
+ *   1) 目录 / 不在隐藏列表里的扩展名：displayFileName 本就没隐藏后缀，用户输入的就是全名；
+ *   2) 用户自己把后缀打回来了（也包括改成 .markdown / .mdx / .canvas）：以用户输入为准。
  */
 export function restoreExtension(input: string, originalName: string, isDirectory: boolean): string {
   const name = input.trim();
-  if (!name || isDirectory || !isMarkdownFileName(originalName)) return name;
-  if (/\.(md|markdown|mdx)$/i.test(name)) return name;
-  const ext = originalName.match(/\.(md|markdown|mdx)$/i)?.[0] ?? "";
+  if (!name || isDirectory) return name;
+  const ext = hiddenExtensionOf(originalName);
   if (!ext) return name;
+  const lower = name.toLowerCase();
+  if (HIDDEN_EXTENSIONS.some((e) => lower.endsWith(`.${e}`))) return name;
   // Windows 会静默吃掉结尾的点，先去掉再拼，免得 `foo.` 变成 `foo..md`
   const base = name.replace(/\.+$/, "");
   return base ? `${base}${ext}` : name;

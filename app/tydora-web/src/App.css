@@ -92,8 +92,11 @@
   padding: 0 8px;
   background: var(--bg-primary);
   z-index: 10;
-  -webkit-app-region: drag;
   position: relative;
+  /* 这里**故意不写** `-webkit-app-region: drag`：
+     Chromium 的非客户区拖拽区会在元素位置/尺寸变化时（顶栏收起、侧栏开合导致宽度动画）
+     逐帧重算拖拽掩码，WebView2 上表现为顶栏右侧按钮闪烁。
+     窗口拖动改由 Tauri 的 data-tauri-drag-region="deep" 负责（见 App.tsx 的 .editor-topbar）。 */
 }
 
 .editor-topbar .sidebar-toggle-btn,
@@ -162,6 +165,76 @@
   flex-direction: column;
   position: relative;
 }
+
+/* ── 侧栏边界（编辑器一侧） ──
+   左栏手柄只有 4px 真正可点（另一半被 .sidebar 的 overflow:hidden 裁掉），
+   这里在编辑器左侧补一条 8px 透明热区，与手柄拼成跨边界 12px 的连续命中带。
+   右栏不需要：它的手柄已整体收进侧栏内（8px）且本身就覆盖边界像素；
+   若在编辑器一侧再补一条，就必须避开编辑器滚动条而右移，悬停线会落在
+   边界之外 6px，看起来像两条分开的线。
+   本热区只做「单击收起」，拖动调宽仍由侧栏手柄负责。
+   z-index 低于顶栏(10)，顶栏那一带仍由顶栏优先响应。 */
+.editor-edge-grab {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 8;
+  cursor: col-resize;
+}
+
+.editor-edge-grab.left {
+  left: 0;
+}
+
+/* 悬停时在边界上画 2px 主题色线，让「边界在哪」一眼可见 */
+.editor-edge-grab::after,
+.editor-edge-reveal::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+  pointer-events: none;
+}
+
+.editor-edge-grab.left::after,
+.editor-edge-reveal.left::after {
+  left: 0;
+}
+
+/* 右栏收起时：探出条为避开编辑器滚动条内缩了 6px，但提示线要画在
+   「侧栏将会出现的位置」= 窗口右边缘，所以用负偏移补回那 6px */
+.editor-edge-reveal.right::after {
+  right: calc(-1 * var(--scrollbar-size, 6px));
+}
+
+.editor-edge-grab:hover::after,
+.editor-edge-reveal:hover::after {
+  background: var(--accent, #4a90e2);
+}
+
+/* 侧栏收起后：编辑器边缘留一条 6px「探出条」，单击即展开 —— 让边界变成双向手势
+   （此前收起后边界就消失了，只能靠顶栏按钮或快捷键展开）。 */
+.editor-edge-reveal {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 8;
+  cursor: col-resize;
+}
+
+.editor-edge-reveal.left {
+  left: 0;
+}
+
+.editor-edge-reveal.right {
+  right: var(--scrollbar-size, 6px);
+}
+
 
 /* 侧栏折叠时：为顶部滑出栏预留空间，避免遮挡 Frontmatter 等首元素 */
 .editor-container.sidebar-collapsed .editor-panel {
@@ -289,6 +362,13 @@
 /* 鼠标进入触发区或悬停在栏上时滑出 */
 .editor-container.sidebar-collapsed .editor-topbar-trigger:hover+.editor-topbar,
 .editor-container.sidebar-collapsed .editor-topbar:hover {
+  top: 0;
+}
+
+/* 迟滞：由 App.tsx 的鼠标监听判定（进入 54px 内滑出，离开后延迟 240ms 缩回）。
+   纯 :hover 的触发带只有 36px，停在顶栏下沿一两像素外就会缩回，
+   用户朝顶部的文件标题移动时会看到「滑出→缩回→滑出」，按钮像是在闪。 */
+.editor-container.sidebar-collapsed.topbar-pinned .editor-topbar {
   top: 0;
 }
 
@@ -1217,6 +1297,8 @@
   cursor: text;
   padding: 2px 6px;
   border-radius: 4px;
+  /* 短过渡：悬停进出时不要硬闪（高频进出会让整页重绘，进而带动侧栏毛玻璃重采样） */
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .editor-file-name.editable:hover {
@@ -2346,3 +2428,4 @@
   color: var(--accent, #40a37e);
   padding: 9px 4px;
 }
+

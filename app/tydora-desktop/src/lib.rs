@@ -2236,6 +2236,7 @@ pub fn run() {
             append_export_file,
             notify_main_closing,
             list_dir_with_meta,
+            commands::file_commands::path_usage,
             spawn_terminal,
             write_terminal,
             resize_terminal,
