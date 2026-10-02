@@ -293,6 +293,9 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
 
     // Check if settings window already exists, if so just focus it
     if let Some(existing) = app.get_webview_window(label) {
+        // 必须 show：window-state 插件可能把「上次隐藏时保存的可见性」恢复成隐藏，
+        // 只 set_focus 的话窗口会一直不可见（表现为点设置毫无反应）。
+        let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
     }
@@ -304,7 +307,15 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     )
     .title("设置")
     .inner_size(800.0, 600.0)
-    .min_inner_size(600.0, 400.0)
+    // 设置窗口固定大小，但**不用 resizable(false)**：
+    // 去掉 WS_THICKFRAME 会让 Windows 在无边框透明窗口上画一圈非客户区边框
+    // （浅色模式下表现为一圈白框）。改为"最小尺寸 = 最大尺寸"锁死尺寸 ——
+    // 窗口样式与其他窗口一致，拖边也拉不动。
+    .min_inner_size(800.0, 600.0)
+    .max_inner_size(800.0, 600.0)
+    // 禁止最大化：双击顶栏的"最大化"是 Windows 对标题栏的行为
+    //（Tauri 拖拽区走的正是 OS 标题栏拖动），无边框窗口只能从窗口属性上禁掉。
+    .maximizable(false)
     .center()
     .visible(false)
     .decorations(cfg!(target_os = "macos"))

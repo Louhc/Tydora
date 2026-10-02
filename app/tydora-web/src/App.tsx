@@ -847,8 +847,12 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   const [settingsKey, setSettingsKey] = useState(0);
   const openSettings = useCallback((tab?: string) => {
     if (tab) localStorage.setItem("zmd-settings-initial-tab", tab);
-    setSettingsKey((k) => k + 1);
-    setSettingsOpen(true);
+    // 设置是**独立窗口**：可以拖到主窗口之外，位置/大小由 window-state 插件记住。
+    // 命令不可用时退回窗口内弹框（老行为），保证功能不缺失。
+    void invoke("open_settings_window").catch(() => {
+      setSettingsKey((k) => k + 1);
+      setSettingsOpen(true);
+    });
   }, []);
   const [autoHideTopbar, setAutoHideTopbar] = useState(() => s.autoHideTopbar ?? false);
   const [autoHideTopbarOnCollapse, setAutoHideTopbarOnCollapse] = useState(() => s.autoHideTopbarOnCollapse ?? true);
@@ -1045,6 +1049,43 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
       cancelled = true;
     };
   }, [canvasFilePath, treeRefreshKey]);
+
+  /**
+   * 打开的文件被删除（应用内右键删除 / Delete / Ctrl+D，或外部删除）后，编辑区不该继续停在
+   * 一个已不存在的文件上 —— 把对应缓冲复位成「未命名空文档」，主区域回落成初始页面。
+   *
+   * 为什么不直接删缓冲：分屏 pane 会引用 bufferId，粗暴删数组会让 pane 指向缺失的缓冲。
+   * 这里只把 fileName 清空（→ 自动保存不会再把它写回来）、内容清空，其余保持不动。
+   * 触发时机：文件树刷新计数自增（应用内删除走 onReload，外部删除走文件监听）。
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      for (const buf of buffersRef.current) {
+        if (!buf.fileName) continue;
+        try {
+          if (await exists(buf.fileName)) continue;
+        } catch {
+          continue; // exists 失败不代表被删
+        }
+        if (cancelled) return;
+        const gonePath = buf.fileName;
+        updateBuffer(buf.id, { fileName: null, content: "", savedContent: "", modified: false });
+        if (normalizePathKey(fileName ?? "") === normalizePathKey(gonePath)) {
+          // 被删的正是当前打开的文件：整体复位成初始页面
+          setFileName(null);
+          setContent("");
+          setModified(false);
+          setSaveStatus("idle");
+          setPreviewFilePath(null);
+          setCanvasFilePath(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [treeRefreshKey, fileName, updateBuffer]);
 
   // 快速打开文件弹窗状态
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1481,27 +1522,35 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   useEffect(() => { notifyResize(); }, [rightSidebarWidth]);
 
   /**
-   * 从折叠态「拉出来」：编辑器侧探出条按下后，宽度逐帧跟随鼠标。
-   * 宽度只存在 pullWidth 里，不写回 sidebarWidth —— 避免把「拉到一半」的值持久化；
-   * 松手时才决定是提交宽度（≥ 阈值）还是缩回折叠（拉得不够）。
+   * 侧栏边界拖动：拉出 / 压回 / 调宽三种手感统一走这里。
+   *
+   * - 折叠态：在编辑器边缘按下并往外拖 → 跟手「拉出来」（拖过阈值才提交宽度，不够则缩回）；
+   *   只按一下不拖 → 展开到记忆宽度；
+   * - 展开态：按下边界（编辑器一侧的补强热区）往外/往里拖 → 跟手调宽；
+   *   压到阈值以下松手 = 收起，否则夹到最小宽度；只按一下不拖 = 收起（保留点边界收起的手感）。
+   *
+   * 拖动期间的宽度只存在 pullWidth 里，不写回 sidebarWidth —— 避免把「拖到一半」的值持久化。
    */
-  const [pulling, setPulling] = useState<{ side: "left" | "right"; startX: number } | null>(null);
+  const [pulling, setPulling] = useState<
+    { side: "left" | "right"; startX: number; startWidth: number; wasCollapsed: boolean } | null
+  >(null);
   const [pullWidth, setPullWidth] = useState(0);
   const pullWidthRef = useRef(0);
   const pullMovedRef = useRef(false);
+  const pullExpandedRef = useRef(false);
 
   const startSidebarPull = useCallback(
     (side: "left" | "right") => (e: React.MouseEvent) => {
       e.preventDefault();
+      const wasCollapsed = side === "left" ? !sidebarOpen : !rightSidebarOpen;
+      const startWidth = wasCollapsed ? 0 : side === "left" ? sidebarWidth : rightSidebarWidth;
       pullMovedRef.current = false;
-      pullWidthRef.current = 0;
-      setPullWidth(0);
-      setPulling({ side, startX: e.clientX });
-      // 按下即展开（宽度从 0 开始跟手），松手没拉动就停在记住的宽度上
-      if (side === "left") setSidebarOpen(true);
-      else setRightSidebarOpen(true);
+      pullExpandedRef.current = !wasCollapsed;
+      pullWidthRef.current = startWidth;
+      setPullWidth(startWidth);
+      setPulling({ side, startX: e.clientX, startWidth, wasCollapsed });
     },
-    [],
+    [sidebarOpen, rightSidebarOpen, sidebarWidth, rightSidebarWidth],
   );
 
   useEffect(() => {
@@ -1509,24 +1558,44 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     const onMove = (e: MouseEvent) => {
       const delta = e.clientX - pulling.startX;
       if (Math.abs(delta) >= SIDEBAR_DRAG_THRESHOLD) pullMovedRef.current = true;
-      // 左栏往右拉、右栏往左拉，才是「拉出来」
+      // 左栏往右、右栏往左才是「变宽 / 拉出来」
       const outward = pulling.side === "left" ? delta : -delta;
-      const live = Math.max(0, Math.min(SIDEBAR_MAX_WIDTH, outward));
+      const live = Math.max(0, Math.min(SIDEBAR_MAX_WIDTH, pulling.startWidth + outward));
+      // 折叠态：真的开始拖了才展开（只按一下时不闪一条 0 宽的侧栏）
+      if (pulling.wasCollapsed && !pullExpandedRef.current && pullMovedRef.current) {
+        pullExpandedRef.current = true;
+        if (pulling.side === "left") setSidebarOpen(true);
+        else setRightSidebarOpen(true);
+      }
       pullWidthRef.current = live;
       setPullWidth(live);
     };
     const onUp = () => {
       const live = pullWidthRef.current;
       const moved = pullMovedRef.current;
+      const expanded = pullExpandedRef.current;
+      const { side, wasCollapsed } = pulling;
       setPulling(null);
-      if (!moved) return; // 只是按了一下：已展开，宽度保持记忆值
+      if (!moved) {
+        // 只按了一下：展开态 → 收起；折叠态 → 展开到记忆宽度（宽度交给 sidebarWidth）
+        if (wasCollapsed) {
+          if (side === "left") setSidebarOpen(true);
+          else setRightSidebarOpen(true);
+        } else if (side === "left") {
+          setSidebarOpen(false);
+        } else {
+          setRightSidebarOpen(false);
+        }
+        return;
+      }
+      if (!expanded) return;
       if (live < SIDEBAR_COLLAPSE_THRESHOLD) {
-        // 拉得不够 → 缩回去（抽屉没拉出来）
-        if (pulling.side === "left") setSidebarOpen(false);
+        // 压/拉得不够 → 收起（不写宽度，保留记忆值）
+        if (side === "left") setSidebarOpen(false);
         else setRightSidebarOpen(false);
       } else {
         const w = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, live));
-        if (pulling.side === "left") setSidebarWidth(w);
+        if (side === "left") setSidebarWidth(w);
         else setRightSidebarWidth(w);
       }
     };
@@ -4119,13 +4188,13 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
 
         {/* 编辑区域 */}
         <main className={`editor-container${!sidebarOpen ? " sidebar-is-closed" : ""}${topbarAutoHide ? " sidebar-collapsed" : ""}${topbarPinned ? " topbar-pinned" : ""}`}>
-          {/* 侧栏边界：编辑器左侧的补强热区（单击收起，与侧栏手柄拼成跨边界命中带）。
-              右栏不需要 —— 它的手柄已整体收进侧栏内且覆盖边界像素。 */}
+          {/* 侧栏边界（编辑器一侧的补强热区）：与侧栏手柄拼成跨边界命中带。
+              按下即进入统一拖动：拖 = 调宽，压过阈值松手 = 收起；只按一下 = 收起。 */}
           {sidebarOpen && (
             <div
               className="editor-edge-grab left"
               title={t("app.toolbar.collapseSidebar")}
-              onClick={() => setSidebarOpen(false)}
+              onMouseDown={startSidebarPull("left")}
             />
           )}
           {/* 侧栏收起后，在编辑器边缘按下并往外拉 = 拉出来（跟手）；轻按一下 = 展开到记忆宽度 */}

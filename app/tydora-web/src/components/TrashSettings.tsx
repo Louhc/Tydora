@@ -11,14 +11,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { formatBytes } from "../utils/formatBytes";
 import {
-  TRASH_MAX_BYTES,
+  applyTrashQuota,
   deleteTrashEntry,
   emptyTrash,
   getConfiguredTrashDir,
   getTrashDir,
+  getTrashMaxBytes,
   listTrashEntries,
   restoreTrashEntry,
   setConfiguredTrashDir,
+  setTrashMaxBytes,
   type TrashEntry,
 } from "../services/recycleBin";
 
@@ -31,12 +33,18 @@ export function TrashSettings() {
   /** 最近一次操作的结果（恢复后的新路径等），在卡片里就地提示，不弹系统 alert */
   const [notice, setNotice] = useState<string | null>(null);
   const [emptyConfirmOpen, setEmptyConfirmOpen] = useState(false);
+  /** 当前生效的容量（字节）与输入框里的 MB 文本 */
+  const [maxBytes, setMaxBytes] = useState(() => getTrashMaxBytes());
+  const [capacityMB, setCapacityMB] = useState(() => String(Math.round(getTrashMaxBytes() / (1024 * 1024))));
 
   const refresh = useCallback(async () => {
     try {
       setError(null);
       setTrashDir(await getTrashDir());
       setEntries(await listTrashEntries());
+      const current = getTrashMaxBytes();
+      setMaxBytes(current);
+      setCapacityMB(String(Math.round(current / (1024 * 1024))));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -113,6 +121,32 @@ export function TrashSettings() {
     }
   }, [refresh, t]);
 
+  /** 应用新的容量：调小后立即按新容量淘汰一次 */
+  const handleApplyCapacity = useCallback(async () => {
+    const mb = Number.parseFloat(capacityMB);
+    if (!Number.isFinite(mb) || mb <= 0) {
+      setError(t("settings.trash.capacityInvalid"));
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      setTrashMaxBytes(mb * 1024 * 1024);
+      const evicted = await applyTrashQuota();
+      await refresh();
+      setNotice(
+        evicted > 0
+          ? t("settings.trash.capacityAppliedEvicted", { count: evicted })
+          : t("settings.trash.capacityApplied"),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [capacityMB, refresh, t]);
+
   const formatTime = (ms: number) => new Date(ms).toLocaleString();
 
   return (
@@ -121,8 +155,33 @@ export function TrashSettings() {
         <div className="canvas-settings-row-label">
           <span className="canvas-settings-row-title">{t("settings.trash.title")}</span>
           <span className="canvas-settings-row-desc">
-            {t("settings.trash.desc", { limit: formatBytes(TRASH_MAX_BYTES) })}
+            {t("settings.trash.desc", { limit: formatBytes(maxBytes) })}
           </span>
+        </div>
+      </div>
+
+      <div className="canvas-settings-row">
+        <div className="canvas-settings-row-label">
+          <span className="canvas-settings-row-title">{t("settings.trash.capacity")}</span>
+          <span className="canvas-settings-row-desc">{t("settings.trash.capacityDesc")}</span>
+        </div>
+        <div className="canvas-settings-row-control">
+          <input
+            type="number"
+            min={1}
+            step={1}
+            className="settings-input settings-input-small"
+            style={{ width: 90 }}
+            value={capacityMB}
+            onChange={(e) => setCapacityMB(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleApplyCapacity();
+            }}
+          />
+          <span className="canvas-settings-row-desc">MB</span>
+          <button className="settings-button" onClick={() => void handleApplyCapacity()} disabled={busy}>
+            {t("settings.trash.capacityApply")}
+          </button>
         </div>
       </div>
 

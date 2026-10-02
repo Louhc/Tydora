@@ -18,7 +18,7 @@ import { type SidebarTab } from "./Settings";
 import { FileTreeIcon } from "./SidebarFileIcons";
 import { displayFileName, isMarkdownFileName, restoreExtension } from "./utils/fileName";
 import { formatBytes } from "./utils/formatBytes";
-import { TRASH_MAX_BYTES, measureTotalUsage, moveToTrash } from "./services/recycleBin";
+import { getTrashMaxBytes, measureTotalUsage, moveToTrash, restoreTrashEntry } from "./services/recycleBin";
 import "./Sidebar.css";
 
 // 大纲标签页顶部的本地图谱：d3 依赖较重，动态加载避免拖慢首屏
@@ -1283,7 +1283,6 @@ function SearchResults({
 function TreeNodeComp({
   node,
   depth,
-  activePath,
   pendingActivePath,
   onSelect,
   onRefresh,
@@ -1308,7 +1307,6 @@ function TreeNodeComp({
 }: {
   node: TreeNode;
   depth: number;
-  activePath: string | null;
   pendingActivePath: string | null;
   onSelect: (path: string) => void;
   onRefresh: () => void;
@@ -1536,7 +1534,6 @@ function TreeNodeComp({
     setCtxMenu({ x: e.clientX, y: e.clientY });
   }, []);
 
-  const isActive = activePath === node.path;
   const isPending = pendingActivePath === node.path;
   const isSelected = selectedPaths.has(node.path);
   const indent = depth * 22;
@@ -1546,7 +1543,7 @@ function TreeNodeComp({
     <div className="tree-branch">
       <div
         ref={nodeRef}
-        className={`tree-node${isActive ? " active" : ""}${isPending ? " pending-active" : ""}${isSelected ? " selected" : ""}${isDragOver ? " drag-over" : ""}`}
+        className={`tree-node${isPending ? " pending-active" : ""}${isSelected ? " selected" : ""}${isDragOver ? " drag-over" : ""}`}
         style={{ paddingLeft: `${8 + indent}px` }}
         onClick={handleToggle}
         onDoubleClick={(e) => {
@@ -1613,7 +1610,6 @@ function TreeNodeComp({
               key={child.path}
               node={child}
               depth={depth + 1}
-              activePath={activePath}
               pendingActivePath={pendingActivePath}
               onSelect={onSelect}
               onRefresh={onRefresh}
@@ -1710,6 +1706,13 @@ function FileTree({
    * 正常删除直接移入回收站、不再弹确认 —— 回收站本身就是保护措施。
    */
   const [permanentDeletePaths, setPermanentDeletePaths] = useState<string[] | null>(null);
+  /**
+   * 「选择非活动」：点击编辑区/空白区后，树里的选择**保留**但高亮变淡
+   * （对应 VSCode 的 inactive selection）；再点树里任意一行就恢复全亮。
+   */
+  const [selectionInactive, setSelectionInactive] = useState(false);
+  /** 最近一次移入回收站的条目 id：Ctrl+Z 撤销删除时用 */
+  const lastTrashMoveRef = useRef<string[]>([]);
   /** 上面那次「永久删除」确认对应的实际体量，仅用于在确认框里显示大小 */
   const permanentDeleteTotalBytesRef = useRef(0);
 
@@ -2117,10 +2120,13 @@ function FileTree({
   const movePathsToTrash = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return;
     try {
-      const { moved, failed, evicted } = await moveToTrash(
+      const left = await moveToTrash(
         paths.map((p) => ({ path: p })),
         rootPath,
       );
+      const { moved, failed, evicted } = left;
+      // 记住这次移入回收站的条目：Ctrl+Z 撤销删除时按这批恢复
+      lastTrashMoveRef.current = moved.map((entry) => entry.id);
       if (failed.length > 0) {
         showToast(i18n.t("sidebar.toast.trashPartial", { count: failed.length }));
       } else if (moved.length > 0) {
@@ -2148,8 +2154,9 @@ function FileTree({
    */
   const requestDeletePaths = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return;
-    const total = await measureTotalUsage(paths);
-    if (total > TRASH_MAX_BYTES) {
+    const maxBytes = getTrashMaxBytes();
+    const total = await measureTotalUsage(paths, maxBytes);
+    if (total > maxBytes) {
       permanentDeleteTotalBytesRef.current = total;
       setPermanentDeletePaths(paths);
       return;
@@ -2193,6 +2200,8 @@ function FileTree({
   const handleMouseDown = useCallback((e: React.MouseEvent, nodePath: string, isDirectory: boolean) => {
     // Only left button
     if (e.button !== 0) return;
+    // 点回树里：选择恢复全亮（点击树外时只是变淡）
+    setSelectionInactive(false);
     dragStartRef.current = { x: e.clientX, y: e.clientY, path: nodePath, isDirectory };
     // 登记为「树上当前节点」：文件夹点击只展开/折叠、不会走 onSelect，
     // 不在 mousedown 这里登记的话，新建文件/文件夹的落点就永远算不到那个文件夹。
@@ -2361,6 +2370,29 @@ function FileTree({
   // 所以点文件夹也要登记（见 handleMouseDown）—— 点文件夹只展开/折叠，不会走 onSelect。
   const [pendingActivePath, setPendingActivePath] = useState<string | null>(null);
   const pendingActivePathRef = useRef<string | null>(null);
+
+  /**
+   * 点击文件树以外的地方（编辑区、空白区、顶部栏…）→ 取消选择。
+   *
+   * 浮层必须排除：右键菜单 / 确认框都 portal 到 body，点击它们时若先把选择清空，
+   * 「删除」就只会作用于当前节点，而不是刚才多选的那一批。
+   * 位置说明：必须放在 pendingActivePath / handleClearSelection 之后 —— 依赖数组在渲染期
+   * 就会读取它们，提前会触发 TDZ。
+   */
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (treeRef.current?.contains(target)) return;
+      if (target.closest(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog'], .sidebar-tab-drag-ghost")) return;
+      // 有选择/当前项时才需要切换状态（避免在编辑区里每次点击都 setState）
+      if (selectedPaths.size === 0 && (!pendingActivePath || pendingActivePath === rootPath)) return;
+      // VSCode 语义：选择**保留**，只是变淡（不取消选择）
+      setSelectionInactive(true);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    return () => document.removeEventListener("mousedown", onDown, true);
+  }, [selectedPaths, pendingActivePath, rootPath, handleClearSelection]);
   pendingActivePathRef.current = pendingActivePath;
 
   // ── Blank area actions ──
@@ -2665,25 +2697,33 @@ function FileTree({
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== "Delete") return;
-      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      // Delete 或 Ctrl+D（macOS ⌘D）：删除当前节点 / 多选，二者同一条路径
+      const isPlainDelete = e.key === "Delete" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
+      const isCtrlD = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "d";
+      if (!isPlainDelete && !isCtrlD) return;
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // 输入框 / 重命名框 / 编辑器（contenteditable）：Delete 归它们自己
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+      // 输入框 / 重命名框：两个快捷键都让给它们（避免改着名字把文件删了）
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      // 输入框 / 重命名框 / 编辑区：删除类快捷键完全不碰文件区（重心在编辑区时就该只作用于编辑区）
+      if (target.isContentEditable) return;
       // 已有弹窗 / 菜单打开：不重复触发
       if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
 
-      let path = hoveredPathRef.current;
-      if (!path && treeRef.current?.contains(document.activeElement)) {
-        path = pendingActivePathRef.current;
-      }
-      if (!path) return;
+      // 「重心在文件区」才继续：焦点在树内，或鼠标正悬停在树上。
+      // 焦点在编辑器里时（即使鼠标停在树上）一律不动文件 —— 这是明确的用户预期。
+      const activeEl = document.activeElement as HTMLElement | null;
+      const editorFocused = !!(
+        activeEl &&
+        (activeEl.closest(".ProseMirror") || activeEl.closest(".cm-editor") || activeEl.closest(".codemirror-editor"))
+      );
+      if (editorFocused) return;
+      const treeFocused = !!treeRef.current?.contains(activeEl);
+      if (!treeFocused && !hoveredPathRef.current) return;
 
-      // 焦点在编辑器时：仅当编辑器自最近一次树交互后没有键鼠输入才触发
-      const active = document.activeElement as HTMLElement | null;
-      const focusInEditor = !!(active && (active.closest(".ProseMirror") || active.closest(".cm-editor") || active.closest(".codemirror-editor")));
-      if (focusInEditor && lastEditorInteractRef.current > lastTreeInteractRef.current) return;
+      let path = hoveredPathRef.current;
+      if (!path && treeFocused) path = pendingActivePathRef.current;
+      if (!path) return;
 
       const node = findNodeByPath(rootNodesRef.current, path);
       if (!node || node.path === rootPath) return;
@@ -2694,6 +2734,53 @@ function FileTree({
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [findNodeByPath, rootPath, requestDelete]);
+
+  /**
+   * Ctrl+Z（⌘Z）撤销删除：把最近一次移入回收站的条目恢复回来。
+   *
+   * 只在「重心在文件区」时生效 —— 鼠标悬停在树上或焦点在树内；焦点在输入框 / 编辑器里时
+   * 直接让给它们（编辑器有自己的撤销，不能抢）。恢复后按原有位置放回，重名会自动加数字。
+   */
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "z") return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+      // 焦点在编辑区时让给编辑器（它有自己的撤销），不碰文件区
+      const activeZ = document.activeElement as HTMLElement | null;
+      if (
+        activeZ &&
+        (activeZ.closest(".ProseMirror") || activeZ.closest(".cm-editor") || activeZ.closest(".codemirror-editor"))
+      ) {
+        return;
+      }
+      const inFileArea = !!treeRef.current?.contains(target) || !!hoveredPathRef.current;
+      if (!inFileArea) return;
+      if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
+      const ids = lastTrashMoveRef.current;
+      if (ids.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      lastTrashMoveRef.current = [];
+      void (async () => {
+        let restored = 0;
+        try {
+          for (const id of ids) {
+            await restoreTrashEntry(id);
+            restored += 1;
+          }
+        } catch (err) {
+          console.error("[undo-delete] 恢复失败:", err);
+        }
+        if (restored > 0) showToast(i18n.t("sidebar.toast.restoredFromTrash", { count: restored }));
+        else showToast(i18n.t("sidebar.toast.restoreFromTrashFailed"));
+        await handleReload();
+      })();
+    };
+    document.addEventListener("keydown", handler, true);
+    return () => document.removeEventListener("keydown", handler, true);
+  }, [handleReload]);
 
   // ── F2 重命名（作用于树上当前选中的文件 / 文件夹） ──
   // 目标 = pendingActivePath（树上当前选中项：鼠标点击、vim j/k、新建后都会登记），
@@ -2721,26 +2808,32 @@ function FileTree({
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
       // 已有弹窗 / 菜单打开：不重复触发
       if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
-      // 别的 contenteditable（白板文本框等）里按 F2 不该动侧栏文件；
-      // 但主编辑器必须放行：点选文件后焦点就落在 TipTap / CodeMirror 里，
-      // 那正是「选中文件按 F2」最常见的入口（F2 在编辑器里没有任何既有含义）。
-      // 【踩过的坑】早先这里连 isContentEditable 一起拦，结果只有「按住文件、
-      // 焦点还没被编辑器抢走」时 F2 才有反应，选中文件后按 F2 毫无反应。
+      // 别的 contenteditable（白板文本框等）里按 F2 不该动侧栏文件
       const editable = target.closest("[contenteditable]");
+      if (editable && editable.getAttribute("contenteditable") !== "false") return;
+
+      /**
+       * 与删除类快捷键同一策略：**重心在编辑区时，快捷键不影响文件区**。
+       * 主编辑器（ProseMirror / CodeMirror）有焦点时按 F2 一律不动作；
+       * 只有「焦点在树内」或「鼠标悬停在树上」才算重心在文件区。
+       * （注：点选文件后焦点会落到编辑器，所以想改名请把鼠标停在树上、
+       *   或先点一下文件树；这是与删除快捷键保持一致的行为。）
+       */
+      const activeEl = document.activeElement as HTMLElement | null;
       if (
-        editable &&
-        editable.getAttribute("contenteditable") !== "false" &&
-        !editable.closest(".ProseMirror, .cm-editor, .codemirror-editor")
+        activeEl &&
+        (activeEl.closest(".ProseMirror") || activeEl.closest(".cm-editor") || activeEl.closest(".codemirror-editor"))
       ) {
         return;
       }
+      const treeFocused = !!treeRef.current?.contains(activeEl);
+      if (!treeFocused && !hoveredPathRef.current) return;
 
-      // 目标优先级：树上当前选中项（pendingActivePath：点击 / j·k / 新建后都会登记）
-      // → 编辑器里正打开的文件（用 QuickOpen / 大纲打开时树上可能还没有选中项）
-      // → 鼠标悬停节点。
-      let path = pendingActivePathRef.current;
+      // 目标优先级：鼠标悬停节点 → 树上当前选中项（pendingActivePath：点击 / j·k / 新建后都会登记）
+      // → 编辑器里正打开的文件（用 QuickOpen / 大纲打开时树上可能还没有选中项）。
+      let path = hoveredPathRef.current;
+      if (!path || path === rootPath) path = pendingActivePathRef.current;
       if (!path || path === rootPath) path = activePath;
-      if (!path || path === rootPath) path = hoveredPathRef.current;
       if (!path || path === rootPath) return; // 仓库根不能在树里重命名
       if (!findNodeByPath(rootNodesRef.current, path)) return;
 
@@ -3133,7 +3226,7 @@ function FileTree({
       </div>
       <div
         ref={treeRef}
-        className={`sidebar-tree${hidden ? " hidden" : ""}${isDragging ? " dragging" : ""}${dragOverPath === rootPath ? " drag-over" : ""}`}
+        className={`sidebar-tree${hidden ? " hidden" : ""}${isDragging ? " dragging" : ""}${dragOverPath === rootPath ? " drag-over" : ""}${selectionInactive ? " selection-inactive" : ""}`}
         onContextMenu={handleBlankContextMenu}
         onScroll={handleScroll}
         onClick={(e) => { if (e.target === e.currentTarget) handleClearSelection(); }}
@@ -3146,7 +3239,6 @@ function FileTree({
             key={node.path}
             node={node}
             depth={0}
-            activePath={activePath}
             pendingActivePath={pendingActivePath}
             onSelect={(path) => {
               // 鼠标点击后 Vim 光标跟随到该文件：pending-active 始终指向最近交互的节点，
@@ -3210,7 +3302,7 @@ function FileTree({
           title={i18n.t("sidebar.dialog.permanentDeleteTitle")}
           message={i18n.t("sidebar.dialog.permanentDeleteMessage", {
             size: formatBytes(permanentDeleteTotalBytesRef.current),
-            limit: formatBytes(TRASH_MAX_BYTES),
+            limit: formatBytes(getTrashMaxBytes()),
           })}
           type="danger"
           onConfirm={confirmPermanentDelete}

@@ -187,8 +187,9 @@
   left: 0;
 }
 
-/* 悬停时在边界上画 2px 主题色线，让「边界在哪」一眼可见 */
-.editor-edge-grab::after,
+/* 提示线只在「折叠态探出条」上画：画在侧栏将会出现的位置（窗口/编辑器边缘）。
+   展开态不再画编辑器一侧的线 —— 边界只保留侧栏自身的一条线（悬停/拖动时由
+   Sidebar.css 把它染成主题色并向右加宽 1px），避免出现两条并排的线。 */
 .editor-edge-reveal::after {
   content: "";
   position: absolute;
@@ -200,7 +201,6 @@
   pointer-events: none;
 }
 
-.editor-edge-grab.left::after,
 .editor-edge-reveal.left::after {
   left: 0;
 }
@@ -211,7 +211,6 @@
   right: calc(-1 * var(--scrollbar-size, 6px));
 }
 
-.editor-edge-grab:hover::after,
 .editor-edge-reveal:hover::after {
   background: var(--accent, #4a90e2);
 }

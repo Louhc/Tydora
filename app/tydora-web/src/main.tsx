@@ -9,6 +9,7 @@ bootStamp("js_main_entry");
 import { ThemeProvider } from "./themes";
 import { LanguageProvider } from "./i18n/LanguageContext";
 import { VimProvider } from "./vim";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./i18n"; // init i18next before first render
 bootStamp("i18n_imported_init_done");
 
@@ -53,6 +54,7 @@ const App = lazy(() =>
 const MindmapWindow = lazy(() => import("./mindmap").then((m) => ({ default: m.MindmapWindow })));
 const GraphWindow = lazy(() => import("./graph").then((m) => ({ default: m.GraphWindow })));
 const CanvasWindow = lazy(() => import("./Canvas/CanvasWindow"));
+const SettingsWindow = lazy(() => import("./Settings"));
 
 // 屏蔽 ResizeObserver 循环警告（调整窗口/侧栏宽度时的良性警告）
 // Chromium 的 ResizeObserver 错误走 window.onerror 和 console.error 两条路径
@@ -83,16 +85,34 @@ if (import.meta.env.DEV) {
 function Root() {
   bootStamp("root_component_entered");
   const urlParams = new URLSearchParams(window.location.search);
-  const isMindmapWindow = urlParams.get("window") === "mindmap";
-  const isGraphWindow = urlParams.get("window") === "graph";
-  const isCanvasWindow = urlParams.get("window") === "canvas";
-  const initialFilePath = urlParams.get("window") === "editor"
+  /**
+   * 窗口类型：优先 URL 的 ?window=；dev 下入口是 index.html，走 Vite 时 query 可能被
+   * 重定向吃掉，于是退回读 **Tauri 窗口 label**（Rust 建窗口时的 label 与这里的 key 同名：
+   * settings / mindmap / graph / canvas / vault-manager / editor）。
+   */
+  let windowKind = urlParams.get("window");
+  if (!windowKind) {
+    try {
+      windowKind = getCurrentWindow().label || null;
+    } catch {
+      windowKind = null;
+    }
+  }
+  const isMindmapWindow = windowKind === "mindmap";
+  const isGraphWindow = windowKind === "graph";
+  const isCanvasWindow = windowKind === "canvas";
+  const isSettingsWindow = windowKind === "settings";
+  const initialFilePath = windowKind === "editor"
     ? urlParams.get("file")?.replace(/\//g, "\\")
     : null;
-  const initialVaultPath = urlParams.get("window") === "editor"
+  const initialVaultPath = windowKind === "editor"
     ? urlParams.get("vault")?.replace(/\//g, "\\")
     : null;
 
+  if (isSettingsWindow) {
+    bootEnd("main_window_lazy_chunks_resolve");
+    return <SettingsWindow />;
+  }
   if (isMindmapWindow) {
     bootEnd("main_window_lazy_chunks_resolve");
     return <MindmapWindow />;

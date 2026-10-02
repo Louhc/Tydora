@@ -65,6 +65,12 @@
       "title": "回收站",
       "desc": "删除的文件/文件夹会先移到这里（所有仓库共用一个回收站），只保留最近的数据、总量不超过 {{limit}}，超出时按最旧优先清理。恢复时视为新建文件，重名会自动加数字。",
       "location": "回收站位置",
+      "capacity": "回收站容量",
+      "capacityDesc": "超过容量时按最旧优先清理；把容量调小后会立即清理一次。",
+      "capacityApply": "应用",
+      "capacityInvalid": "请输入大于 0 的容量（单位 MB）。",
+      "capacityApplied": "容量已更新。",
+      "capacityAppliedEvicted": "容量已更新，并清理了最旧的 {{count}} 项。",
       "defaultLocation": "默认位置（应用数据目录下的 recycle-bin）",
       "select": "选择文件夹",
       "useDefault": "使用默认",
@@ -973,6 +979,8 @@
       "movedToTrash": "已移入回收站：{{count}} 项",
       "trashPartial": "{{count}} 项未能移入回收站",
       "trashEvicted": "回收站超出容量，已清理最旧的 {{count}} 项",
+      "restoredFromTrash": "已撤销删除，恢复 {{count}} 项",
+      "restoreFromTrashFailed": "恢复失败：文件可能已不在回收站里",
       "permanentlyDeleted": "已永久删除：{{count}} 项"
     },
     "bookmarks": {

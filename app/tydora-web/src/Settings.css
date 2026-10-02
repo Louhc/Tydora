@@ -154,7 +154,32 @@
   -webkit-app-region: no-drag;
 }
 
-/* ── 顶部留白区域 ── */
+/* ── 独立窗口顶栏：横跨整个窗口，整条可拖动 ── */
+.settings-window-topbar {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 内容区大标题：与下面的卡片同容器（.settings-main 有 32px 内边距），因此自动左对齐；
+   上方留出更大间距（与顶栏分开）。 */
+.settings-main-title {
+  margin: 20px 0 14px;
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── 顶部区域：弹框模式的留白（独立窗口见 .settings-window-topbar） ── */
 .settings-nav-topbar {
   height: 36px;
   flex-shrink: 0;
@@ -162,6 +187,30 @@
   position: relative;
   user-select: none;
   -webkit-user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+}
+
+.settings-window-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.settings-window-close:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.16));
+  color: var(--text-primary);
 }
 
 .settings-nav-content {

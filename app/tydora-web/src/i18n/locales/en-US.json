@@ -65,6 +65,12 @@
       "title": "Recycle Bin",
       "desc": "Deleted files/folders are moved here first (one shared bin for all vaults). Only the most recent data is kept, up to {{limit}}; the oldest is purged first. Restoring treats the item as a new file and adds a number on name conflicts.",
       "location": "Recycle bin location",
+      "capacity": "Recycle bin capacity",
+      "capacityDesc": "When over capacity the oldest items are purged first; shrinking the capacity purges immediately.",
+      "capacityApply": "Apply",
+      "capacityInvalid": "Enter a capacity greater than 0 (MB).",
+      "capacityApplied": "Capacity updated.",
+      "capacityAppliedEvicted": "Capacity updated; the oldest {{count}} item(s) were purged.",
       "defaultLocation": "Default location (recycle-bin inside the app data directory)",
       "select": "Choose folder",
       "useDefault": "Use default",
@@ -973,6 +979,8 @@
       "movedToTrash": "Moved to recycle bin: {{count}} item(s)",
       "trashPartial": "{{count}} item(s) could not be moved to the recycle bin",
       "trashEvicted": "Recycle bin over capacity: removed the oldest {{count}} item(s)",
+      "restoredFromTrash": "Undid delete: restored {{count}} item(s)",
+      "restoreFromTrashFailed": "Restore failed: the item may no longer be in the recycle bin",
       "permanentlyDeleted": "Permanently deleted: {{count}} item(s)"
     },
     "bookmarks": {

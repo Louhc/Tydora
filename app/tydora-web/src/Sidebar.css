@@ -8,6 +8,10 @@
   flex-direction: column;
   overflow: hidden;
   flex-shrink: 0;
+  /* z-index:1 而不是默认的 auto：
+     1) 左栏边界高亮用 box-shadow 向编辑器一侧（右）加宽 1px，需要盖在 main 背景之上；
+     2) 侧栏整体处于 main 之上，侧栏内渲染的固定浮层（如删除确认框）才不会被编辑区盖住。 */
+  z-index: 1;
   /* ⚠️ 这里**不要**加 `isolation: isolate`。
      曾为了把毛玻璃（tab 条 / 仓库控件，见 --sidebar-chrome-opacity）的 backdrop 采样范围
      收进侧栏而加过它，结果侧栏变成层叠上下文：渲染在侧栏内部的对话框
@@ -90,9 +94,20 @@
   pointer-events: none;
 }
 
-.sidebar-resize-handle:hover::after,
-.sidebar.resizing .sidebar-resize-handle::after {
+/* 提示线只画在右栏手柄上（贴侧栏左边缘 = 边界）。
+   左栏不用它：左栏的边界只保留 .sidebar 自身那条线，
+   悬停/拖动时染成主题色并向右加宽 1px（见下面的边界高亮规则），避免两条线并排。 */
+.sidebar.sidebar-right .sidebar-resize-handle:hover::after,
+.sidebar.sidebar-right.resizing .sidebar-resize-handle::after {
   background: var(--accent, #4a90e2);
+}
+
+/* 左栏边界：一条线，悬停「编辑器侧热区」/ 悬停手柄 / 拖动中 → 主题色 + 向右加宽 1px */
+.main-container:has(.editor-edge-grab.left:hover) .sidebar:not(.sidebar-right),
+.sidebar:not(.sidebar-right):has(.sidebar-resize-handle:hover),
+.sidebar:not(.sidebar-right).resizing {
+  border-right-color: var(--accent, #4a90e2);
+  box-shadow: 1px 0 0 var(--accent, #4a90e2);
 }
 
 /* 「推回去」的临界反馈：宽度已压到最小宽度以下（松手即收起），内容淡出提示。
@@ -190,96 +205,31 @@
 }
 
 .tree-node:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.tree-node:active {
-  transform: scale(0.98);
-  transition: transform 0.1s ease;
-}
-
-.tree-node.active {
-  padding-left: 8px;
-  background: linear-gradient(135deg,
-      rgba(var(--accent-rgb, 137, 180, 250), 0.12) 0%,
-      rgba(255, 255, 255, 0.1) 100%);
-  color: var(--text-primary);
-  font-weight: 500;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.05),
-    0 1px 4px rgba(0, 0, 0, 0.06);
-  border: 0.5px solid rgba(var(--accent-rgb, 137, 180, 250), 0.2);
-}
-
-.tree-node.active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
-  border-radius: 0 3px 3px 0;
-  background: var(--accent);
-  box-shadow: 0 0 8px rgba(var(--accent-rgb, 137, 180, 250), 0.5);
-  animation: tree-active-bar 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-}
-
-.tree-node.selected {
-  background: rgba(var(--accent-rgb, 137, 180, 250), 0.08);
-  border: 0.5px solid rgba(var(--accent-rgb, 137, 180, 250), 0.12);
-}
-
-/* Vim 键盘光标（j/k 高亮，不会打开文件） */
+/* ── 选中态（VSCode 风格） ──
+   树的高亮只表示**树里的选择**，与「哪个文件正开着」无关：
+   - .pending-active = 当前项（单击某行 / 键盘 j·k 定位）
+   - .selected       = 多选（Ctrl / Shift 点选）
+   两者外观一致：单色扁平底，不用渐变 / 侧边竖条 / 虚线框。
+   键盘焦点在树内时再加一圈细边框（对应 VSCode 的 focus 边框）。 */
+.tree-node.selected,
 .tree-node.pending-active {
-  background: linear-gradient(135deg,
-      rgba(var(--accent-rgb, 137, 180, 250), 0.10) 0%,
-      rgba(255, 255, 255, 0.06) 100%);
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.16);
   color: var(--text-primary);
-  font-weight: 500;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.15),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.04),
-    0 1px 3px rgba(0, 0, 0, 0.04);
-  border: 0.5px dashed rgba(var(--accent-rgb, 137, 180, 250), 0.3);
-  outline: none;
 }
 
-.tree-node.pending-active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
-  border-radius: 0 3px 3px 0;
-  background: var(--accent);
-  box-shadow: 0 0 6px rgba(var(--accent-rgb, 137, 180, 250), 0.35);
-  opacity: 0.65;
+.sidebar-tree:focus-within .tree-node.selected,
+.sidebar-tree:focus-within .tree-node.pending-active {
+  outline: 1px solid rgba(var(--accent-rgb, 137, 180, 250), 0.55);
+  outline-offset: -1px;
 }
 
-/* 同时存在 .active（真实打开）和 .pending-active（Vim 光标）时，以真实 active 为主，不叠加虚线条 */
-.tree-node.pending-active.active {
-  border: 0.5px solid rgba(var(--accent-rgb, 137, 180, 250), 0.2);
-}
-
-.tree-node.pending-active.active::before {
-  opacity: 1;
-  box-shadow: 0 0 8px rgba(var(--accent-rgb, 137, 180, 250), 0.5);
-}
-
-@keyframes tree-active-bar {
-  0% {
-    height: 0;
-    opacity: 0;
-  }
-
-  100% {
-    height: 20px;
-    opacity: 1;
-  }
+/* 选择非活动（点了编辑区/空白区）：选择保留，高亮变淡 —— 对应 VSCode 的 inactive selection */
+.sidebar-tree.selection-inactive .tree-node.selected,
+.sidebar-tree.selection-inactive .tree-node.pending-active {
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.06);
 }
 
 .tree-chevron {
@@ -1997,6 +1947,3 @@ html.platform-macos .sidebar.sidebar-right .sidebar-topbar {
   height: 15px;
 }
 
-.tree-node.active .tree-file-icon {
-  color: var(--text-secondary, #8a919f);
-}

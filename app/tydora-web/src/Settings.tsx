@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef, type MouseEvent as ReactMouseEvent, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
@@ -3188,14 +3189,50 @@ export default function Settings({ onClose }: { onClose?: () => void }) {
   // 触发持久化 + 跨窗口广播，此处仅维护设置窗口内的本地 state 供 UI 渲染。
   const [terminalSettings, setTerminalSettings] = useState<TerminalSettings>(() => loadTerminalSettings());
 
-  // 弹框模式：由宿主（App）传入 onClose；Ctrl+W / Ctrl+, 均走此关闭
-  const handleClose = useCallback(() => {
-    onClose?.();
+  // 独立窗口模式：显式把自己显示出来。
+  // Rust 建窗口时是 visible(false)（避免白屏闪烁），而 window-state 插件可能把
+  // 「上次隐藏时保存的可见性」恢复回来 —— 两者叠加会出现「窗口创建成功却一直不显示」，
+  // 表现就是点设置按钮毫无反应。这里无条件 show + focus 一次（弹框模式不需要）。
+  // 顺带：window-state 也会恢复"最大化"状态，而设置窗口本该是固定大小，
+  // 所以启动时若发现是最大化态就还原（保留用户记住的位置/大小）。
+  useEffect(() => {
+    if (onClose) return;
+    const win = getCurrentWindow();
+    void (async () => {
+      try {
+        if (await win.isMaximized()) await win.unmaximize();
+      } catch {
+        /* 忽略 */
+      }
+      try {
+        await win.show();
+        await win.setFocus();
+      } catch {
+        /* 忽略 */
+      }
+    })();
   }, [onClose]);
 
-  // Ctrl+W / Ctrl+,（macOS：⌘）关闭设置窗口；Alt+1 / Alt+2 转发给主窗口折叠侧栏
+  // 弹框模式：由宿主（App）传入 onClose；独立窗口模式：直接关掉自己
+  // （位置/大小由 window-state 插件记住，下次在原位打开）
+  const handleClose = useCallback(() => {
+    if (onClose) {
+      onClose();
+      return;
+    }
+    void getCurrentWindow().close();
+  }, [onClose]);
+
+  // Esc / Ctrl+W / Ctrl+,（macOS：⌘）关闭设置窗口；Alt+1 / Alt+2 转发给主窗口折叠侧栏
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // 有对话框 / 菜单打开时先让它们处理（例如「清空回收站」的确认框）
+        if (document.querySelector(".confirm-dialog-overlay, .modal, [role='dialog'], .context-menu")) return;
+        e.preventDefault();
+        handleClose();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "w") {
         e.preventDefault();
         handleClose();
@@ -3375,8 +3412,46 @@ export default function Settings({ onClose }: { onClose?: () => void }) {
   // Flatten for checking if any results
   const hasResults = filteredGroups.some(group => group.items.length > 0);
 
+  /**
+   * 内容区大标题：`分组 · 页签`（如「通用 · 图像」「功能 · 思维导图」）。
+   * 分组名取自导航分组，落在同一分组里的同名页签（如「通用」）只显示一次。
+   */
+  const activeTabLabel = activeTab ? t(`settings.tabs.${activeTab}`) : "";
+  const activeGroupTitle = navGroups.find((g) => g.items.some((item) => item.id === activeTab))?.title ?? "";
+  const settingsHeading =
+    activeGroupTitle && activeGroupTitle !== activeTabLabel
+      ? `${activeGroupTitle} · ${activeTabLabel}`
+      : activeTabLabel || activeGroupTitle;
+
   return (
     <div className="settings-window">
+      {/* 独立窗口的顶栏：横跨整个窗口宽度，整条都可拖动（右侧是关闭按钮）。
+          标题按左侧导航当前宽度缩进，正好落在右侧内容区顶部被留白的那一块。
+          弹框模式没有窗口边框，由宿主提供标题栏，故不渲染。 */}
+      {!onClose && (
+        <div
+          className="settings-window-topbar"
+          data-tauri-drag-region
+          // 双击顶栏的兜底：窗口已设为不可最大化，万一 OS 仍然最大化（例如
+          // 窗口样式被系统恢复成可缩放），这里立刻还原。
+          onDoubleClick={() => {
+            const win = getCurrentWindow();
+            void win.isMaximized().then((m) => (m ? win.unmaximize() : undefined)).catch(() => {});
+          }}
+        >
+          <button
+            className="settings-window-close"
+            data-tauri-drag-region="false"
+            title={t("settings.close")}
+            onClick={handleClose}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+      )}
       {/* 主内容 */}
       <div className="settings-body">
         {/* 左侧菜单 */}
@@ -3384,8 +3459,8 @@ export default function Settings({ onClose }: { onClose?: () => void }) {
           className={`settings-nav${isNavResizing ? " resizing" : ""}`}
           style={{ width: navWidth }}
         >
-          {/* 顶部留白（原独立窗口的拖拽区，弹框模式仅作间距） */}
-          <div className="settings-nav-topbar" />
+          {/* 弹框模式的顶部留白（独立窗口的拖拽区已提到窗口级 .settings-window-topbar） */}
+          {onClose && <div className="settings-nav-topbar" />}
           <div className="settings-nav-content">
             {/* 搜索框 */}
             <div className="settings-nav-search">
@@ -3450,9 +3525,13 @@ export default function Settings({ onClose }: { onClose?: () => void }) {
 
         {/* 右侧内容 */}
         <div className="settings-main-wrapper">
-          {/* 内容区域顶部留白（关闭按钮由 AppModal 悬浮提供） */}
-          <div className="settings-main-topbar" />
+          {/* 弹框模式的顶部留白（独立窗口由 .settings-window-topbar 提供拖拽区） */}
+          {onClose && <div className="settings-main-topbar" />}
           <main className="settings-main">
+            {/* 独立窗口：内容区大标题（「关于」页不显示）。放在 .settings-main 里 → 与卡片自动左对齐 */}
+            {!onClose && activeTab !== "about" && (
+              <h2 className="settings-main-title">{settingsHeading}</h2>
+            )}
             {activeTab === "general" && (
               <GeneralSettingsContent settings={generalSettings} onChange={setGeneralSettings} />
             )}

@@ -19,13 +19,46 @@ import { appDataDir } from "@tauri-apps/api/path";
 import { invoke } from "@tauri-apps/api/core";
 import { baseNameOf, joinDirLike, parentDirOf } from "../utils/fileName";
 
-/** 回收站总量预算：10MB */
-export const TRASH_MAX_BYTES = 10 * 1024 * 1024;
+/** 回收站总量预算的**默认值**：10MB（可在设置里调整，见 getTrashMaxBytes） */
+export const TRASH_MAX_BYTES_DEFAULT = 10 * 1024 * 1024;
+/** 兼容旧引用：默认预算 */
+export const TRASH_MAX_BYTES = TRASH_MAX_BYTES_DEFAULT;
+
+/** 容量下限/上限（设置里可调）：1MB ~ 10GB */
+const TRASH_MAX_BYTES_MIN = 1 * 1024 * 1024;
+const TRASH_MAX_BYTES_MAX = 10 * 1024 * 1024 * 1024;
 
 /** 回收站位置（用户配置；空 = 用默认位置） */
 const TRASH_DIR_KEY = "zmd-trash-dir";
+/** 回收站容量（用户配置，字节；空 = 用默认值） */
+const TRASH_MAX_BYTES_KEY = "zmd-trash-max-bytes";
 const INDEX_FILE = "index.json";
 const ITEMS_DIR = "items";
+
+/** 读取用户配置的回收站容量（字节）；没配置或非法时返回默认值 */
+export function getTrashMaxBytes(): number {
+  try {
+    const raw = localStorage.getItem(TRASH_MAX_BYTES_KEY);
+    const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed <= 0) return TRASH_MAX_BYTES_DEFAULT;
+    return Math.min(Math.max(parsed, TRASH_MAX_BYTES_MIN), TRASH_MAX_BYTES_MAX);
+  } catch {
+    return TRASH_MAX_BYTES_DEFAULT;
+  }
+}
+
+/** 写入回收站容量（字节）；非法值忽略 */
+export function setTrashMaxBytes(bytes: number): void {
+  try {
+    if (!Number.isFinite(bytes) || bytes <= 0) localStorage.removeItem(TRASH_MAX_BYTES_KEY);
+    else {
+      const clamped = Math.min(Math.max(Math.round(bytes), TRASH_MAX_BYTES_MIN), TRASH_MAX_BYTES_MAX);
+      localStorage.setItem(TRASH_MAX_BYTES_KEY, String(clamped));
+    }
+  } catch {
+    /* localStorage 不可用：本次会话继续用默认值 */
+  }
+}
 
 export interface TrashEntry {
   id: string;
@@ -103,7 +136,7 @@ async function writeIndex(trashDir: string, entries: TrashEntry[]): Promise<void
  * 统计失败时返回 0（乐观：当作放得下，宁可少记配额也不要因为统计失败删掉用户的东西），
  * 但会打日志 —— 若 Rust 命令缺失/未重建，控制台能看到原因。
  */
-export async function measureUsage(path: string, cap: number = TRASH_MAX_BYTES): Promise<number> {
+export async function measureUsage(path: string, cap: number = getTrashMaxBytes()): Promise<number> {
   try {
     return await invoke<number>("path_usage", { path, maxBytes: cap });
   } catch (err) {
@@ -113,7 +146,7 @@ export async function measureUsage(path: string, cap: number = TRASH_MAX_BYTES):
 }
 
 /** 批量统计总量，超过 cap 就提前收敛 */
-export async function measureTotalUsage(paths: string[], cap: number = TRASH_MAX_BYTES): Promise<number> {
+export async function measureTotalUsage(paths: string[], cap: number = getTrashMaxBytes()): Promise<number> {
   let total = 0;
   for (const p of paths) {
     total += await measureUsage(p, cap);
@@ -152,13 +185,14 @@ async function movePath(src: string, dst: string, isDirectory: boolean): Promise
 
 /** 删除后维持「最近的条目、总量 ≤ 配额」，多出来的按最旧优先淘汰 */
 async function enforceQuota(trashDir: string): Promise<number> {
+  const maxBytes = getTrashMaxBytes();
   const entries = await readIndex(trashDir);
   const newestFirst = [...entries].sort((a, b) => b.deletedAt - a.deletedAt);
   const kept: TrashEntry[] = [];
   let total = 0;
   const evicted: TrashEntry[] = [];
   for (const entry of newestFirst) {
-    if (total + entry.size <= TRASH_MAX_BYTES) {
+    if (total + entry.size <= maxBytes) {
       kept.push(entry);
       total += entry.size;
     } else {
@@ -175,6 +209,14 @@ async function enforceQuota(trashDir: string): Promise<number> {
   }
   await writeIndex(trashDir, kept);
   return evicted.length;
+}
+
+/**
+ * 按当前容量设置重新淘汰一遍（设置里调小容量后调用），返回被清理的条目数。
+ */
+export async function applyTrashQuota(): Promise<number> {
+  const trashDir = await getTrashDir();
+  return enforceQuota(trashDir);
 }
 
 export interface TrashMoveResult {
