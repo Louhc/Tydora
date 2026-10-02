@@ -16,6 +16,7 @@ const TerminalView = lazy(() => import("./Terminal/TerminalView").then(m => ({ d
 import { killTerminal, unregisterTerminal } from "./Terminal/terminalApi";
 import { startTerminalSettingsSync } from "./Terminal/terminal-settings";
 import Sidebar, { VaultInfo } from "./Sidebar";
+import { baseNameOf, displayFileName, joinDirLike, normalizePathKey, replaceBaseNameLike, restoreExtension } from "./utils/fileName";
 import VaultManagerModal from "./VaultManager/VaultManagerModal";
 import AppModal from "./components/AppModal";
 import appIcon from "./assets/icon.png";
@@ -782,6 +783,42 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   // 可以最终决定主窗口可见性（避免竞态提前关闭）
   const [externalLaunchSettled, setExternalLaunchSettled] = useState(false);
   const [hasExternalFile, setHasExternalFile] = useState(false);
+  /**
+   * 上次会话里是否记着一个文件（同步读 localStorage，供首帧决定要不要显示欢迎卡片）。
+   * 与 hasExternalFile 同一思路：明确就要打开某个文件时，先保持纯白，
+   * 否则会出现「先欢迎卡片、再编辑器」的闪烁。
+   */
+  const [sessionRestorePending, setSessionRestorePending] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return false;
+      const saved = JSON.parse(raw) as { filePath?: string | null };
+      return !!saved?.filePath;
+    } catch {
+      return false;
+    }
+  });
+  // 兜底：恢复失败（文件已删 / 仓库被移除）时不能一直不显示欢迎卡片
+  useEffect(() => {
+    if (!sessionRestorePending) return;
+    const timer = window.setTimeout(() => setSessionRestorePending(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [sessionRestorePending]);
+  /**
+   * 主窗口在这之前是隐藏的（Rust 侧配置 visible:false，等这里发信号才显示）。
+   * - 有上次会话的文件：等它的内容真正进入状态再显示 → 用户第一帧就看到文件本身；
+   * - 没有会话文件：立刻显示（否则会白等 Rust 侧 1.5s 的兜底）。
+   */
+  useEffect(() => {
+    if (initialFilePath) return; // 新窗口模式：显示由窗口创建方负责
+    if (!sessionRestorePending) {
+      invoke("show_main_window").catch(() => {});
+      return;
+    }
+    if (!fileName || !content) return;
+    setSessionRestorePending(false);
+    invoke("show_main_window").catch(() => {});
+  }, [initialFilePath, sessionRestorePending, fileName, content]);
   // "管理仓库"模态弹框（原独立窗口已改为弹框）
   const [vaultManagerOpen, setVaultManagerOpen] = useState(false);
   // "设置"模态弹框（原独立窗口已改为弹框）；settingsKey 每次打开自增，强制重挂载以应用 initial-tab
@@ -2013,8 +2050,12 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
       // 检查目标编辑器窗格的 buffer 是否被多个窗格共享（分屏同步状态）
       const activeBufferHolders = panesRef.current.filter((p) => p.bufferId === targetBufferId).length;
       const isSharedBuffer = activeBufferHolders > 1;
-      // 若该文件已在某个缓冲中打开，复用之（同步视图）；否则读取并写入目标缓冲
-      const existing = buffersRef.current.find((b) => b.fileName === path);
+      // 若该文件已在某个缓冲中打开，复用之（同步视图）；否则读取并写入目标缓冲。
+      // 比较用归一化键：路径字符串的分隔符风格可能不同（`D:\v\a.md` vs `D:/v/a.md`），
+      // 直接比字符串会漏掉已打开的缓冲 → 同一个文件被重新加载，光标和滚动位置被重置。
+      const existing = buffersRef.current.find(
+        (b) => b.fileName && normalizePathKey(b.fileName) === normalizePathKey(path),
+      );
       if (existing) {
         setPanes((ps) => ps.map((p) => (p.id === targetPaneId ? { ...p, bufferId: existing.id } : p)));
         setSaveStatus("idle");
@@ -2677,29 +2718,56 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     setMoreMenuOpen(false);
   }, [fileName, handleShowBookmarkDialog]);
 
-  const handleRenameCurrentFile = useCallback(async () => {
-    if (!fileName) return;
-    const oldName = fileName.split(/[/\\]/).pop() || '';
-    const ext = oldName.includes('.') ? `.${oldName.split('.').pop()}` : '.md';
-    const baseName = ext === '.md' ? oldName.replace(/\.md$/, '') : oldName.slice(0, oldName.lastIndexOf('.'));
-    const newBaseName = window.prompt(t("app.rename.prompt"), baseName);
-    if (!newBaseName || newBaseName === baseName) return;
-    const parentDir = fileName.replace(/[/\\][^/\\]*$/, '');
-    const newPath = `${parentDir}/${newBaseName}${ext}`;
+  /**
+   * 重命名的唯一出口：newName 是**新文件名**（含扩展名）。
+   * 顶部标题栏的内联输入、更多菜单里的「重命名」都走这里，避免两套逻辑各错一处。
+   * 返回是否真的改了名（用于调用方决定要不要退出编辑态）。
+   */
+  const renameCurrentFileTo = useCallback(async (newName: string): Promise<boolean> => {
+    if (!fileName) return false;
+    const oldName = baseNameOf(fileName);
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return false;
+    const newPath = replaceBaseNameLike(fileName, trimmed);
     try {
+      // 重名保护：Windows 上 rename 是 MoveFileEx(REPLACE_EXISTING)，目标已存在会**静默覆盖**
+      // （重命名撞到同名笔记 = 直接把对方正文吃掉）。仅改大小写时是同一个文件，放行。
+      if (fileName.toLowerCase() !== newPath.toLowerCase() && (await exists(newPath))) {
+        alert(t("sidebar.error.nameExists", { name: trimmed }));
+        return false;
+      }
       // 更新 wiki 链接
       if (!LinkIndexService.isEmpty() && fileName.endsWith('.md')) {
         const vp = activeVaultIndex >= 0 ? vaults[activeVaultIndex]?.path : null;
         if (vp) await LinkIndexService.rewriteWikiLinks(fileName, newPath, vp);
       }
       await rename(fileName, newPath);
+      // 广播新旧路径：已经打开该文件的其他窗格/缓冲要把 buffer 指到新路径，
+      // 否则它们之后的自动保存会照着旧路径再写一份文件出来（与 Sidebar 里的 rename() 同一理由）。
+      window.dispatchEvent(
+        new CustomEvent("file-renamed", { detail: { oldPath: fileName, newPath } }),
+      );
       setTreeRefreshKey(k => k + 1);
-      handleSelectFile(newPath);
+      // 注意：这里**不**调 handleSelectFile —— 改名不是打开文件。
+      // buffer 的新路径由上面的 file-renamed 广播更新（编辑器据此把自己认成
+      // 「同一个文档换了个路径」，光标 / 滚动 / 撤销历史原地保留）；
+      // 再走一次打开流程会白记一次「打开文档」埋点，还可能因为重新读盘把位置冲掉。
+      return true;
     } catch (err) {
       console.error(t("app.error.renameFailed"), err);
+      return false;
     }
+  }, [fileName, vaults, activeVaultIndex]);
+
+  const handleRenameCurrentFile = useCallback(async () => {
+    if (!fileName) return;
+    const oldName = baseNameOf(fileName);
+    const newBaseName = window.prompt(t("app.rename.prompt"), displayFileName(oldName, false));
     setMoreMenuOpen(false);
-  }, [fileName, handleSelectFile, vaults, activeVaultIndex]);
+    if (newBaseName === null) return; // 取消
+    // 输入框里只显示基名，提交时把扩展名接回去（与文件树内联改名同一套规则）
+    await renameCurrentFileTo(restoreExtension(newBaseName, oldName, false));
+  }, [fileName, renameCurrentFileTo]);
 
   const handleCopyRelativePath = useCallback(() => {
     if (!fileName) return;
@@ -3244,6 +3312,11 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         // 没有匹配到就返回原引用，避免无谓的重渲染
         return changed ? next : bs;
       });
+
+      // 白板 / 预览走的是独立 state（不在 buffers 里），同样要跟着改名走，
+      // 否则视图还指着旧路径，白板下次保存会把旧文件又写回来。
+      setCanvasFilePath((p) => (p === oldPath ? newPath : p));
+      setPreviewFilePath((p) => (p === oldPath ? newPath : p));
     };
     window.addEventListener("file-renamed", handleFileRenamed);
     return () => window.removeEventListener("file-renamed", handleFileRenamed);
@@ -3268,7 +3341,9 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         // 占位链接：创建新笔记
         const activeVault = activeVaultIndex >= 0 ? vaults[activeVaultIndex] : null;
         if (activeVault) {
-          const newPath = `${activeVault.path}/${noteName}.md`;
+          // 用与仓库路径相同的分隔符拼接：混用分隔符会让路径字符串与文件树不一致，
+          // 之后再点这个文件就会被当成「另一个文件」重新加载（光标/滚动被重置）。
+          const newPath = joinDirLike(activeVault.path, `${noteName}.md`);
           writeTextFile(newPath, `# ${noteName}\n`).then(() => {
             LinkIndexService.updateFileLinks(newPath, activeVault.path);
             handleSelectFile(newPath);
@@ -3575,6 +3650,40 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   const displayedFileName = fileName;
   const displayedTitle = title;
   const displayedSaveStatus = saveStatus;
+
+  // ── 顶部标题栏内联改名 ──
+  // 点击标题就地变成输入框：只显示基名（Markdown 隐藏扩展名，与文件树一致），
+  // 提交时用 restoreExtension 把原扩展名接回去。
+  const [titleEditing, setTitleEditing] = useState(false);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  // Enter 提交后输入框会卸载，个别 WebView 仍会补一次 focusout → 用标志位挡住第二次提交
+  const titleCommitRef = useRef(false);
+
+  const startTitleEdit = useCallback(() => {
+    if (!fileName) return; // 没打开文件时标题是 "Tydora"，点了不动
+    titleCommitRef.current = false;
+    setTitleEditing(true);
+  }, [fileName]);
+
+  useEffect(() => {
+    if (!titleEditing) return;
+    const inp = titleInputRef.current;
+    if (!inp) return;
+    inp.focus();
+    inp.select();
+  }, [titleEditing]);
+
+  // 切文件（点树、跳转、外部打开）时退出编辑态，免得框里还停着上一个文件名
+  useEffect(() => {
+    setTitleEditing(false);
+  }, [fileName]);
+
+  const commitTitleEdit = useCallback((raw: string) => {
+    if (titleCommitRef.current) return;
+    titleCommitRef.current = true;
+    setTitleEditing(false);
+    void renameCurrentFileTo(restoreExtension(raw, baseNameOf(fileName), false));
+  }, [fileName, renameCurrentFileTo]);
 
   // ── 导出 ──
   const handleExport = async (format: ExportFormat) => {
@@ -3892,10 +4001,43 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
                 </div>
               )}
             </div>
-            <span className="editor-file-name" title={displayedFileName || "Tydora"}>
-              {displayedTitle}
-              <span className={`traffic-light traffic-light--${displayedFileName ? displayedSaveStatus : "idle"}`} />
-            </span>
+            {titleEditing ? (
+              <input
+                ref={titleInputRef}
+                className="editor-file-name-input"
+                // 顶栏是 data-tauri-drag-region="deep"：不显式标 false 的话点它会变成拖窗口
+                data-tauri-drag-region="false"
+                defaultValue={displayFileName(baseNameOf(fileName), false)}
+                spellCheck={false}
+                onKeyDown={(e) => {
+                  // 中文输入法组字中的 Enter/Escape 是「选词/取消候选」，不是提交改名
+                  if (e.nativeEvent.isComposing) return;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitTitleEdit((e.target as HTMLInputElement).value);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    titleCommitRef.current = true; // 取消：不让随后的 blur 再提交一次
+                    setTitleEditing(false);
+                  }
+                }}
+                onBlur={(e) => commitTitleEdit(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span
+                className={`editor-file-name${fileName ? " editable" : ""}`}
+                data-tauri-drag-region="false"
+                title={displayedFileName || "Tydora"}
+                onClick={startTitleEdit}
+              >
+                {displayFileName(displayedTitle, false)}
+                <span
+                  className={`traffic-light traffic-light--${displayedFileName ? displayedSaveStatus : "idle"}`}
+                  data-tauri-drag-region="false"
+                />
+              </span>
+            )}
             <div className="window-controls" data-tauri-drag-region="false">
               {pinnedItems.back && (
                 <button
@@ -4396,7 +4538,9 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
                 // 只有 hasPendingFileResult === false：明确没有文件 → 显示欢迎卡片
                 hasPendingFileResult === false &&
                 !initialFilePath &&
-                !hasExternalFile ? (
+                !hasExternalFile &&
+                // 上次会话有文件：恢复期间保持纯白，别先闪一下欢迎卡片
+                !sessionRestorePending ? (
               <div className="editor-welcome">
                 <div className="welcome-hint">
                   <div className="welcome-brand">

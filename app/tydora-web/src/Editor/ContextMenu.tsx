@@ -414,7 +414,10 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       //   2) 单独按修饰键 —— 用户往往正要 Shift+点击去扩展选区。
       const modifierOnly = ["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock"].includes(e.key);
       const isShortcut = e.ctrlKey || e.metaKey || e.altKey;
-      if (!modifierOnly && !isShortcut) collapseSelection();
+      // Backspace / Delete 本身就是「作用于选区」的编辑操作：若先收掉选区，
+      // 一次退格只会删掉光标前一个字符，而不是删掉选中的整段文字。
+      const actsOnSelection = e.key === "Backspace" || e.key === "Delete";
+      if (!modifierOnly && !isShortcut && !actsOnSelection) collapseSelection();
       onClose();
       setActiveSubmenu(null);
     };

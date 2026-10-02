@@ -1,5 +1,6 @@
 import type { Editor } from "@tiptap/core";
-import { TextSelection } from "prosemirror-state";
+import { NodeSelection, TextSelection } from "prosemirror-state";
+import type { Transaction } from "prosemirror-state";
 import type { Node } from "prosemirror-model";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 
@@ -17,6 +18,149 @@ function collapseSelection(editor: Editor) {
     editor.commands.setTextSelection(selection.head);
   } catch {
     /* 表格单元格等特殊选区取不到合法文本位置：保持原样 */
+  }
+}
+
+/**
+ * 收集一个块里所有「换行」的位置（相对块起点的偏移）。
+ *
+ * IR 里两种换行并存：代码块里的换行是文本里的 `\n`，段落里的换行是 hardBreak 节点。
+ * 两者在 ProseMirror 里都只占 1 个位置，所以偏移可以直接当 PM 位置用。
+ * 只数 text / hardBreak，像 wikiLink、tag 这种内联原子节点不参与计数，
+ * 免得它们的 nodeSize 与 textContent 长度不一致时把位置算歪。
+ */
+function collectLineBreaks(parent: Node): number[] {
+  const breaks: number[] = [];
+  let offset = 0;
+  parent.forEach((child) => {
+    if (child.isText) {
+      const text = child.text ?? "";
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === "\n") breaks.push(offset + i);
+      }
+    } else if (child.type.name === "hardBreak") {
+      breaks.push(offset);
+    }
+    offset += child.nodeSize;
+  });
+  return breaks;
+}
+
+/**
+ * 提交一次「删除行」的事务。
+ *
+ * 兜底：doc 的内容约束是 `block+`，真被删空会得到一个再也输不进字的文档。
+ * 这时改用一个空段落占位 —— 与 CodeMirror 在单行文档上删完留下一空行一致。
+ */
+function dispatchLineDelete(editor: Editor, tr: Transaction): void {
+  const { state, view } = editor;
+  const next =
+    tr.doc.childCount === 0
+      ? state.tr.replaceWith(0, state.doc.content.size, state.schema.nodes.paragraph.create())
+      : tr;
+  view.dispatch(next.scrollIntoView());
+  view.focus();
+}
+
+/**
+ * 删除当前行 —— IR（即时渲染）模式的 deleteLine。
+ *
+ * SV 模式的删除行由 CodeMirror 自带 keymap（Ctrl+Shift+K）提供，IR 里没有「源码行」，
+ * 行的粒度由块决定，所以按下面几档处理：
+ *   1) 块里还有别的行（代码块里的 `\n`、段落里的 hardBreak）→ 只删这一行的文本，
+ *      最后一行的换行要从前面吃，否则会多留一个空行；
+ *   2) 表格单元格内 → 只清空这一段（删单元格 / 整行会把表格拆散）；
+ *   3) 列表项内 → 删整项（SV 里 `- foo` 就是一行，删行即删项）；
+ *      用 deleteRange：列表因此空了它会连列表一起收掉，不留非法空壳；
+ *   4) 其余 → 删掉整个块节点（段落 / 标题 / 代码块…）。
+ *      只清空内容会凭空多出一个空行，那不是「删掉这一行」。
+ *      块是容器的独子时（blockquote / callout 里唯一的段落）退化成清空内容，
+ *      否则容器会变成空壳，而它们的内容约束同样要求至少一个块。
+ *
+ * 有选区时按选区删（等于 Backspace 的语义）。
+ */
+export function deleteCurrentLine(editor: Editor): void {
+  if (!editor.isEditable) return;
+  try {
+    const { state } = editor;
+    const { selection } = state;
+    const { $from, from, to } = selection;
+
+    // 有选区：删选区（跨块时交给 deleteRange 收敛空掉的父容器）
+    if (!selection.empty) {
+      dispatchLineDelete(editor, state.tr.deleteRange(from, to));
+      return;
+    }
+
+    // 整体选中的节点（图片 / 公式 / 表格 / 水平线…）：删掉它本身
+    if (selection instanceof NodeSelection) {
+      dispatchLineDelete(editor, state.tr.delete(from, to));
+      return;
+    }
+
+    const depth = $from.depth; // 光标所在文本块
+    const blockStart = $from.start(depth);
+    const blockEnd = $from.end(depth);
+    const breaks = collectLineBreaks($from.parent);
+
+    // 1) 块内还有别的行
+    if (breaks.length > 0) {
+      const cursor = $from.pos - blockStart;
+      let lineStart = 0;
+      let lineEnd = $from.parent.content.size;
+      for (const b of breaks) {
+        if (b < cursor) lineStart = b + 1;
+        else {
+          lineEnd = b;
+          break;
+        }
+      }
+      let delFrom = blockStart + lineStart;
+      let delTo = blockStart + lineEnd;
+      if (delTo < blockEnd) delTo += 1; // 连行尾换行一起删
+      else if (delFrom > blockStart) delFrom -= 1; // 最后一行：连行首换行一起删
+      dispatchLineDelete(editor, state.tr.delete(delFrom, delTo));
+      return;
+    }
+
+    // 2) 找「行块」：列表项 / 表格单元格要区别对待
+    let itemDepth = -1;
+    let cellDepth = -1;
+    for (let d = depth; d > 0; d--) {
+      const name = $from.node(d).type.name;
+      if (name === "listItem" || name === "taskItem") {
+        itemDepth = d;
+        break;
+      }
+      if (name === "tableCell" || name === "tableHeader") {
+        cellDepth = d;
+        break;
+      }
+    }
+
+    // 2a) 表格单元格：只清空这一段
+    if (cellDepth > 0) {
+      dispatchLineDelete(editor, state.tr.delete(blockStart, blockEnd));
+      return;
+    }
+
+    // 2b) 列表项：删整项
+    if (itemDepth > 0) {
+      dispatchLineDelete(editor, state.tr.deleteRange($from.before(itemDepth), $from.after(itemDepth)));
+      return;
+    }
+
+    // 3) 普通块
+    const parentNode = $from.node(depth - 1);
+    const insideDoc = parentNode.type.name === "doc";
+    if (!insideDoc && parentNode.childCount === 1) {
+      // 容器里的独子：删节点会留下空壳，只清空内容
+      dispatchLineDelete(editor, state.tr.delete(blockStart, blockEnd));
+      return;
+    }
+    dispatchLineDelete(editor, state.tr.delete($from.before(depth), $from.after(depth)));
+  } catch {
+    /* 视图未挂载 / 位置已失效：忽略这次按键，不能让快捷键把编辑器弄崩 */
   }
 }
 
@@ -255,6 +399,10 @@ export function executeCommand(name: string, editor: Editor | null) {
       break;
     case "redo":
       chain.redo().run();
+      break;
+    // 删除行：需要按块结构自己建事务，不走上面的 chain（见函数注释）
+    case "delete-line":
+      deleteCurrentLine(editor);
       break;
 
     // 其他

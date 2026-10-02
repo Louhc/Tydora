@@ -382,6 +382,11 @@ export interface CodeMirrorEditorHandle {
    * - 光标在视口外 → 按 scrollRatio 恢复视口自身的滚动比例
    */
   setSelectionAndScroll: (anchor: number, head: number, ratio: number, scrollRatio: number) => void;
+  /**
+   * 跳到指定行（1 基，越界自动收敛）并把该行滚到视口上方。
+   * 源码模式下的大纲点击 / 搜索结果定位走这里（IR 模式用的是另一套 PM 位置）。
+   */
+  scrollToLine: (line: number) => void;
 }
 
 const highlightCompartment = new Compartment();
@@ -773,6 +778,40 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
         };
         // 首次渲染的布局可能尚未完成，下一帧再校正一次
         requestAnimationFrame(() => applyScroll(true));
+      },
+      scrollToLine: (line: number) => {
+        const view = viewRef.current;
+        if (!view) return;
+        const total = view.state.doc.lines;
+        // 行号越界（文档刚被改短、召唤方算错）时收敛到合法范围，别抛 RangeError
+        const no = Math.max(1, Math.min(Math.round(line) || 1, total));
+        const info = view.state.doc.line(no);
+        view.dispatch({
+          selection: { anchor: info.from },
+          effects: EditorView.scrollIntoView(info.from, { y: "start", yMargin: 24 }),
+        });
+        view.focus();
+        // 兜底：CM 的 scrollIntoView 走它自己的测量循环，在本项目的容器结构下偶尔不落地
+        // （IR 侧「跳到标题」也是自己算 scrollTop 的，见 scrollEditorToHeading）。
+        // 下一帧量一下目标行究竟进没进视口，没进就自己滚到视口上三分之一处。
+        const ensureVisible = () => {
+          const v = viewRef.current;
+          if (!v) return;
+          try {
+            const coords = v.coordsAtPos(info.from);
+            const scroller = v.scrollDOM;
+            if (!coords) return;
+            const rect = scroller.getBoundingClientRect();
+            if (rect.height <= 0) return;
+            const margin = 8;
+            // 已经在视口里（CM 自己滚成功了）→ 别再多滚一次，免得两种滚动打架
+            if (coords.top >= rect.top + margin && coords.top <= rect.bottom - margin) return;
+            scroller.scrollTop += coords.top - rect.top - rect.height / 3;
+          } catch {
+            /* 位置不可测（布局未就绪）：保留 CM 自己的滚动结果 */
+          }
+        };
+        requestAnimationFrame(ensureVisible);
       },
     }));
 

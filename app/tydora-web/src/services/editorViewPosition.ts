@@ -78,6 +78,20 @@ export function loadFileViewPosition(filePath: string | null | undefined): FileV
   return hit && typeof hit.cursor === "number" ? hit : null;
 }
 
+/**
+ * 删掉某个文件的视图位置。
+ * 改名 / 移动后旧路径已经不存在了，留着这条脏记录既占配额，
+ * 又会在将来有同名文件出现时被它继承。
+ */
+export function clearFileViewPosition(filePath: string | null | undefined) {
+  if (!filePath) return;
+  const all = pending ?? readAll();
+  if (!(filePath in all)) return;
+  delete all[filePath];
+  pending = all;
+  if (flushTimer == null) flushTimer = window.setTimeout(flush, FLUSH_DELAY);
+}
+
 /** 刷新 / 关闭页面前把节流中的位置落盘 */
 export function flushFileViewPositions() {
   flush();

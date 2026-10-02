@@ -54,10 +54,11 @@ import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
 import { BulletListMindmap } from "./extensions/bullet-list-mindmap";
 import { HardBreakCleanup } from "./extensions/hardbreak-cleanup";
 import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFloatingToolbar";
-import { executeCommand } from "./extensions/custom-commands";
+import { deleteCurrentLine, executeCommand } from "./extensions/custom-commands";
+import { normalizePathKey } from "../utils/fileName";
 import { Math as MathExtension } from "./extensions/math";
 import { saveImageToLocal, loadImageSettings, resolveRelativePath, dirName, ImageSaveCancelledError, IMAGE_SETTINGS_KEY, readImageAsBlobUrl } from "../services";
-import { loadFileViewPosition, saveFileViewPosition } from "../services/editorViewPosition";
+import { loadFileViewPosition, saveFileViewPosition, clearFileViewPosition, type FileViewPosition } from "../services/editorViewPosition";
 import { LinkIndexService } from "../wikilink";
 import { loadShortcuts, matchShortcut } from "./shortcuts";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
@@ -275,6 +276,36 @@ function scrollEditorToHeading(
       scrollContainer.scrollTop += coords.top - containerRect.top - 20;
     }
   });
+}
+
+/**
+ * 源码模式（CodeMirror）下的标题定位。
+ *
+ * 优先用行号：大纲面板点标题给的就是 Markdown 行号。
+ * 只有标题文本、没有行号时（wiki 链接的 `[[note#标题]]` 跳转）在 Markdown 源里
+ * 按 ATX 标题行找一次 —— 匹配规则与 IR 侧 scrollEditorToHeading 的「全文匹配」一致。
+ */
+function scrollSourceToHeading(
+  sourceEditor: CodeMirrorEditorHandle | null,
+  markdown: string,
+  rawText: string,
+  line: number,
+): void {
+  if (!sourceEditor) return;
+  if (line > 0) {
+    sourceEditor.scrollToLine(line);
+    return;
+  }
+  const cleanText = rawText.replace(/[#*_`~]/g, "").trim();
+  if (!cleanText) return;
+  const lines = markdown.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^ {0,3}(#{1,6})(?:\s+(.+?))?\s*#*\s*$/);
+    if (m && (m[2] ?? "").replace(/[#*_`~]/g, "").trim() === cleanText) {
+      sourceEditor.scrollToLine(i + 1);
+      return;
+    }
+  }
 }
 
 /** macOS WKWebView：折叠选区后清掉原生 Selection 残留（尤其跨块选区后点击）。 */
@@ -626,6 +657,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
      * 由内容同步 effect 在恢复完之后清空。
      */
     const pendingRestorePathRef = useRef<string | null | undefined>(null);
+    /**
+     * 切文件瞬间把该文件的存档读进内存。
+     * 恢复时优先用它，而不是等 rAF 里再读一次 —— 万一之后还有哪条路径写了一次
+     * 「光标在开头、滚动为 0」，也不会影响本次恢复。
+     */
+    const pendingRestoreSnapshotRef = useRef<FileViewPosition | null>(null);
     // SV 侧：源码偏移 + ratio/scrollRatio → SV → IR 时恢复
     const sourceViewStateRef = useRef<{ anchor: number; head: number; ratio: number; scrollRatio: number }>({
       anchor: 0, head: 0, ratio: 0, scrollRatio: 0,
@@ -2215,7 +2252,43 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       return () => window.removeEventListener("keydown", handleKeyDown);
     }, [editor, restoreLinkEdit]);
 
-    // 快捷键已移至 handleDOMEvents.keydown 中处理
+    // 快捷键在 handleDOMEvents.keydown 里处理（见上方 commandMap）；「删除行」是唯一例外，
+    // 单独挂窗口级按键，原因是这里的两个坑：
+    //
+    // 1) useEditor 传了非空 deps 时 @tiptap/react v3 不再同步 options（见 editorSettingsRef
+    //    的注释），editorProps 里的回调会冻结在「编辑器创建那一刻」。改这个 handler 后热更新
+    //    只重渲染、不重建编辑器 → 运行中的实例还在跑旧闭包，表现是「代码明明改了，
+    //    Ctrl+Shift+K 还是没反应」，非得重启应用才能验。
+    //    useEffect 里登记 window 监听则每次渲染都重新挂，改完立即生效。
+    // 2) Vim 的 normal/visual 态会吞掉 handleDOMEvents 那一层的全部快捷键，而 Ctrl+Shift+K
+    //    在 vim 里没有任何绑定（SV 模式能删行靠的是 CodeMirror 自带的 keymap），
+    //    绕开 vim 层才和 SV 模式行为一致。
+    useEffect(() => {
+      if (!editor) return;
+
+      const handleKeyDown = (e: KeyboardEvent) => {
+        // 便宜的预筛：符合配置的键一定带 Ctrl（macOS 为 ⌘），先挡掉绝大多数按键，
+        // 免得每次敲字都去读一遍 localStorage 里的快捷键表。
+        if (!(e.ctrlKey || e.metaKey)) return;
+        const target = e.target as HTMLElement | null;
+        if (!target || target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+        if (!isEditorAlive(editor)) return;
+        // 光标得在本编辑器的正文里：焦点在侧栏 / 终端 / 弹窗里时不接管
+        const dom = getEditorView(editor)?.dom as HTMLElement | null;
+        if (!dom || !dom.contains(target)) return;
+        // mermaid 源码区这类内嵌的 CodeMirror 自己也绑了 Ctrl+Shift+K（defaultKeymap 的
+        // Shift-Mod-k = deleteLine），而且它先执行、事件还会冒泡上来：让行，免得删两行。
+        if (target.closest(".cm-editor")) return;
+        const keys = loadShortcuts().find((s) => s.id === "delete-line")?.keys;
+        if (!keys || !matchShortcut(e, keys)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        deleteCurrentLine(editor);
+      };
+
+      window.addEventListener("keydown", handleKeyDown, true);
+      return () => window.removeEventListener("keydown", handleKeyDown, true);
+    }, [editor]);
 
     // Vim mode 同步：vim-prose 模式变化 → VimProvider
     useEffect(() => {
@@ -2433,11 +2506,22 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         if (!isEditorAlive(editor)) return;
         executeCommand(name, editor);
       },
-      scrollToHeading: (text: string, _line: number) => {
+      scrollToHeading: (text: string, line: number) => {
+        // 源码模式：正文在 CodeMirror 里，ProseMirror 文档不在视图上，
+        // 文本匹配那一套完全无效 —— 改走行号（大纲给的正是 Markdown 行号）。
+        if (mode === "sv") {
+          scrollSourceToHeading(sourceEditorRef.current, value, text, line);
+          return;
+        }
         if (!isEditorAlive(editor)) return;
         scrollEditorToHeading(editor, containerRef.current, text);
       },
       scrollToLine: (line: number) => {
+        // 源码模式同理：搜索结果跳行也要走 CodeMirror，不然在 SV 下点了没反应
+        if (mode === "sv") {
+          sourceEditorRef.current?.scrollToLine(line);
+          return;
+        }
         if (!isEditorAlive(editor)) return;
         const { doc } = editor.state;
         // doc.textContent 不带换行（块间无分隔符），split("\n") 永远只有 1 行，
@@ -2619,6 +2703,69 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     // 外部 value 同步
     // 追踪上一次的 mode，用于检测 SV→IR 切换
     const prevModeRef = useRef(mode);
+
+    /**
+     * 「刚刚发生了一次改名」的信号：oldPath → newPath。
+     *
+     * 改名**不是**换文件 —— 内容是同一份，只是路径变了：光标 / 滚动 / 撤销历史都得原样保留，
+     * 而「换文件」那一套会全部重置。判据取 Sidebar / App 改完名广播的 `file-renamed` 事件，
+     * 而不是「路径变了但内容没变」：两个空文件互相切换同样满足后者，
+     * 那种情况必须当换文件处理（否则撤销历史会串到另一个文件上）。
+     *
+     * 事件是在 React 重新渲染**之前**同步派发的，所以本次提交里的 effect 与渲染期判断
+     * 都读得到；本次提交跑完由最后那个 effect 清掉。
+     */
+    const renamedFromRef = useRef<{ from: string; to: string } | null>(null);
+    useEffect(() => {
+      const onRenamed = (e: Event) => {
+        const d = (e as CustomEvent<{ oldPath?: string; newPath?: string }>).detail;
+        if (!d?.oldPath || !d.newPath || d.oldPath === d.newPath) return;
+        if (currentFilePathRef.current !== d.oldPath) return; // 不是本编辑器正在打开的文件
+        renamedFromRef.current = { from: d.oldPath, to: d.newPath };
+      };
+      window.addEventListener("file-renamed", onRenamed);
+      return () => window.removeEventListener("file-renamed", onRenamed);
+    }, []);
+
+    /**
+     * 这次路径变化是不是「同一个文档换了个路径写法」——改名，而不是换文件。
+     *
+     * 两种情况都算：
+     *   ① 上层改完名广播的 file-renamed（精确信号）；
+     *   ② 同一个文件的不同写法（`D:\v\a.md` ↔ `D:/v/a.md`，分隔符混用）——
+     *      路径字符串变了，但归一化后是同一个文件。
+     * 都不该按「换文件」处理：那会 setContent + 光标回开头 + 丢撤销历史 + 视口回顶。
+     */
+    const isSameDocRename = useCallback(
+      (prevPath: string | null | undefined, nextPath: string | null | undefined) => {
+        if (!prevPath || !nextPath || prevPath === nextPath) return false;
+        if (renamedFromRef.current?.to === nextPath) return true;
+        return normalizePathKey(prevPath) === normalizePathKey(nextPath);
+      },
+      [],
+    );
+
+    /**
+     * 源码编辑器的「文档身份」key。
+     *
+     * 挂在 key 上的目的是：换文件时重挂载，借重挂载清掉 CodeMirror 的撤销历史
+     * （见 sv 分支处的注释）。改名只是换路径，同一个文档不该重挂载 ——
+     * 否则光标、滚动、撤销历史全没。所以只在**真换文件**时更新它。
+     *
+     * 判断必须在渲染期完成：effect 里改 key 会晚一帧，等于白重挂载一次。
+     */
+    const svDocKeyRef = useRef(currentFilePath ?? "");
+    const svPrevPathRef = useRef(currentFilePath);
+    {
+      const pathChangedThisRender = svPrevPathRef.current !== currentFilePath;
+      // 改名（含分隔符写法变化）不改 key：同一个文档不该重挂载
+      const renamedInPlace = isSameDocRename(svPrevPathRef.current, currentFilePath);
+      if (pathChangedThisRender && !renamedInPlace) {
+        svDocKeyRef.current = currentFilePath ?? "";
+      }
+      svPrevPathRef.current = currentFilePath;
+    }
+
     useEffect(() => {
       if (!editor) return;
       if (mode === "sv") {
@@ -2629,8 +2776,11 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       const modeSwitchedToIR = prevModeRef.current === "sv" && mode === "ir";
       prevModeRef.current = mode;
 
+      const prevPathForContent = prevFilePathRef.current;
       const fileChanged = prevFilePathRef.current !== currentFilePath;
       prevFilePathRef.current = currentFilePath;
+      // 改名（同一个文档换路径）≠ 换文件：见 isSameDocRename 的注释
+      const renamedInPlace = fileChanged && isSameDocRename(prevPathForContent, currentFilePath);
 
       // isInternalRef 的语义只是「这一次程序化改动别回传给 onChange」，它靠 onUpdate 清除。
       // 但程序化 setContent 若没让文档发生变化（内容等价、或被规范化成同一个文档），
@@ -2645,6 +2795,32 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       }
 
       if (fileChanged || modeSwitchedToIR) {
+        if (renamedInPlace) {
+          // 改名：内容就是同一份，一个字节都不用同步 —— 更不能 setContent / 光标回开头 /
+          // 丢撤销历史 / 视口回顶，那正是用户改名后不希望发生的事。
+          // 只把「位置存档」迁到新路径：否则新路径读不到存档，下次打开会从顶部开始。
+          const st = irViewStateRef.current;
+          saveFileViewPosition(currentFilePath, {
+            mode: "ir",
+            cursor: st.from,
+            ratio: st.ratio,
+            scrollRatio: st.scrollRatio,
+          });
+          clearFileViewPosition(renamedFromRef.current?.from);
+          return;
+        }
+        // 关键：写保护必须在 setContent **之前**立起来。
+        // setContent 会整体替换文档 → 选区被重置到开头 → 同步触发
+        // selectionUpdate → capture() → 写存档。哪怕只晚一步（放到下面那个
+        // if (fileChanged) 里），都会先用「光标在开头、滚动为 0」覆盖该文件
+        // 上一次的位置；紧接着的位置恢复读存档就只剩顶部了
+        // —— 表现就是「刷新后回到文件开头」。
+        if (fileChanged) {
+          pendingRestorePathRef.current = currentFilePath;
+          // 并且在任何写入发生之前，把该文件的存档先读进内存：
+          // 恢复直接用它，不受后续可能的「顶部」写入影响。
+          pendingRestoreSnapshotRef.current = loadFileViewPosition(currentFilePath);
+        }
         // 文件切换或从 SV 切换回 IR 时强制更新内容
         isInternalRef.current = true;
         editor.commands.setContent(value);
@@ -2656,48 +2832,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           // 丢弃上一个文件的撤销历史：否则切文件后按 Ctrl+Z 会把旧文件内容撤回来。
           // 必须放在 setContent 之后 —— 换文档那次事务本身也不能留在栈里。
           dropUndoHistory(editor);
-          requestAnimationFrame(() => {
-            // 容器与视图可能还没就绪（TipTap 是延迟挂载的，首帧 DOM 里可能还没有 .tiptap-editor），
-            // 所以最多重试几帧。**无论最终成功与否都要解除写保护** —— 否则这个文件的
-            // 位置再也不会被记录，表现就是「每次刷新都回到文件开头」。
-            let attempts = 0;
-            const applyRestore = () => {
-              const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
-              if (!scrollContainer || !getEditorView(editor)) {
-                if (attempts++ < 12) {
-                  requestAnimationFrame(applyRestore);
-                  return;
-                }
-                pendingRestorePathRef.current = null;
-                return;
-              }
-              // 先按惯例回到顶部，紧接着恢复「上次离开这个文件时的位置」。
-              // 放在同一帧里，顺序才确定：上一句刚置 0，下面覆盖成存档里的位置。
-              scrollContainer.scrollTop = 0;
-              const saved = loadFileViewPosition(currentFilePath);
-              let cursorOk = false;
-              if (saved) {
-                if (saved.mode === "ir") {
-                  try {
-                    const size = editor.state.doc.content.size;
-                    const cursor = Math.max(1, Math.min(saved.cursor, size));
-                    editor.commands.setTextSelection(cursor);
-                    cursorOk = true;
-                    restoreIrScrollToRatio(cursor, saved.ratio, saved.scrollRatio);
-                  } catch {
-                    cursorOk = false;
-                  }
-                }
-                if (!cursorOk) {
-                  // 存档来自源码模式、或文档变化后取不到该位置：只按滚动比例恢复
-                  restoreIrScrollToRatio(-1, -1, saved.scrollRatio);
-                }
-              }
-              // 恢复完成（或本来就没有存档）：解除写保护，此后正常记录位置
-              pendingRestorePathRef.current = null;
-            };
-            applyRestore();
-          });
+          // 位置的恢复不在这里做：见下面「打开文件时恢复上次位置」那个 effect。
+          // 刷新时编辑器是**重新挂载**的（实例一出生 currentFilePath 就已经是目标文件，
+          // 根本不会有「文件切换」），挂在 fileChanged 分支里会一次都不执行。
         }
       } else {
         const currentContent = getMarkdownSafe(editor);
@@ -2793,7 +2930,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         irViewStateRef.current = { from: sel.from, to: sel.to, ratio, scrollRatio };
         // 记下这个文件的视图位置，供重开文件 / 重启软件后回到原处（存储内部有节流）。
         // 正在等待恢复位置的文件先不写，免得把归零值或上一个文件的位置覆盖上去。
-        if (pendingRestorePathRef.current !== currentFilePath) {
+        const suppressed = pendingRestorePathRef.current === currentFilePath;
+        if (!suppressed) {
           saveFileViewPosition(currentFilePath, {
             mode: "ir",
             cursor: sel.head,
@@ -2802,26 +2940,35 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           });
         }
       };
-      const fileChanged = prevFilePathForViewStateRef.current !== currentFilePath;
+      const prevFilePathForViewState = prevFilePathForViewStateRef.current;
+      const fileChanged = prevFilePathForViewState !== currentFilePath;
+      // 改名：位置原样保留（不归零、不把当前位置当成「上一个文件的」写进旧路径存档），
+      // 更要紧的是把渲染期给新路径立起的写保护解除掉，
+      // 好让下面这次 capture() 把当前位置写到**新路径**下。
+      const renamedInPlace = fileChanged && isSameDocRename(prevFilePathForViewState, currentFilePath);
       if (fileChanged) {
-        // 离开上一个文件：把它最后的位置存进存档。
-        // 用 irViewStateRef（选区变更 / 滚动时已持续记录）而不是读 DOM ——
-        // 此刻 DOM 里其实已经是新文件的内容了。
-        const prevPath = prevFilePathForViewStateRef.current;
-        if (prevPath && prevPath !== currentFilePath) {
-          const st = irViewStateRef.current;
-          saveFileViewPosition(prevPath, {
-            mode: "ir",
-            cursor: st.from,
-            ratio: st.ratio,
-            scrollRatio: st.scrollRatio,
-          });
+        if (renamedInPlace) {
+          pendingRestorePathRef.current = null;
+        } else {
+          // 离开上一个文件：把它最后的位置存进存档。
+          // 用 irViewStateRef（选区变更 / 滚动时已持续记录）而不是读 DOM ——
+          // 此刻 DOM 里其实已经是新文件的内容了。
+          const prevPath = prevFilePathForViewStateRef.current;
+          if (prevPath && prevPath !== currentFilePath) {
+            const st = irViewStateRef.current;
+            saveFileViewPosition(prevPath, {
+              mode: "ir",
+              cursor: st.from,
+              ratio: st.ratio,
+              scrollRatio: st.scrollRatio,
+            });
+          }
+          // 文件切换：状态归零（与内容同步 effect 的"滚动回顶部"同义）；
+          // 位置恢复完成前禁止写存档（由内容同步 effect 清掉这个标记）。
+          pendingRestorePathRef.current = currentFilePath;
+          irViewStateRef.current = { from: 1, to: 1, ratio: 0, scrollRatio: 0 };
         }
-        // 文件切换：状态归零（与内容同步 effect 的"滚动回顶部"同义）；
-        // 位置恢复完成前禁止写存档（由内容同步 effect 清掉这个标记）。
-        pendingRestorePathRef.current = currentFilePath;
         prevFilePathForViewStateRef.current = currentFilePath;
-        irViewStateRef.current = { from: 1, to: 1, ratio: 0, scrollRatio: 0 };
         requestAnimationFrame(() => capture());
       }
       capture();
@@ -2833,6 +2980,80 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         container?.removeEventListener("scroll", onScroll);
       };
     }, [editor, mode, currentFilePath]);
+
+    /**
+     * 打开文件时恢复上次离开的位置（光标 + 视口）。
+     *
+     * 为什么不放在内容同步 effect 的「文件切换」分支里：**刷新时编辑器是重新挂载的**，
+     * 实例一出生 currentFilePath 就已经是目标文件，fileChanged 恒为 false，
+     * 那段逻辑一次都不会执行（这正是「刷新后回到文件开头」的真正原因）。
+     * 而且内容 / 布局可能晚一两帧才到位，所以这里带重试，而不是赌一次。
+     */
+    const restoredPathRef = useRef<string | null>(null);
+    // 渲染期就立起写保护：编辑器可能是「带着文件重新挂载」的（刷新就是这种情况），
+    // 那时任何 effect 里的写保护都嫌晚 —— 视图状态 effect 会在同一个 commit 里
+    // 先记一次「光标 1、滚动 0」，把该文件上一次的位置覆盖成顶部，
+    // 紧接着的恢复读存档就只剩顶部了。
+    if (currentFilePath && restoredPathRef.current !== currentFilePath) {
+      pendingRestorePathRef.current = currentFilePath;
+    }
+    useEffect(() => {
+      if (!editor || mode !== "ir" || !currentFilePath) return;
+      if (restoredPathRef.current === currentFilePath) return;
+      // 改名：位置就是眼前这一份，没有「恢复」可言 —— 新路径本来就没有存档，
+      // 真走恢复逻辑只会把视口拉回顶部（用户改名后最不想要的结果）。
+      // 标记成已恢复、把写保护收掉即可，光标与滚动一动不动。
+      if (isSameDocRename(restoredPathRef.current, currentFilePath)) {
+        restoredPathRef.current = currentFilePath;
+        pendingRestorePathRef.current = null;
+        pendingRestoreSnapshotRef.current = null;
+        return;
+      }
+      const saved = pendingRestoreSnapshotRef.current ?? loadFileViewPosition(currentFilePath);
+      let attempts = 0;
+      let done = false;
+      const tryRestore = () => {
+        if (done) return;
+        const container = (containerRef.current?.querySelector(".tiptap-editor")
+          ?? document.querySelector(".tiptap-editor")) as HTMLElement | null;
+        const max = container ? container.scrollHeight - container.clientHeight : 0;
+        const wantScroll = !!saved && saved.scrollRatio > 0.001;
+        // 容器 / 内容没就绪（想要滚动却暂无可滚动空间）→ 再等一帧。
+        // 这里刻意不要求 getEditorView：它在这个时机会短暂为 null，会让我们永远放弃；
+        // 设置光标本身已有 try/catch 兜底。
+        if (!container || (wantScroll && max <= 0)) {
+          if (attempts++ < 40) {
+            requestAnimationFrame(tryRestore);
+          }
+          return;
+        }
+        done = true;
+        restoredPathRef.current = currentFilePath;
+        pendingRestorePathRef.current = null; // 恢复完成，解除写保护
+        pendingRestoreSnapshotRef.current = null;
+        if (!saved) {
+          container.scrollTop = 0; // 没有存档：沿用旧行为回到顶部
+          return;
+        }
+        if (saved.mode === "ir") {
+          try {
+            const size = editor.state.doc.content.size;
+            editor.commands.setTextSelection(Math.max(1, Math.min(saved.cursor, size)));
+          } catch {
+            /* 文档结构变了、位置不合法：只恢复滚动 */
+          }
+        }
+        container.scrollTop = Math.min(1, Math.max(0, saved.scrollRatio)) * max;
+      };
+      requestAnimationFrame(tryRestore);
+      // value 也进依赖：内容晚到时会再跑一次（已恢复过的文件由 restoredPathRef 挡住）
+    }, [editor, mode, currentFilePath, value]);
+
+    // 改名信号只服务本次提交：上面几个 effect 都跑完就清掉，
+    // 免得之后真正的换文件（路径变化）被误判成改名而跳过了重置。
+    useEffect(() => {
+      renamedFromRef.current = null;
+    }, [currentFilePath]);
 
     const prevModeForCursorRef = useRef(mode);
     useEffect(() => {
@@ -2948,8 +3169,29 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
        * 用 mouseup 驱动而不是监听 selectionUpdate，是为了避免「点菜单里的加粗 → 菜单又弹回来」：
        * 点菜单按钮不会触发编辑器的 mouseup，所以不会重新打开；而重新划选一定会再 mouseup。
        */
+      // 鼠标手势的起手点：用来区分「划选」和「点一下」（本 effect 生命周期内有效即可，
+      // 故用普通局部变量而非 ref）
+      let bubbleGestureStart: { x: number; y: number } | null = null;
+      /**
+       * 划选文本后自动弹出格式菜单（不用右键）：浮在选区上方。
+       *
+       * 只在「确实在编辑器里用鼠标划动了一段距离」时才弹：
+       *  - 起手不在编辑器内（例如点了菜单里的按钮）→ 不弹。菜单按钮是在 mousedown
+       *    里就关闭的，紧接着的 mouseup 会落在正文上，不判断的话菜单会立刻被弹回来，
+       *    表现就是「点加粗 / 斜体后菜单不消失」。
+       *  - 几乎没移动（只是在选区里点了一下）→ 不弹。那种点击随后会收起选区，
+       *    菜单会先闪一下再消失。
+       */
       const onSelectionMouseUp = (e: MouseEvent) => {
         if (e.button !== 0) return;
+        const down = bubbleGestureStart;
+        bubbleGestureStart = null;
+        const moved = !!down && Math.abs(e.clientX - down.x) + Math.abs(e.clientY - down.y) >= 4;
+        if (!moved) {
+          // 只是点了一下：收起划选菜单，也绝不再弹回来
+          setContextMenuPos((cur) => (cur && cur.placement === "above" ? null : cur));
+          return;
+        }
         if (!isEditorAlive(editor) || !editor.isEditable) return;
         // 荧光笔模式下划选本身就是在上色，弹菜单会挡住正文，那种模式不弹
         if (getHighlighterMode()) return;
@@ -2957,7 +3199,6 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         if (!view) return;
         const { selection } = editor.state;
         if (selection.empty) {
-          // 松开时没有选中内容（普通点击）：收起之前因划选弹出的菜单
           setContextMenuPos((cur) => (cur && cur.placement === "above" ? null : cur));
           return;
         }
@@ -2973,9 +3214,10 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           // 视图正在重建等情况下取不到坐标：保持原菜单状态即可
         }
       };
-      /** 左键按下就开始新的选择/取消选择：先收起划选菜单，mouseup 时再按新选区决定是否弹出。 */
+      /** 左键按下：记下起手点（判断是"划选"还是"点一下"），并先收起划选菜单。 */
       const onEditorMouseDownForBubble = (e: MouseEvent) => {
         if (e.button !== 0) return;
+        bubbleGestureStart = { x: e.clientX, y: e.clientY };
         setContextMenuPos((cur) => (cur && cur.placement === "above" ? null : cur));
       };
       el.addEventListener("mousedown", onMouseDownCapture, true);
@@ -2995,12 +3237,14 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     if (mode === "sv") {
       return (
         <CodeMirrorEditor
-          // 源码模式：把编辑器实例绑定到文件身份上。
-          // CodeMirror 的 undo 历史存在 StateField 里，重挂载是唯一干净的清空方式
+          // 源码模式：把编辑器实例绑定到「文档身份」上。
+          // CodeMirror 的 undo 历史存在 StateField 里，换文件时重挂载是唯一干净的清空方式
           // （setState 需要重建 extensions，会丢掉 Compartment 里动态注入的
           // vim / 高亮配置）。不换 key 的话，切到另一个 .md 时 languageExtension
           // 不变、view 被复用，Ctrl+Z 同样会把上一个文件的内容撤回来。
-          key={currentFilePath ?? ""}
+          // 注意 key 取的是 svDocKeyRef 而不是 currentFilePath：改名时它保持不变
+          // （同一个文档不该重挂载，否则光标 / 滚动 / 撤销历史全丢），只有真换文件才更新。
+          key={svDocKeyRef.current}
           ref={sourceEditorRef}
           value={value}
           onChange={onChange}

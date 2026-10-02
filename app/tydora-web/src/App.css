@@ -1212,6 +1212,39 @@
   max-width: 300px;
 }
 
+/* 可点击改名：给一点悬停反馈，鼠标变文本光标（暗示「点这里就能改」） */
+.editor-file-name.editable {
+  cursor: text;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.editor-file-name.editable:hover {
+  background: var(--bg-surface, rgba(127, 127, 127, 0.12));
+  color: var(--text-primary);
+}
+
+/* 标题栏内联改名输入框：与标题同位置同字号，避免点击时视觉跳动 */
+.editor-file-name-input {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 200px;
+  max-width: 40vw;
+  background: var(--bg-primary);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: center;
+  padding: 1px 6px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-app-region: no-drag;
+}
+
 .editor-file-icon {
   flex-shrink: 0;
   display: inline-flex;

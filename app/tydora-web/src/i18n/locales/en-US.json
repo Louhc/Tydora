@@ -218,6 +218,7 @@
         "table-align-right": "Table: Align Right",
         "undo": "Undo",
         "redo": "Redo",
+        "delete-line": "Delete Line",
         "select-all": "Select All (in Code Block)",
         "toggle-sidebar": "Toggle Left Sidebar",
         "typewriter": "Typewriter Mode",

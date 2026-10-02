@@ -218,6 +218,7 @@
         "table-align-right": "表格：右对齐",
         "undo": "撤销",
         "redo": "重做",
+        "delete-line": "删除行",
         "select-all": "全选（代码块内）",
         "toggle-sidebar": "切换左侧栏",
         "typewriter": "打字机模式",

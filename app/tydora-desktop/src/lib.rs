@@ -2078,6 +2078,15 @@ async fn install_portable_update(
     }
 }
 
+/// 前端把「上次会话的文件内容」渲染完成后调用：此时才显示主窗口。
+/// 配合 setup 里的 1.5s 兜底定时器，保证窗口要么被前端及时显示、要么被兜底显示。
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+    }
+}
+
 pub fn run() {
     // 第一行代码：标记"进程进入 Rust run()"起点。
     // （更早的 exe entry / tauri_runtime 初始化无法在此处捕获，但通常 < 20ms）
@@ -2187,6 +2196,7 @@ pub fn run() {
             take_pending_files,
             has_pending_files,
             get_app_version,
+            show_main_window,
             ensure_welcome_vault,
             is_store_version,
             is_portable_version,
@@ -2279,9 +2289,26 @@ pub fn run() {
                         let _ = window.set_title_bar_style(tauri::TitleBarStyle::Overlay);
                     }
                     finish_macos_window(&window);
-                    let _ = window.show();
+                    // 这里刻意不 show()：窗口保持隐藏，等前端把「上次会话的文件内容」
+                    // 渲染出来后再由 show_main_window 命令显示 —— 这样用户看到的
+                    // 第一帧就是文件本身，而不是一闪而过的空白编辑器。
+                    //
+                    // 兜底：1.5s 内前端没有就绪也强制显示。任何情况下都不能留下
+                    // 一个永远不显示的窗口（前端崩溃 / 命令未注册 / 会话恢复卡住）。
+                    {
+                        let handle = app.handle().clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            let inner = handle.clone();
+                            let _ = handle.run_on_main_thread(move || {
+                                if let Some(win) = inner.get_webview_window("main") {
+                                    let _ = win.show();
+                                }
+                            });
+                        });
+                    }
                 }
-                emit_boot_timing(app, "main_window_shown");
+                emit_boot_timing(app, "main_window_deferred");
             } else {
                 eprintln!("[BOOT-RUST] main_window_handle_ready: (NOT FOUND — check tauri.conf.json windows)");
             }

@@ -37,6 +37,7 @@
     { "id": "table-align-right", "label": "表格：右对齐", "keys": ["Ctrl", "Shift", "R"], "group": "表格" },
     { "id": "undo", "label": "撤销", "keys": ["Ctrl", "Z"], "group": "编辑" },
     { "id": "redo", "label": "重做", "keys": ["Ctrl", "Y"], "group": "编辑" },
+    { "id": "delete-line", "label": "删除行", "keys": ["Ctrl", "Shift", "K"], "group": "编辑" },
     { "id": "select-all", "label": "全选（代码块内）", "keys": ["Ctrl", "A"], "group": "编辑" },
     { "id": "toggle-sidebar", "label": "切换左侧栏", "keys": ["Alt", "1"], "group": "视图" },
     { "id": "toggle-right-sidebar", "label": "切换右侧栏", "keys": ["Alt", "2"], "group": "视图" },

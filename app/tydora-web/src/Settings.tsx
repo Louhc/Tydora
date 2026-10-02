@@ -2137,6 +2137,7 @@ function ShortcutsSettingsContent() {
     "table-align-right": t("settings.shortcuts.labels.table-align-right"),
     undo: t("settings.shortcuts.labels.undo"),
     redo: t("settings.shortcuts.labels.redo"),
+    "delete-line": t("settings.shortcuts.labels.delete-line"),
     "select-all": t("settings.shortcuts.labels.select-all"),
     "toggle-sidebar": t("settings.shortcuts.labels.toggle-sidebar"),
     "toggle-right-sidebar": t("settings.shortcuts.labels.toggle-right-sidebar"),

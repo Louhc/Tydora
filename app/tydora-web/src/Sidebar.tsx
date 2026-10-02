@@ -16,6 +16,7 @@ import { BookmarksPanel } from "./Bookmarks";
 import { TagPanel, parseTagSearchQuery, resolveTagFileSet } from "./tags";
 import { type SidebarTab } from "./Settings";
 import { FileTreeIcon } from "./SidebarFileIcons";
+import { displayFileName, isMarkdownFileName, restoreExtension } from "./utils/fileName";
 import "./Sidebar.css";
 
 // 大纲标签页顶部的本地图谱：d3 依赖较重，动态加载避免拖慢首屏
@@ -969,22 +970,7 @@ const MENU_ICONS = {
 };
 
 // 判断文件名是否为 Markdown（与编辑器分屏区一致，仅支持 Markdown 在新面板打开）
-function isMarkdownFileName(name: string): boolean {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  return ["md", "markdown", "mdx"].includes(ext);
-}
-
-/**
- * 文件树里展示用的名字：Markdown 文件隐藏扩展名（.md / .markdown / .mdx）。
- *
- * 只用于展示。内联重命名输入框、右键菜单、删除确认、排序都仍用完整文件名 ——
- * 排序是按真实文件名（1.5.md / 1.md）比较的，展示名只影响观感；
- * 重命名若用去掉扩展名的名字，直接失焦就会把 .md 改没。
- */
-function displayFileName(name: string, isDirectory: boolean): string {
-  if (isDirectory || !isMarkdownFileName(name)) return name;
-  return name.replace(/\.(md|markdown|mdx)$/i, "");
-}
+// 展示名 / 扩展名还原的规则统一放在 utils/fileName.ts：顶部标题栏也要用同一套。
 
 /**
  * 文件树排序用的比较器。
@@ -1338,6 +1324,9 @@ function TreeNodeComp({
   }, [isEditing]);
 
   const handleToggle = useCallback(async (e: React.MouseEvent) => {
+    // 双击的第二次 click：交给 onDoubleClick（文件 = 进重命名），不要再重复打开/切换一次。
+    // 空对象调用（actions.onOpen）时 detail 是 undefined，比较结果为 false，不受影响。
+    if (e.detail > 1) return;
     if (!node.isDirectory) {
       // Shift+click: range select
       if (e.shiftKey) {
@@ -1545,6 +1534,14 @@ function TreeNodeComp({
         className={`tree-node${isActive ? " active" : ""}${isPending ? " pending-active" : ""}${isSelected ? " selected" : ""}${isDragOver ? " drag-over" : ""}`}
         style={{ paddingLeft: `${8 + indent}px` }}
         onClick={handleToggle}
+        onDoubleClick={(e) => {
+          // 双击文件 = 重命名（与 F2、右键「重命名」同一个入口）；
+          // 目录保持原语义（单击展开/折叠，不抢双击），免得顺手双击文件夹就进改名框。
+          if (node.isDirectory) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onStartEdit(node.path);
+        }}
         onContextMenu={handleContextMenu}
         onMouseDown={(e) => onMouseDown(e, node.path, node.isDirectory)}
         title={node.path}
@@ -1567,18 +1564,25 @@ function TreeNodeComp({
           <input
             ref={inputRef}
             className="tree-name-input"
-            defaultValue={node.name}
+            defaultValue={displayFileName(node.name, node.isDirectory)}
             onKeyDown={(e) => {
+              // 中文输入法组字中的 Enter/Escape 是「选词/取消候选」，不是提交改名
+              if (e.nativeEvent.isComposing) return;
               if (e.key === "Enter") {
                 e.preventDefault();
-                onFinishEdit(node.path, (e.target as HTMLInputElement).value, node.isDirectory);
+                onFinishEdit(
+                  node.path,
+                  restoreExtension((e.target as HTMLInputElement).value, node.name, node.isDirectory),
+                  node.isDirectory,
+                );
               } else if (e.key === "Escape") {
                 e.preventDefault();
+                // 原名原样回传：handleFinishEdit 里「新名 === 旧名」直接返回，即纯取消
                 onFinishEdit(node.path, node.name, node.isDirectory);
               }
             }}
             onBlur={(e) => {
-              onFinishEdit(node.path, e.target.value, node.isDirectory);
+              onFinishEdit(node.path, restoreExtension(e.target.value, node.name, node.isDirectory), node.isDirectory);
             }}
             onClick={(e) => e.stopPropagation()}
           />
@@ -2610,6 +2614,63 @@ function FileTree({
     return () => document.removeEventListener("keydown", handler, true);
   }, [findNodeByPath, rootPath]);
 
+  // ── F2 重命名（作用于树上当前选中的文件 / 文件夹） ──
+  // 目标 = pendingActivePath（树上当前选中项：鼠标点击、vim j/k、新建后都会登记），
+  // 它指向仓库根（点了空白处）或根本没选中时才退回鼠标悬停节点。
+  // 选中项若藏在折叠的目录里，先展开祖先再进编辑，否则输入框不会被渲染出来。
+  const startRenameFromTree = useCallback(async (path: string) => {
+    const visible = flattenVisible(rootNodesRef.current).some((n) => n.path === path);
+    if (!visible) {
+      const dirs = ancestorDirs(parentPath(path), rootPath);
+      if (dirs.length > 0) {
+        pendingRevealPathRef.current = path; // 展开后由 layout effect 滚进视野
+        await handleReload(dirs);
+      }
+    }
+    handleStartEdit(path);
+  }, [flattenVisible, handleReload, handleStartEdit, rootPath]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "F2") return;
+      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // 输入框 / 重命名框：F2 归它们自己
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      // 已有弹窗 / 菜单打开：不重复触发
+      if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
+      // 别的 contenteditable（白板文本框等）里按 F2 不该动侧栏文件；
+      // 但主编辑器必须放行：点选文件后焦点就落在 TipTap / CodeMirror 里，
+      // 那正是「选中文件按 F2」最常见的入口（F2 在编辑器里没有任何既有含义）。
+      // 【踩过的坑】早先这里连 isContentEditable 一起拦，结果只有「按住文件、
+      // 焦点还没被编辑器抢走」时 F2 才有反应，选中文件后按 F2 毫无反应。
+      const editable = target.closest("[contenteditable]");
+      if (
+        editable &&
+        editable.getAttribute("contenteditable") !== "false" &&
+        !editable.closest(".ProseMirror, .cm-editor, .codemirror-editor")
+      ) {
+        return;
+      }
+
+      // 目标优先级：树上当前选中项（pendingActivePath：点击 / j·k / 新建后都会登记）
+      // → 编辑器里正打开的文件（用 QuickOpen / 大纲打开时树上可能还没有选中项）
+      // → 鼠标悬停节点。
+      let path = pendingActivePathRef.current;
+      if (!path || path === rootPath) path = activePath;
+      if (!path || path === rootPath) path = hoveredPathRef.current;
+      if (!path || path === rootPath) return; // 仓库根不能在树里重命名
+      if (!findNodeByPath(rootNodesRef.current, path)) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      void startRenameFromTree(path);
+    };
+    document.addEventListener("keydown", handler, true);
+    return () => document.removeEventListener("keydown", handler, true);
+  }, [activePath, findNodeByPath, rootPath, startRenameFromTree]);
+
   const handleKbdDeleteConfirm = useCallback(async () => {
     const node = kbdDeleteTarget;
     setKbdDeleteTarget(null);
@@ -3256,12 +3317,15 @@ function OutlineNodeComp({
         className={`outline-node${isActive ? " active" : ""}`}
         style={{ paddingLeft: `${12 + depth * 20}px` }}
         title={node.item.text}
+        // 整行都可点：热区只挂文字那一段时，「H1」徽标、缩进区、箭头旁边点了都没反应，
+        // 看起来就像「这一行点不动」。
+        onClick={() => onSelectHeading(node.item.level, node.item.text, node.item.line)}
       >
         {node.hasChildren ? (
           <span
             className={`outline-chevron${isCollapsed ? "" : " expanded"}`}
             onClick={(e) => {
-              e.stopPropagation();
+              e.stopPropagation(); // 箭头只管展开/收起，不要连带跳转
               onToggle(node.item.line);
             }}
           >
@@ -3273,10 +3337,7 @@ function OutlineNodeComp({
           <span className="outline-icon-spacer" />
         )}
         <span className="outline-level">H{node.item.level}</span>
-        <span
-          className="outline-text"
-          onClick={() => onSelectHeading(node.item.level, node.item.text, node.item.line)}
-        >
+        <span className="outline-text">
           {renderInlineMd(node.item.text, `o-${node.item.line}`)}
         </span>
       </div>
