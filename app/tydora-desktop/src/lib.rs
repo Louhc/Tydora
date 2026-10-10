@@ -754,10 +754,30 @@ async fn move_vault(source: String, destination: String) -> Result<(), String> {
 fn open_file_location(file_path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer.exe")
-            .args(["/select,", &file_path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+
+        // 用 Shell API，而不是 `explorer.exe /select,...`。
+        // 命令行那套对参数格式极其敏感：`/select,` 与路径必须同参数、引号只能包住路径本身、
+        // 还不能经过 Rust 的 MSVC 转义 —— 任何一条不满足，Explorer 就会退化成打开"文档"。
+        // SHOpenFolderAndSelectItems 由系统一次完成「打开所在目录 + 选中该项 + 窗口置前」。
+        let wide: Vec<u16> = std::ffi::OsStr::new(&file_path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: wide 以 NUL 结尾且在整个调用期间存活；pidl 由 ILCreateFromPathW 分配，
+        // 用完 ILFree 释放（失败路径也释放）。
+        unsafe {
+            let pidl = ILCreateFromPathW(wide.as_ptr());
+            if pidl.is_null() {
+                return Err(format!("无法解析路径：{file_path}"));
+            }
+            let hr = SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0);
+            ILFree(pidl);
+            if hr < 0 {
+                return Err(format!("打开文件位置失败（HRESULT 0x{:08X}）", hr as u32));
+            }
+        }
     }
     #[cfg(target_os = "macos")]
     {

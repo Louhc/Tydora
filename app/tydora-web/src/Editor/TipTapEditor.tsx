@@ -33,6 +33,7 @@ import { common, createLowlight } from "lowlight";
 import { Frontmatter } from "./extensions/frontmatter";
 import { StripStyle } from "./extensions/strip-style";
 import { Callout } from "./extensions/callout";
+import { CopyLineOnEmptySelection } from "./extensions/copy-line";
 import { Toc } from "./extensions/toc";
 import { Mermaid } from "./extensions/mermaid";
 import { WikiLink } from "./extensions/wiki-link";
@@ -65,6 +66,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import CodeMirrorEditor, { type CodeMirrorEditorHandle } from "./CodeMirrorEditor";
 import { useVim, useLeader, LeaderMenu, createTiptapVimExtensions, syncVimMode, exitTiptapVisualMode, enterTiptapInsertMode } from "../vim";
+import { useSmoothCaret } from "./useSmoothCaret";
 import { prefixMConfig } from "../vim/config/prefixM";
 import { getVimMode } from "vim-prose/tiptap";
 import type { VimMode } from "../vim/types";
@@ -670,6 +672,19 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     const handleSourceViewStateChange = useCallback(
       (state: { anchor: number; head: number; ratio: number; scrollRatio: number }) => {
         sourceViewStateRef.current = state;
+        const path = currentFilePathRef.current;
+        if (!path) return;
+        // 与 IR 侧 capture() 同一套写保护：正在等待「打开文件恢复位置」的文件先不写，
+        // 否则 CodeMirror 挂载时那一次「光标在开头」的上报会把存档覆盖成顶部，
+        // 紧接着的恢复读到的就只剩开头了（表现为刷新后固定回到某处）。
+        if (pendingRestorePathRef.current === path) return;
+        // SV 的位置也必须落存档 —— 否则刷新后没有 SV 存档可读，只能拿到过期的 IR 存档。
+        saveFileViewPosition(path, {
+          mode: "sv",
+          cursor: state.head,
+          ratio: state.ratio,
+          scrollRatio: state.scrollRatio,
+        });
       }, []);
     const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number; placement?: "above" } | null>(null);
     const [tableToolbar, setTableToolbar] = useState<{ table: HTMLElement } | null>(null);
@@ -731,6 +746,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
 
     const editor = useEditor({
       extensions: [
+        // 无选区时 Ctrl+C / Ctrl+X = 复制 / 剪切整行（见 extensions/copy-line.ts）
+        CopyLineOnEmptySelection,
         StarterKit.configure({
           paragraph: false,
           codeBlock: false,
@@ -1836,6 +1853,35 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           },
         },
         handlePaste: (_view: any, event: ClipboardEvent) => {
+          /**
+           * 无格式粘贴（Ctrl+Shift+V，或右键菜单「粘贴为纯文本」）：
+           * 只取 text/plain，按行切成段落原样插入 —— 不解析 Markdown、不带 HTML 结构。
+           * 这里返回 true 就完全绕开了 HTML 解析与 Markdown 扩展的 transformPastedText。
+           * 标记由上面 Ctrl+Shift+V 的 keydown 立起（paste 事件本身不带修饰键信息）。
+           */
+          if (plainPasteRef.current) {
+            plainPasteRef.current = false;
+            const text = event.clipboardData?.getData("text/plain") ?? "";
+            event.preventDefault();
+            if (text) {
+              const lines = text.split(/\r?\n/);
+              if (lines.length === 1) {
+                // 单行：以**文本**插入（不是段落节点）。
+                // 插段落会在光标处劈开当前段落并在末尾多出一个空段落，
+                // 在行末粘贴就表现为"自动换行"。insertText 是字面插入，同样不解析。
+                const view = getEditorView(editor);
+                if (view) view.dispatch(view.state.tr.insertText(text));
+              } else {
+                const content = lines.map((line) =>
+                  line
+                    ? { type: "paragraph", content: [{ type: "text", text: line }] }
+                    : { type: "paragraph" },
+                );
+                editor.chain().focus().insertContent(content).run();
+              }
+            }
+            return true;
+          }
           const items = event.clipboardData?.items;
           if (!items) return false;
 
@@ -2686,6 +2732,31 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       };
     }, [editor, highlighterMode, highlighterColor, mode]);
 
+  // Word 式光标：自绘竖条做淡入淡出 + 平滑滑动（仅 IR 模式；SV 用 CodeMirror 自己的光标）
+  useSmoothCaret(editor, containerRef, mode === "ir");
+
+  /**
+   * 无格式粘贴的触发标记。
+   *
+   * paste 事件本身不携带「按了哪个修饰键」的信息，所以只能在它之前的 keydown 里判断：
+   * 命中快捷键（键位读用户配置，可在设置里改）就把标记立起来，紧接着的 paste 事件
+   * 据此走纯文本分支；1 秒后自动清掉，避免误伤之后的一次普通粘贴。
+   * 这里刻意**不** preventDefault —— 要让浏览器照常派发 paste 事件。
+   */
+  const plainPasteRef = useRef(false);
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const keys = loadShortcuts().find((s) => s.id === "paste-plain")?.keys;
+      if (!keys || !matchShortcut(e, keys)) return;
+      plainPasteRef.current = true;
+      window.setTimeout(() => {
+        plainPasteRef.current = false;
+      }, 1000);
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, []);
+
     // Esc 退出荧光笔模式：它是「工具」语义，避免忘了还开着、之后每次划选都上色
     useEffect(() => {
       if (!highlighterMode) return;
@@ -3035,10 +3106,20 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           container.scrollTop = 0; // 没有存档：沿用旧行为回到顶部
           return;
         }
-        if (saved.mode === "ir") {
+        if (saved.mode === "ir" || saved.mode === "sv") {
           try {
             const size = editor.state.doc.content.size;
-            editor.commands.setTextSelection(Math.max(1, Math.min(saved.cursor, size)));
+            // 存档可能来自另一种模式：SV 存的是 Markdown 偏移，必须映射回 ProseMirror 位置，
+            // 否则（只认 ir 存档时）这里什么也不做 —— 表现就是「切到 IR 后刷新回到开头」。
+            let pos = saved.cursor;
+            if (saved.mode === "sv") {
+              try {
+                pos = mdOffsetToPmPos(buildPositionMap(editor), saved.cursor);
+              } catch {
+                /* 映射失败就用原值，下面的 clamp 兜底 */
+              }
+            }
+            editor.commands.setTextSelection(Math.max(1, Math.min(pos, size)));
           } catch {
             /* 文档结构变了、位置不合法：只恢复滚动 */
           }
@@ -3054,6 +3135,35 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     useEffect(() => {
       renamedFromRef.current = null;
     }, [currentFilePath]);
+
+    /**
+     * SV 模式的「打开文件 / 刷新后恢复上次位置」。
+     *
+     * 上面那个 IR 版 restore effect 第一行就是 `mode !== "ir"` 直接 return —— 也就是说
+     * **SV 模式从来没有挂载恢复**：刷新时编辑器直接以 SV 挂载，CodeMirror 的光标就是文档
+     * 开头（表现为"回到第一个字之后"）。这里补上：存档里 SV 的 cursor 就是 Markdown 偏移，
+     * 直接交给 CodeMirror 自己去设选区 + 滚到记录的视口相对位置。
+     */
+    useEffect(() => {
+      if (!editor || mode !== "sv" || !currentFilePath) return;
+      if (restoredPathRef.current === currentFilePath) return;
+      const saved = pendingRestoreSnapshotRef.current ?? loadFileViewPosition(currentFilePath);
+      restoredPathRef.current = currentFilePath;
+      pendingRestorePathRef.current = null;
+      pendingRestoreSnapshotRef.current = null;
+      if (!saved) return;
+      // 存档可能来自另一种模式：IR 存的是 ProseMirror 位置，先映射成源码偏移
+      let offset = Math.max(0, saved.cursor);
+      if (saved.mode !== "sv") {
+        try {
+          offset = pmPosToMdOffset(buildPositionMap(editor), saved.cursor);
+        } catch {
+          /* 映射失败就用原值 */
+        }
+      }
+      sourceEditorRef.current?.setSelectionAndScroll(offset, offset, saved.ratio, saved.scrollRatio);
+      // value 也进依赖：内容晚到时再试一次（已恢复过的文件由 restoredPathRef 挡住）
+    }, [editor, mode, currentFilePath, value]);
 
     const prevModeForCursorRef = useRef(mode);
     useEffect(() => {
@@ -3276,8 +3386,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         <div
           ref={containerRef}
           className="editor-container"
-        >
-          <EditorContent editor={editor} className="tiptap-editor" />
+        >          <EditorContent editor={editor} className="tiptap-editor" />
           {tableToolbar && editor && (
             <TableFloatingToolbarComponent
               editor={editor}

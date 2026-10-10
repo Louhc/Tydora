@@ -267,10 +267,11 @@
   position: relative;
 }
 
+/* 缩进引导线：贴在子级行左缘（与 Sidebar.tsx 里每级 8px 的缩进保持一致） */
 .tree-children::before {
   content: "";
   position: absolute;
-  left: calc(16px + var(--tree-depth, 0) * 22px);
+  left: calc(16px + var(--tree-depth, 0) * 8px);
   top: 0;
   bottom: 0;
   width: 1px;

@@ -1,5 +1,5 @@
 import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useCallback } from "react";
-import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, Decoration, ViewPlugin, placeholder, ViewUpdate } from "@codemirror/view";
+import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, Decoration, ViewPlugin, placeholder, ViewUpdate, drawSelection } from "@codemirror/view";
 import { EditorState, Compartment, RangeSetBuilder } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
@@ -392,6 +392,37 @@ export interface CodeMirrorEditorHandle {
 const highlightCompartment = new Compartment();
 // Vim 扩展独立 Compartment：动态开关 vim 时不重建整个 editor
 const vimCompartment = new Compartment();
+
+/**
+ * Word 式光标（仅非 Vim 模式启用）。
+ *
+ * 隐藏原生光标（透明而非移除：几何位置保留，输入法据此定位候选框），
+ * 交给 drawSelection 的自绘光标，再叠 CSS 淡入淡出 + 平滑滑动。
+ *
+ * 为什么 Vim 模式下必须整块撤掉：@replit/codemirror-vim 的 baseTheme 里有
+ *   `.cm-vimMode .cm-cursorLayer:not(.cm-vimCursorLayer) { display: none }`
+ * 即 Vim 模式会隐藏 CodeMirror 的自绘光标层，而插件自身并不设置 caret-color ——
+ * 它依赖**原生光标**显示插入点。若此时仍把原生光标设为透明，插入态就完全没有光标。
+ */
+const wordCaretTheme = EditorView.theme({
+  ".cm-content": { caretColor: "transparent" },
+  ".cm-cursor, .cm-dropCursor": {
+    borderLeftWidth: "2px",
+    borderRadius: "1px",
+    // 与 IR 模式自绘光标同一套手感：淡入淡出 + 平滑滑动
+    transition:
+      "left 70ms cubic-bezier(0.33, 1, 0.68, 1), top 70ms cubic-bezier(0.33, 1, 0.68, 1), transform 70ms cubic-bezier(0.33, 1, 0.68, 1)",
+    animation: "tydora-caret-fade 1.1s ease-in-out infinite",
+  },
+});
+/** Word 光标整套（自绘光标层 + 主题）；Vim 模式下 reconfigure 成空数组，完全退回原生行为 */
+const wordCaretExtension = [
+  // cursorBlinkRate: 0 = 关掉 CodeMirror 自带的 JS 闪烁，闪烁/淡入淡出完全交给 CSS，
+  // 否则 JS 的显隐切换会和 CSS 动画打架（抖动）
+  drawSelection({ cursorBlinkRate: 0 }),
+  wordCaretTheme,
+];
+const wordCaretCompartment = new Compartment();
 
 // ════════════════════════════════════════════════════════════════
 // t 前缀键：CodeMirror Markdown 源码表格操作
@@ -914,7 +945,19 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
         const main = update.state.selection.main;
         onSelectionChangeRef.current?.({ anchor: main.anchor, head: main.head });
         // 选区变化时记录「光标 + 视口相对位置」，供切回 IR 模式时恢复
-        if (update.selectionSet || update.docChanged) reportViewState();
+        if (update.selectionSet || update.docChanged) {
+          reportViewState();
+          // Word 式光标：输入 / 移动时让自绘光标回到"满亮"（重启淡入淡出动画），
+          // 于是连续打字时光标看起来是常亮的，停手后才继续淡出淡入。
+          const v = update.view;
+          requestAnimationFrame(() => {
+            v.dom.querySelectorAll<HTMLElement>(".cm-cursor").forEach((el) => {
+              el.style.animation = "none";
+              void el.offsetWidth;
+              el.style.animation = "";
+            });
+          });
+        }
         if (update.docChanged) {
           if (isInternalRef.current) {
             isInternalRef.current = false;
@@ -956,6 +999,33 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
             useMarkdownHighlighting ? markdownHighlighting : codeHighlighting
           ),
           keymap.of([
+            // 无选区时 Ctrl+C / Ctrl+X = 复制 / 剪切整行（VS Code 习惯）。
+            // 有选区时返回 false，交回默认的复制 / 剪切。
+            // 注：Vim 模式由 @replit/codemirror-vim 用更高优先级接管，不受这里影响（那边用 yy / dd）。
+            {
+              key: "Mod-c",
+              run: (view) => {
+                const sel = view.state.selection.main;
+                if (!sel.empty) return false;
+                const line = view.state.doc.lineAt(sel.head);
+                void navigator.clipboard.writeText(`${view.state.sliceDoc(line.from, line.to)}\n`);
+                return true;
+              },
+            },
+            {
+              key: "Mod-x",
+              run: (view) => {
+                const sel = view.state.selection.main;
+                if (!sel.empty) return false;
+                const line = view.state.doc.lineAt(sel.head);
+                void navigator.clipboard.writeText(`${view.state.sliceDoc(line.from, line.to)}\n`);
+                // 连同行尾换行一起删（末行没有换行时只删本行）
+                view.dispatch({
+                  changes: { from: line.from, to: Math.min(line.to + 1, view.state.doc.length) },
+                });
+                return true;
+              },
+            },
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
@@ -967,6 +1037,8 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
           EditorView.lineWrapping,
           // Vim 扩展通过独立 Compartment 动态开关（enabled=false 时为空数组，零影响）
           vimCompartment.of([]),
+          // Word 式光标：非 Vim 模式下启用自绘光标层 + 淡入淡出主题（见 wordCaretTheme 注释）
+          wordCaretCompartment.of(vimEnabled ? [] : wordCaretExtension),
         ],
       });
 
@@ -1084,6 +1156,21 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
         ),
       });
     }, [vimEnabled, leaderKey, onModeChange]);
+
+    // Word 式光标的开关：Vim 模式启用时撤掉（恢复原生光标），关闭时套上。
+    // 首次渲染不 dispatch —— 初始 extensions 里已经按 vimEnabled 配好了，
+    // 启动时少一次事务，避免扰动「打开文件恢复位置」那套时序。
+    const wordCaretInitializedRef = useRef(false);
+    useEffect(() => {
+      if (!viewRef.current) return;
+      if (!wordCaretInitializedRef.current) {
+        wordCaretInitializedRef.current = true;
+        return;
+      }
+      viewRef.current.dispatch({
+        effects: wordCaretCompartment.reconfigure(vimEnabled ? [] : wordCaretExtension),
+      });
+    }, [vimEnabled]);
 
     return (
       <div className="editor-wrapper">

@@ -1296,8 +1296,17 @@
   cursor: text;
   padding: 2px 6px;
   border-radius: 4px;
+  /* 文件名不可被选中（拖选会误触发选区、也抢走"拖窗口"的手感） */
+  user-select: none;
+  -webkit-user-select: none;
   /* 短过渡：悬停进出时不要硬闪（高频进出会让整页重绘，进而带动侧栏毛玻璃重采样） */
   transition: background 0.15s ease, color 0.15s ease;
+}
+
+/* 按住 Ctrl / ⌘ 时，顶栏文件名是可点击的（打开所在位置）→ 换成手型。
+   CSS 感知不到修饰键，所以由 App 在按/放 Ctrl 时给 <html> 挂 ctrl-held 类。 */
+html.ctrl-held .editor-file-name.editable:hover {
+  cursor: pointer;
 }
 
 .editor-file-name.editable:hover {

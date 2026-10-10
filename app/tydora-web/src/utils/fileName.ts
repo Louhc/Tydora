@@ -107,3 +107,39 @@ export function replaceBaseNameLike(filePath: string, newBaseName: string): stri
 export function normalizePathKey(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "");
 }
+
+/** 跨平台取最严格的一套：Windows 非法字符 + 控制字符 */
+const ILLEGAL_NAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
+/** Windows 保留设备名（带扩展名同样非法，例如 con.md） */
+const RESERVED_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+export interface FileNameIssue {
+  /** i18n key（sidebar.error.*） */
+  key: string;
+  params?: Record<string, string>;
+}
+
+/**
+ * 校验用户输入的文件 / 文件夹名：有问题返回描述，合法返回 null。
+ *
+ * 为什么必须有这层校验：这些字符不会得到**任何**系统提示 —— 尤其 `/`（还有 `\`）
+ * 会被当成路径分隔符，`rename` 到不存在的子目录直接失败；而调用处若只 console.error，
+ * 用户看到的就是"改名之后毫无反应"。所以要么在校验阶段拦下、给出原因，要么把
+ * 文件系统返回的错误原样呈现出来（两者都做最稳）。
+ */
+export function validateFileName(name: string): FileNameIssue | null {
+  const trimmed = name.trim();
+  if (!trimmed) return { key: "sidebar.error.nameEmpty" };
+  const illegal = trimmed.match(ILLEGAL_NAME_CHARS);
+  if (illegal) {
+    return {
+      key: "sidebar.error.nameIllegalChars",
+      params: { chars: Array.from(new Set(illegal)).join(" ") },
+    };
+  }
+  if (RESERVED_DEVICE_NAMES.test(trimmed)) return { key: "sidebar.error.nameReserved" };
+  // Windows 会静默吃掉结尾的点与空格，导致"输入的名字和实际落盘的不一致"
+  if (/[. ]$/.test(trimmed)) return { key: "sidebar.error.nameTrailing" };
+  if (trimmed.length > 255) return { key: "sidebar.error.nameTooLong" };
+  return null;
+}

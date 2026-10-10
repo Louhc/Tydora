@@ -3,6 +3,7 @@ import { bootStart, bootEnd, bootStamp, bootSummary } from "./boot-timing";
 bootStamp("App_module_imported");
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
 import { readTextFile, writeTextFile, rename, exists } from "@tauri-apps/plugin-fs";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -1607,6 +1608,47 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     };
   }, [pulling]);
 
+  // 文件树交互信号（见 Sidebar 的 onTreeDown）：用于上面的"不抢焦点"判断
+  useEffect(() => {
+    const onTreeInteract = () => {
+      treeInteractAtRef.current = Date.now();
+    };
+    window.addEventListener("tydora-tree-interact", onTreeInteract);
+    return () => window.removeEventListener("tydora-tree-interact", onTreeInteract);
+  }, []);
+
+  /**
+   * 文件树里改名（F2 / 双击 / 内联改名 / 新建后的就地命名）之后，把**已经打开该文件**
+   * 的缓冲指向新路径。
+   *
+   * 顶栏标题是由 buffer.fileName 派生的（`title = fileName.split(/[/\\]/).pop()`），
+   * 不重指的话：磁盘上文件已经改名，顶栏却一直显示旧名，之后自动保存还会照旧路径
+   * 再写一份文件出来。
+   *
+   * 这里刻意独立于既有的 file-renamed 处理（纯增量、幂等），避免那条链路万一失效时
+   * 顶栏又不动。目录改名时按前缀整体替换，覆盖其后代文件。
+   */
+  useEffect(() => {
+    const onRenamed = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { oldPath?: string; newPath?: string } | undefined;
+      const oldPath = detail?.oldPath;
+      const newPath = detail?.newPath;
+      if (!oldPath || !newPath || oldPath === newPath) return;
+      const oldKey = normalizePathKey(oldPath);
+      for (const buf of buffersRef.current) {
+        if (!buf.fileName) continue;
+        const bufKey = normalizePathKey(buf.fileName);
+        if (bufKey === oldKey) {
+          updateBuffer(buf.id, { fileName: newPath });
+        } else if (bufKey.startsWith(`${oldKey}/`)) {
+          updateBuffer(buf.id, { fileName: `${newPath}${buf.fileName.slice(oldPath.length)}` });
+        }
+      }
+    };
+    window.addEventListener("file-renamed", onRenamed);
+    return () => window.removeEventListener("file-renamed", onRenamed);
+  }, [updateBuffer]);
+
   // 激活窗格变化后自动聚焦该窗格的编辑器（统一处理分屏/关闭/导航/点击等所有场景）。
   // —— 实现思路：不用 React 的 handle，直接模拟 Tab 键的原生焦点遍历：
   //    在 data-pane-id 指向的容器里找 contenteditable / textarea 等可聚焦 DOM 元素，
@@ -1617,6 +1659,16 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   useEffect(() => {
     const paneId = activePaneId;
     if (!paneId) return;
+
+    // 焦点在文件树（侧栏）里时不抢：点击文件只打开内容，光标留在树上
+    // —— 与 VS Code 的行为一致，也让树上的快捷键（Ctrl+C 复制副本、F2 改名、
+    //    Ctrl+D / Delete 删除、Ctrl+Z 撤销删除）继续作用于树。
+    // 点在编辑区 / 其它地方时照旧自动聚焦，不受影响。
+    const ae = document.activeElement as HTMLElement | null;
+    if (ae && (ae.closest(".sidebar") || ae.closest(".sidebar-tree"))) return;
+    // 刚点过文件树（600ms 内）同样不抢：那一刻 activeElement 可能已经落到 body 上，
+    // 靠上面的 closest 判断会漏掉。窗口足够短，不影响"点编辑区即聚焦"的手感。
+    if (Date.now() - treeInteractAtRef.current < 600) return;
 
     let cancelled = false;
     let attempts = 0;
@@ -3899,6 +3951,10 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   // 点击标题就地变成输入框：只显示基名（Markdown 隐藏扩展名，与文件树一致），
   // 提交时用 restoreExtension 把原扩展名接回去。
   const [titleEditing, setTitleEditing] = useState(false);
+  /** 顶栏文件名的「拖窗口 vs 点击改名」判定状态（见下面 span 上的鼠标处理） */
+  const titleDragRef = useRef<{ x: number; y: number; dragged: boolean } | null>(null);
+  /** 文件树最近一次交互的时间戳：点击文件后避免自动聚焦把焦点抢进编辑器 */
+  const treeInteractAtRef = useRef(0);
   const titleInputRef = useRef<HTMLInputElement>(null);
   // Enter 提交后输入框会卸载，个别 WebView 仍会补一次 focusout → 用标志位挡住第二次提交
   const titleCommitRef = useRef(false);
@@ -4299,9 +4355,53 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
             ) : (
               <span
                 className={`editor-file-name${fileName ? " editable" : ""}`}
+                // 这里刻意**不用** data-tauri-drag-region：那会让系统直接吃掉 mousedown，
+                // click 事件到不了 JS，「点一下改名」就没了。改为自己判断拖 / 点：
+                //   按住后移动超过几个像素 → startDragging() 交给系统拖窗口（与拖顶栏一致）；
+                //   基本没动 → 算点击，进入就地改名（Ctrl/⌘ 点击则是打开所在位置）。
                 data-tauri-drag-region="false"
                 title={displayedFileName || "Tydora"}
-                onClick={startTitleEdit}
+                onMouseDown={(e) => {
+                  if (e.button !== 0) return;
+                  const startX = e.clientX;
+                  const startY = e.clientY;
+                  let dragged = false;
+                  titleDragRef.current = { x: startX, y: startY, dragged: false };
+                  // 关键：move/up 必须挂在 window 上。只挂在这个 span 上时，指针两三像素就移出
+                  // span，后续 mousemove 根本到不了处理器 → 阈值永远不满足 → startDragging()
+                  // 从不执行，表现就是"按住文件名拖不动窗口"。
+                  const onMove = (ev: MouseEvent) => {
+                    if (dragged || ev.buttons !== 1) return;
+                    if (Math.abs(ev.clientX - startX) > 4 || Math.abs(ev.clientY - startY) > 4) {
+                      dragged = true;
+                      if (titleDragRef.current) titleDragRef.current.dragged = true;
+                      // 交给系统拖窗口（与拖顶栏其他位置一致）
+                      void getCurrentWindow().startDragging().catch(() => {
+                        /* 拖动不可用也不影响随后的点击改名 */
+                      });
+                    }
+                  };
+                  const onUp = () => {
+                    window.removeEventListener("mousemove", onMove, true);
+                    window.removeEventListener("mouseup", onUp, true);
+                  };
+                  window.addEventListener("mousemove", onMove, true);
+                  window.addEventListener("mouseup", onUp, true);
+                }}
+                onClick={(e) => {
+                  const dragged = titleDragRef.current?.dragged ?? false;
+                  titleDragRef.current = null;
+                  if (dragged) return; // 刚才是拖窗口，不触发改名
+                  // Ctrl / ⌘ + 点击文件名 = 在文件管理器里打开它所在的位置
+                  // （与侧栏右键菜单的「打开文件位置」同一个实现）
+                  if ((e.ctrlKey || e.metaKey) && fileName) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void handleOpenFileLocation();
+                    return;
+                  }
+                  startTitleEdit();
+                }}
               >
                 {displayFileName(displayedTitle, false)}
                 <span

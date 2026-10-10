@@ -450,6 +450,38 @@ export function executeCommand(name: string, editor: Editor | null) {
     case "paste":
       document.execCommand("paste");
       break;
+    case "paste-plain": {
+      /**
+       * 无格式粘贴：读系统剪切板的纯文本，按行切成**段落节点**插入。
+       * 刻意不走 ProseMirror 的 HTML/Markdown 解析链 —— 字面字符原样保留
+       *（`**粗**` 不会变粗、`- x` 不会变列表），也绕开 Markdown 扩展的
+       * transformPastedText；多行必须切成多个段落，因为文本节点里不能有换行。
+       * 用编辑器自己的 chain 生成在异步回调里，避免复用外部已消费的 chain。
+       */
+      void (async () => {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (!text) return;
+          const lines = text.split(/\r?\n/);
+          if (lines.length === 1) {
+            // 单行以文本插入：用段落节点会劈开当前段落并多出一个空段落
+            //（在行末粘贴表现为自动换行）。insertText 是字面插入，不解析 Markdown。
+            const view = editor.view;
+            view.dispatch(view.state.tr.insertText(text));
+            return;
+          }
+          const content = lines.map((line) =>
+            line
+              ? { type: "paragraph", content: [{ type: "text", text: line }] }
+              : { type: "paragraph" },
+          );
+          editor.chain().focus().insertContent(content).run();
+        } catch (err) {
+          console.error("[paste-plain] 读取剪切板失败:", err);
+        }
+      })();
+      break;
+    }
     case "delete":
       chain.deleteSelection().run();
       break;

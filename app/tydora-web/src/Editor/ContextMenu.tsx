@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { executeCommand } from "./extensions/custom-commands";
 import { loadShortcuts, formatShortcutDisplay } from "./shortcuts";
 import type { ShortcutItem } from "./shortcuts";
@@ -209,6 +209,8 @@ function createIconRows(t: (key: string) => string): IconItem[][] {
       { name: "cut", label: t("editor.contextMenu.cut"), shortcutId: null, icon: ICONS.cut },
       { name: "copy", label: t("editor.contextMenu.copy"), shortcutId: null, icon: ICONS.copy },
       { name: "paste", label: t("editor.contextMenu.paste"), shortcutId: null, icon: ICONS.paste },
+      // 无格式粘贴：只插入纯文本、不解析 Markdown、不带网页样式
+      { name: "paste-plain", label: t("editor.contextMenu.pastePlain"), shortcutId: "paste-plain", icon: ICONS.paste },
       { name: "delete", label: t("editor.contextMenu.delete"), shortcutId: null, icon: ICONS.trash },
     ],
     // 第二行：行内格式
@@ -273,6 +275,65 @@ function getShortcutLabel(shortcutId: string | null, shortcuts: ShortcutItem[]):
 }
 
 export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
+  /**
+   * 淡出：菜单是条件渲染（父组件用 contextMenuPos 控制挂载），直接调 onClose 会立刻卸载、
+   * 没有淡出的机会。所以先挂 .closing 让 CSS 播完淡出动画，再调真正的 onClose。
+   * 时长与 theme.css 里 .editor-context-menu.closing 的动画保持一致。
+   */
+  const [closing, setClosing] = useState(false);
+  // 说明：closing / skipAnim 的「渲染期复位」逻辑统一放在渲染体里最后（换锚点那一刻只算一次），
+  // 见下方 prevPositionRef 那一段。这里不再重复实现，避免重复声明。
+  /** 名字刻意与组件里既有的 closeTimerRef（子菜单悬停关闭计时器）区分开 */
+  const fadeCloseTimerRef = useRef<number | null>(null);
+  const requestClose = useCallback(() => {
+    if (fadeCloseTimerRef.current != null) return;
+    setClosing(true);
+    fadeCloseTimerRef.current = window.setTimeout(() => {
+      fadeCloseTimerRef.current = null;
+      onClose(); // 这里必须是真正的 onClose（不能写成 requestClose，否则自调用成死循环）
+    }, 140);
+  }, [onClose]);
+  useEffect(
+    () => () => {
+      if (fadeCloseTimerRef.current != null) window.clearTimeout(fadeCloseTimerRef.current);
+    },
+    [],
+  );
+
+  /**
+   * 重新打开时复位淡出状态。
+   *
+   * 关键前提：这个组件**不会卸载** —— 父组件始终渲染它，只在 position 为 null 时返回 null，
+   * 所以 closing / 计时器这些 state 会留到下一次打开。不复位的话，第一次关闭之后 closing
+   * 一直是 true，菜单再出现时会立刻播淡出动画，表现为「刚出现立马消失」。
+   */
+  useEffect(() => {
+    if (!position) return;
+    if (fadeCloseTimerRef.current != null) {
+      window.clearTimeout(fadeCloseTimerRef.current);
+      fadeCloseTimerRef.current = null;
+    }
+  }, [position]);
+
+  /**
+   * 窗口失去焦点（切到别的程序、点开系统对话框、最小化）时收起菜单。
+   * 菜单是浮层：这时它既挡正文，随后的按键/点击也都到不了它，留着只会碍事。
+   * 菜单自身不抢焦点（根节点 mousedown 里 preventDefault），所以 blur 一定是真失焦。
+   */
+  useEffect(() => {
+    if (!position) return;
+    const onBlur = () => requestClose();
+    const onVisibility = () => {
+      if (document.hidden) requestClose();
+    };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [position, requestClose]);
+
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const submenuRef = useRef<HTMLDivElement>(null);
@@ -375,8 +436,17 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   }, [activeSubmenu, submenuPos]);
 
   const handleClickOutside = useCallback((e: MouseEvent) => {
+    /**
+     * 右键自身的 mousedown 不关菜单。
+     *
+     * Windows 上 Chromium 对右键是「先 contextmenu、后 mousedown」：菜单刚被打开，
+     * 紧接着这次右键的 mousedown 就会打到这个监听上 —— 若照机关闭，菜单会立刻进入
+     * 淡出、160ms 后又被复位，观感就是"出现时闪一下"。
+     * 右键换位置由随后的 contextmenu（父组件重新设置锚点）负责，不需要这里关。
+     */
+    if (e.button === 2) return;
     if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-      onClose();
+      requestClose();
       setActiveSubmenu(null);
     }
   }, [onClose]);
@@ -418,14 +488,17 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       // 一次退格只会删掉光标前一个字符，而不是删掉选中的整段文字。
       const actsOnSelection = e.key === "Backspace" || e.key === "Delete";
       if (!modifierOnly && !isShortcut && !actsOnSelection) collapseSelection();
-      onClose();
+      requestClose();
       setActiveSubmenu(null);
     };
     document.addEventListener("keydown", handleKeyDown, true);
     return () => document.removeEventListener("keydown", handleKeyDown, true);
   }, [position, onClose, editor]);
 
-  useEffect(() => {
+  // 定位必须用 useLayoutEffect：菜单要先挂到锚点、量出自身高度才能算出最终位置
+  //（placement: "above" 要减去高度）。用 useEffect 会先以锚点画一帧、随后再跳位，
+  // 加了淡入之后那一帧跳位就看得见了 —— 表现就是"菜单出现时闪一下"。
+  useLayoutEffect(() => {
     if (position && menuRef.current) {
       const menu = menuRef.current;
       const rect = menu.getBoundingClientRect();
@@ -559,15 +632,42 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     return () => clearCloseTimer();
   }, []);
 
+  /**
+   * 快速重开（同一次打开里父组件先置 null 再设值，或连续两次设值）时跳过淡入。
+   *
+   * 那种情况会让 div 卸载再挂载，CSS @keyframes 会从头播一遍（opacity 0 → 1），
+   * 而菜单其实一直"开着"，看起来就是闪一下。首次打开仍照常淡入。
+   *
+   * 关键：这个判定必须在**换锚点那一刻只算一次**并存进 state。若放在渲染体里用
+   * performance.now() 现算，鼠标在菜单内移动引发的重渲染会让这个类来回切换，
+   * 而 class 变化会重启 CSS 动画 —— 表现就是"鼠标一动就闪"。
+   */
+  const [skipAnim, setSkipAnim] = useState(false);
+  const lastOpenAtRef = useRef(0);
+  const prevPositionRef = useRef<typeof position>(position);
+  if (prevPositionRef.current !== position) {
+    const rapid = !!position && performance.now() - lastOpenAtRef.current < 300;
+    prevPositionRef.current = position;
+    if (position) lastOpenAtRef.current = performance.now();
+    if (closing) setClosing(false);
+    if (rapid !== skipAnim) setSkipAnim(rapid);
+  }
+
   if (!position) return null;
 
   return (
     <div
       ref={menuRef}
-      className="editor-context-menu"
+      className={`editor-context-menu${closing ? " closing" : ""}${skipAnim ? " no-anim" : ""}`}
       // 点菜单里的任何东西都不把焦点从编辑器抢走（按钮默认会抢）：
       // 这样按任意键收起菜单后继续打字，字符仍然落在编辑器里
       onMouseDown={(e) => e.preventDefault()}
+      // 在菜单上右键不应再弹一层菜单（"菜单的菜单"）：阻止默认与冒泡，
+      // 否则事件会走到编辑器容器、被它的 contextmenu 处理再开一次。
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
       style={{ left: position.x, top: position.y }}
     >
       {/* 三行图标按钮 */}
@@ -583,7 +683,15 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
                 data-tooltip={tooltip}
               >
                 <button
-                  className="context-menu-icon-btn"
+                  className={`context-menu-icon-btn${
+                    // 选中文本**整段**都已应用该标记时（此时再点就是取消）→ 用
+                    // 「背景更深 + 文字变黄」标出激活态。TipTap 的 isActive 对区间选区
+                    // 判的就是"整段都带这个标记"，正是这里要的语义。
+                    (item.name === "bold" || item.name === "italic" || item.name === "strike") &&
+                    editor?.isActive(item.name)
+                      ? " active"
+                      : ""
+                  }`}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     handleItemClick(item.name);

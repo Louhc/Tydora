@@ -38,6 +38,23 @@ if (
   document.documentElement.classList.add("platform-linux");
 }
 
+// 是否按住了 Ctrl / ⌘：CSS 无法感知修饰键，挂在 <html> 上供样式选择器使用
+// （例如顶栏文件名在按住 Ctrl 时变成"可点击"手型 —— 那时点击是"打开所在位置"）。
+// 用 window 的 blur 兜底：切走窗口时收不到 keyup，类会一直挂着。
+(() => {
+  const root = document.documentElement;
+  const sync = (e: KeyboardEvent, down: boolean) => {
+    if (e.key !== "Control" && e.key !== "Meta") return;
+    root.classList.toggle("ctrl-held", down);
+  };
+  const onDown = (e: KeyboardEvent) => sync(e, true);
+  const onUp = (e: KeyboardEvent) => sync(e, false);
+  const clear = () => root.classList.remove("ctrl-held");
+  window.addEventListener("keydown", onDown, true);
+  window.addEventListener("keyup", onUp, true);
+  window.addEventListener("blur", clear);
+})();
+
 // 开始接收 Rust boot-timing 事件（异步：不阻塞当前模块解析）
 connectRustBootTiming();
 bootStamp("rust_boot_listener_registered");

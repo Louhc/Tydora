@@ -16,7 +16,7 @@ import { BookmarksPanel } from "./Bookmarks";
 import { TagPanel, parseTagSearchQuery, resolveTagFileSet } from "./tags";
 import { type SidebarTab } from "./Settings";
 import { FileTreeIcon } from "./SidebarFileIcons";
-import { displayFileName, isMarkdownFileName, restoreExtension } from "./utils/fileName";
+import { displayFileName, isMarkdownFileName, restoreExtension, validateFileName } from "./utils/fileName";
 import { formatBytes } from "./utils/formatBytes";
 import { getTrashMaxBytes, measureTotalUsage, moveToTrash, restoreTrashEntry } from "./services/recycleBin";
 import "./Sidebar.css";
@@ -1469,26 +1469,30 @@ function TreeNodeComp({
 
   const handleDuplicate = useCallback(async () => {
     try {
-      await invoke("duplicate_file", { path: node.path });
+      // duplicate_file 返回新副本的完整路径；按产品决定：复制后**切换到副本**
+      //（顶栏文件名随之变成 xxx 副本）。目录不打开（没有可打开的文件）。
+      const newPath = await invoke<string>("duplicate_file", { path: node.path });
       showToast(i18n.t("sidebar.toast.duplicated"));
       onReload();
+      if (newPath && !node.isDirectory) onSelect(newPath);
     } catch (err) {
       console.error(i18n.t("sidebar.error.duplicateFailed"), err);
       showToast(i18n.t("sidebar.error.duplicateFailed"));
     }
-  }, [node, onReload]);
+  }, [node, onReload, onSelect]);
 
   const handleDuplicateAndCopy = useCallback(async () => {
     try {
-      await invoke("duplicate_file", { path: node.path });
+      const newPath = await invoke<string>("duplicate_file", { path: node.path });
       await invoke("copy_file_to_clipboard", { path: node.path });
       showToast(i18n.t("sidebar.toast.duplicatedAndCopied"));
       onReload();
+      if (newPath && !node.isDirectory) onSelect(newPath);
     } catch (err) {
       console.error(i18n.t("sidebar.error.duplicateAndCopyFailed"), err);
       showToast(i18n.t("sidebar.error.duplicateAndCopyFailed"));
     }
-  }, [node, onReload]);
+  }, [node, onReload, onSelect]);
 
   const handleCopyFileToClipboard = useCallback(async () => {
     try {
@@ -1536,7 +1540,8 @@ function TreeNodeComp({
 
   const isPending = pendingActivePath === node.path;
   const isSelected = selectedPaths.has(node.path);
-  const indent = depth * 22;
+  // 每级缩进 8px：对齐 VSCode 的 workbench.tree.indent 默认值（原先 22px，层级一深就太散）
+  const indent = depth * 8;
   const isDragOver = node.isDirectory && dragOverPath === node.path;
 
   return (
@@ -1982,6 +1987,13 @@ function FileTree({
     newName = newName.trim();
     const currentName = path.split(pathSep()).pop() || "";
     if (newName === currentName) return;
+    // 非法字符必须给出提示：`/` `\` 会被当成路径分隔符（rename 到不存在的子目录直接失败），
+    // `:` `*` `?` 等被系统拒绝 —— 而只有一个 console.error 时用户看到的是"毫无反应"。
+    const issue = validateFileName(newName);
+    if (issue) {
+      showToast(i18n.t(issue.key, issue.params));
+      return;
+    }
     const p = parentPath(path);
     const newPath = joinPath(p, newName);
 
@@ -2013,7 +2025,15 @@ function FileTree({
     }
 
     try { await rename(path, newPath); await handleReload(); }
-    catch (err) { console.error("重命名失败:", err); }
+    catch (err) {
+      console.error("重命名失败:", err);
+      // 之前只写日志、界面毫无反馈；这里把系统返回的原因如实提示出来
+      showToast(
+        i18n.t("sidebar.error.renameFailed", {
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
   }, [handleReload, rootPath]);
 
   // ── Move to folder ──
@@ -2671,10 +2691,26 @@ function FileTree({
       !!(el instanceof Element && (el.closest(".ProseMirror") || el.closest(".cm-editor") || el.closest(".codemirror-editor")));
     const onOver = (e: MouseEvent) => {
       const tn = (e.target as HTMLElement | null)?.closest?.(".tree-node[data-path]") as HTMLElement | null;
-      hoveredPathRef.current = tn?.dataset.path ?? null;
+      // 只有真的落在某一行上才更新；落在树容器空白处（例如刚删掉一行、浏览器把 mouseover
+      // 重新派发到容器）时**保留**上一次的行，否则悬停目标会被清空 ——
+      // 「删除后立刻按 Ctrl+Z / Ctrl+D」就会因为 hovering=false 而完全失效。
+      // 真正离开整棵树由 mouseleave 负责清空。
+      if (tn?.dataset.path) hoveredPathRef.current = tn.dataset.path;
     };
     const onLeave = () => { hoveredPathRef.current = null; };
-    const onTreeDown = () => { lastTreeInteractRef.current = Date.now(); };
+    const onTreeDown = (e: MouseEvent) => {
+      lastTreeInteractRef.current = Date.now();
+      // 点击文件树即把焦点交给树（与 VS Code 一致）：
+      //   1) 点击文件不会把光标送进正文（正文编辑器不会再抢焦点）；
+      //   2) 树上的快捷键（Ctrl+C 复制副本 / F2 改名 / Delete / Ctrl+Z）可直接作用。
+      // 排除输入框与 contenteditable：内联重命名时不能和输入框抢焦点。
+      const el = e.target as HTMLElement | null;
+      if (!el?.closest?.("input, textarea, [contenteditable='true']")) {
+        tree.focus();
+      }
+      // 告诉 App「刚刚是文件树在交互」：点击文件后不要把焦点抢进编辑器
+      window.dispatchEvent(new CustomEvent("tydora-tree-interact"));
+    };
     const onDocKey = (e: KeyboardEvent) => {
       if (isEditorHost(e.target as Element | null)) lastEditorInteractRef.current = Date.now();
     };
@@ -2700,26 +2736,31 @@ function FileTree({
       // Delete 或 Ctrl+D（macOS ⌘D）：删除当前节点 / 多选，二者同一条路径
       const isPlainDelete = e.key === "Delete" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;
       const isCtrlD = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "d";
-      if (!isPlainDelete && !isCtrlD) return;
+      // Ctrl+C（⌘C）：在文件区里 = 复制该文件/文件夹的一个副本（与右键「创建副本」同一命令）
+      const isCtrlC = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "c";
+      if (!isPlainDelete && !isCtrlD && !isCtrlC) return;
       const target = e.target as HTMLElement | null;
       if (!target) return;
       // 输入框 / 重命名框：两个快捷键都让给它们（避免改着名字把文件删了）
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
-      // 输入框 / 重命名框 / 编辑区：删除类快捷键完全不碰文件区（重心在编辑区时就该只作用于编辑区）
-      if (target.isContentEditable) return;
+      // 编辑器（contenteditable）里的 Delete 归编辑器自己（删字符）；
+      // Ctrl+D 在编辑器里没有任何既有含义，鼠标悬停在树上时仍按「删除该行」处理。
+      if (target.isContentEditable && isPlainDelete) return;
       // 已有弹窗 / 菜单打开：不重复触发
       if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
 
-      // 「重心在文件区」才继续：焦点在树内，或鼠标正悬停在树上。
-      // 焦点在编辑器里时（即使鼠标停在树上）一律不动文件 —— 这是明确的用户预期。
+      /**
+       * 「重心在文件区」的判定：焦点在树内，**或**鼠标正悬停在树上。
+       *
+       * 不要因为"焦点还留在编辑器里"就一律拦掉：点选/悬停文件树时焦点常常仍在编辑器
+       * （TipTap 是 contenteditable，点树行的 mousedown 不一定抢走焦点），那样 Ctrl+D
+       * 会变成完全无反应。真正要防的是「鼠标不在树上，快捷键却去删树上那个旧节点」——
+       * 所以下面解析目标时，编辑器持有焦点时**不**回退到 pendingActivePath。
+       */
       const activeEl = document.activeElement as HTMLElement | null;
-      const editorFocused = !!(
-        activeEl &&
-        (activeEl.closest(".ProseMirror") || activeEl.closest(".cm-editor") || activeEl.closest(".codemirror-editor"))
-      );
-      if (editorFocused) return;
       const treeFocused = !!treeRef.current?.contains(activeEl);
-      if (!treeFocused && !hoveredPathRef.current) return;
+      const hovering = !!hoveredPathRef.current;
+      if (!treeFocused && !hovering) return;
 
       let path = hoveredPathRef.current;
       if (!path && treeFocused) path = pendingActivePathRef.current;
@@ -2727,13 +2768,44 @@ function FileTree({
 
       const node = findNodeByPath(rootNodesRef.current, path);
       if (!node || node.path === rootPath) return;
+
+      // Ctrl+C：在文件区里 = 复制该文件/文件夹的一份副本（与右键「创建副本」同一个命令）。
+      // 判据：**焦点不在编辑器里**即可（不能要求"焦点在树内" —— 点选文件后焦点落在侧栏根节点上，
+      // treeRef 并不包含它，那样条件永远为假、Ctrl+C 直接被 return 掉）。
+      // 焦点在编辑器 / 其它 contenteditable 里时一律不接管，Ctrl+C 仍是复制文本。
+      if (isCtrlC) {
+        // 安全闸：编辑器里**选中了文本**时，用户一定是想复制文本 → 绝不抢
+        if ((window.getSelection?.()?.toString() ?? "").length > 0) return;
+        // 不再因为「焦点在编辑器」就放弃：点选/悬停文件树时焦点常常仍留在 TipTap
+        // （contenteditable），那正是"鼠标停在文件上按 Ctrl+C"的常态。
+        // 与 Ctrl+D / Ctrl+Z 同一套判据：焦点在树内 或 鼠标悬停在树上 即算重心在文件区。
+        e.preventDefault();
+        e.stopPropagation();
+        void (async () => {
+          try {
+            // 与右键「创建副本」一致：复制后切换到副本（openCreatedFile 会顺带把
+            // 当前项指向新文件；它不抢编辑器焦点，符合"在文件区操作"的预期）
+            const newPath = await invoke<string>("duplicate_file", { path: node.path });
+            showToast(i18n.t("sidebar.toast.duplicated"));
+            if (newPath && !node.isDirectory) openCreatedFile(newPath);
+          } catch (err) {
+            console.error(i18n.t("sidebar.error.duplicateFailed"), err);
+            showToast(
+              `${i18n.t("sidebar.error.duplicateFailed")}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          await handleReload();
+        })();
+        return;
+      }
+
       e.preventDefault();
       e.stopPropagation();
       void requestDelete(node);
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
-  }, [findNodeByPath, rootPath, requestDelete]);
+  }, [findNodeByPath, rootPath, requestDelete, handleReload]);
 
   /**
    * Ctrl+Z（⌘Z）撤销删除：把最近一次移入回收站的条目恢复回来。
@@ -2746,18 +2818,25 @@ function FileTree({
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "z") return;
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
-      // 焦点在编辑区时让给编辑器（它有自己的撤销），不碰文件区
-      const activeZ = document.activeElement as HTMLElement | null;
-      if (
-        activeZ &&
-        (activeZ.closest(".ProseMirror") || activeZ.closest(".cm-editor") || activeZ.closest(".codemirror-editor"))
-      ) {
-        return;
-      }
-      const inFileArea = !!treeRef.current?.contains(target) || !!hoveredPathRef.current;
-      if (!inFileArea) return;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
       if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
+
+      /**
+       * 「重心在文件区」才抢 Ctrl+Z：焦点在树内，**或**鼠标正悬停在树上。
+       * 与 Ctrl+D / F2 同一判据 —— 点选/悬停文件树时焦点常常仍留在编辑器
+       * （TipTap 是 contenteditable），若因为"焦点在编辑器"就一律让给编辑器，
+       * 鼠标明明停在树上按 Ctrl+Z 也会变成撤销文本而不是恢复文件。
+       * 注意顺序：先判断有没有可恢复的记录，没有再 return（不 preventDefault），
+       * 这样编辑器的撤销不会被打断。
+       */
+      const activeEl = document.activeElement as HTMLElement | null;
+      const treeFocused = !!treeRef.current?.contains(activeEl);
+      const hovering = !!hoveredPathRef.current;
+      // 允许「刚在文件树里操作过」也算重心在文件区：删除后文件树会重载，
+      // 光标下的那一行消失、悬停目标可能落空，此时仍应能撤销删除。
+      // 对 Ctrl+Z 是安全的 —— 它的目标是已记录的回收站条目 id，不依赖悬停行。
+      const treeRecent = lastTreeInteractRef.current > lastEditorInteractRef.current;
+      if (!treeFocused && !hovering && !treeRecent) return;
       const ids = lastTrashMoveRef.current;
       if (ids.length === 0) return;
       e.preventDefault();
@@ -2808,24 +2887,15 @@ function FileTree({
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
       // 已有弹窗 / 菜单打开：不重复触发
       if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
-      // 别的 contenteditable（白板文本框等）里按 F2 不该动侧栏文件
-      const editable = target.closest("[contenteditable]");
-      if (editable && editable.getAttribute("contenteditable") !== "false") return;
 
       /**
-       * 与删除类快捷键同一策略：**重心在编辑区时，快捷键不影响文件区**。
-       * 主编辑器（ProseMirror / CodeMirror）有焦点时按 F2 一律不动作；
-       * 只有「焦点在树内」或「鼠标悬停在树上」才算重心在文件区。
-       * （注：点选文件后焦点会落到编辑器，所以想改名请把鼠标停在树上、
-       *   或先点一下文件树；这是与删除快捷键保持一致的行为。）
+       * 「重心在文件区」的判定：焦点在树内，**或**鼠标正悬停在树上。
+       *
+       * 不要因为"焦点还留在编辑器里"就一律拦掉 —— 点选文件后焦点常常仍在 TipTap /
+       * CodeMirror（contenteditable），F2 那样会变成完全无反应。判断依据是鼠标/焦点
+       * 是否落在文件区，而不是焦点是否还在编辑器里。
        */
       const activeEl = document.activeElement as HTMLElement | null;
-      if (
-        activeEl &&
-        (activeEl.closest(".ProseMirror") || activeEl.closest(".cm-editor") || activeEl.closest(".codemirror-editor"))
-      ) {
-        return;
-      }
       const treeFocused = !!treeRef.current?.contains(activeEl);
       if (!treeFocused && !hoveredPathRef.current) return;
 
@@ -3227,6 +3297,9 @@ function FileTree({
       <div
         ref={treeRef}
         className={`sidebar-tree${hidden ? " hidden" : ""}${isDragging ? " dragging" : ""}${dragOverPath === rootPath ? " drag-over" : ""}${selectionInactive ? " selection-inactive" : ""}`}
+        // 可编程聚焦：点击树时把焦点交给它（见上面的 onTreeDown），
+        // 这样点选文件不会把光标送进正文，树上的快捷键也直接可用
+        tabIndex={-1}
         onContextMenu={handleBlankContextMenu}
         onScroll={handleScroll}
         onClick={(e) => { if (e.target === e.currentTarget) handleClearSelection(); }}
@@ -3467,7 +3540,7 @@ function OutlineNodeComp({
     <div className="outline-branch">
       <div
         className={`outline-node${isActive ? " active" : ""}`}
-        style={{ paddingLeft: `${12 + depth * 20}px` }}
+        style={{ paddingLeft: `${12 + depth * 8}px` }}
         title={node.item.text}
         // 整行都可点：热区只挂文字那一段时，「H1」徽标、缩进区、箭头旁边点了都没反应，
         // 看起来就像「这一行点不动」。
