@@ -24,6 +24,10 @@ tauri-plugin-window-state = "2"
 tauri-plugin-updater = { version = "2", features = ["default"] }
 tauri-plugin-process = "2"
 tauri-plugin-clipboard-manager = "2"
+# 读剪贴板 HTML（插件只提供 readText / writeHtml，没有读 HTML 的能力）。
+# 关掉默认特性只留文本 + HTML，避免把图片编解码也编进来；该 crate 已被
+# tauri-plugin-clipboard-manager 间接依赖（见根 Cargo.lock），不会引入新依赖。
+arboard = { version = "3", default-features = false }
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,6 +47,9 @@ fontdb = "0.23"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  # 终端退出兜底：OpenProcess(SYNCHRONIZE) + WaitForSingleObject 等子进程退出
+  #（ConPTY 下 master.read 不会返回 EOF，靠这个发 terminal-closed）
+  "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
 ] }

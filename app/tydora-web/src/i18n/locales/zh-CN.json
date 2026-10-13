@@ -917,6 +917,8 @@
       "openInNewWindow": "在新窗口中打开",
       "openInNewPanel": "在新面板打开",
       "favorite": "收藏",
+      "star": "标星",
+      "unstar": "取消标星",
       "newFile": "新建文件",
       "newCanvas": "新建白板",
       "newFolder": "新建文件夹",
@@ -1327,6 +1329,39 @@
       "title": "打开本地仓库",
       "desc": "将一个本地文件夹作为仓库打开。",
       "dialogTitle": "选择本地文件夹作为仓库"
+    }
+  },
+  "bookmarks": {
+    "defaultGroup": "默认分组",
+    "ungrouped": "未分组",
+    "editTitlePrompt": "修改标题",
+    "panel": {
+      "empty": "还没有收藏",
+      "emptyHint": "在文件树里右键 → 收藏，即可把文件或文件夹加到这里。",
+      "noVault": "请先打开一个仓库",
+      "dropHere": "拖到这里"
+    },
+    "contextMenu": {
+      "rename": "重命名分组",
+      "editTitle": "修改标题",
+      "unfavorite": "取消收藏",
+      "deleteGroup": "删除分组",
+      "copyPath": "复制路径",
+      "openInNewWindow": "在新窗口打开"
+    },
+    "dialog": {
+      "addTitle": "添加收藏",
+      "editTitle": "编辑收藏",
+      "path": "路径",
+      "title": "标题",
+      "emptyTitleHint": "留空则使用文件名",
+      "group": "分组",
+      "selectGroup": "选择分组",
+      "newGroup": "新建分组",
+      "newGroupPlaceholder": "分组名称",
+      "noGroups": "暂无分组",
+      "cancel": "取消",
+      "save": "保存"
     }
   }
 }

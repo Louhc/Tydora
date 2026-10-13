@@ -14,6 +14,46 @@
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   min-width: 360px;
   max-width: 480px;
+  /* 出现：像 VS Code 那样从上方滑出。本组件是 absolute 定位、不依赖自身 transform，
+     所以可以安全地加 translateY 位移（右键菜单那类依赖 transform 定位的浮层则不能）。 */
+  animation: find-widget-in 0.12s ease-out both;
+  transform-origin: top right;
+}
+
+/* 消失：由 .closing 触发向上滑出，组件延迟 100ms 卸载（见 FindReplaceDialog.tsx 的
+   requestClose —— 父组件是靠条件渲染挂载的，直接 onClose 会立刻卸载、没有动画）。 */
+.find-replace-dialog.closing {
+  animation: find-widget-out 0.1s ease-in both;
+  pointer-events: none;
+}
+
+@keyframes find-widget-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes find-widget-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .find-replace-dialog,
+  .find-replace-dialog.closing {
+    animation: none;
+  }
 }
 
 .find-replace-row {

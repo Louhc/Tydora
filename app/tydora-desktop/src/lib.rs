@@ -43,6 +43,7 @@ use commands::watcher_commands::{watch_vault, unwatch_vault, WatcherState};
 use commands::remote_image::{fetch_remote_image, HttpClientState};
 use commands::proxy::{start_proxy_server, fetch_page_title};
 use commands::file_commands::list_dir_with_meta;
+use commands::clipboard_commands::read_clipboard_html;
 use commands::terminal_commands::{
     spawn_terminal, write_terminal, resize_terminal, kill_terminal, TerminalManager,
 };
@@ -1016,10 +1017,31 @@ fn open_file(file_path: String) -> Result<(), String> {
 fn open_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        // 不要用 `cmd /C start "" <url>`：cmd.exe 把 `&` 当命令分隔符，URL 会在**第一个 &**
+        // 处被截断（如 bilibili 的 ?vd_source=…&p=15&t=5446 只剩前半段）；`^`/`!`/`%` 同理。
+        // 改用 ShellExecuteW：URL 原样交给系统，不经过 cmd 解析。
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        let to_wide = |s: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        };
+        let op = to_wide("open");
+        let file = to_wide(&url);
+        // SW_SHOWNORMAL = 1（用字面量，避免为一个常量再开 windows-sys feature）
+        let ret = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        // ShellExecuteW 的返回值 <= 32 表示失败（它是 HINSTANCE，但被复用为错误码）
+        if (ret as isize) <= 32 {
+            return Err(format!("打开链接失败（ShellExecuteW 返回 {}）", ret as isize));
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -2245,6 +2267,7 @@ pub fn run() {
             open_url,
             duplicate_file,
             copy_file_to_clipboard,
+            read_clipboard_html,
             open_directory,
             open_in_terminal,
             open_mindmap_window,

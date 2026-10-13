@@ -918,6 +918,8 @@
       "openInNewWindow": "Open in New Window",
       "openInNewPanel": "Open in New Panel",
       "favorite": "Favorite",
+      "star": "Star",
+      "unstar": "Unstar",
       "newFile": "New File",
       "newCanvas": "New Canvas",
       "newFolder": "New Folder",
@@ -1327,6 +1329,39 @@
       "title": "Open Local Vault",
       "desc": "Open a local folder as a vault.",
       "dialogTitle": "Select a local folder as a vault"
+    }
+  },
+  "bookmarks": {
+    "defaultGroup": "Default group",
+    "ungrouped": "Ungrouped",
+    "editTitlePrompt": "Edit title",
+    "panel": {
+      "empty": "No bookmarks yet",
+      "emptyHint": "Right-click a file or folder in the file tree → Favorite to add it here.",
+      "noVault": "Open a vault first",
+      "dropHere": "Drop here"
+    },
+    "contextMenu": {
+      "rename": "Rename group",
+      "editTitle": "Edit title",
+      "unfavorite": "Remove favorite",
+      "deleteGroup": "Delete group",
+      "copyPath": "Copy path",
+      "openInNewWindow": "Open in new window"
+    },
+    "dialog": {
+      "addTitle": "Add favorite",
+      "editTitle": "Edit favorite",
+      "path": "Path",
+      "title": "Title",
+      "emptyTitleHint": "Leave empty to use the file name",
+      "group": "Group",
+      "selectGroup": "Select group",
+      "newGroup": "New group",
+      "newGroupPlaceholder": "Group name",
+      "noGroups": "No groups",
+      "cancel": "Cancel",
+      "save": "Save"
     }
   }
 }

@@ -203,6 +203,37 @@ pub fn spawn_terminal(
 
     let app_clone = app.clone();
     let id_clone = id.clone();
+
+    // Windows 兜底：不再只依赖 PTY 的 EOF。
+    //
+    // ConPTY 下 shell 退出（用户输入 exit 等）时，master 的 read 往往会一直阻塞，
+    // 读线程永远不返回 → terminal-closed 发不出来 → 前端"进程已退出"提示与自动关闭
+    // 都不会发生（这就是"exit 后不自动关闭"的原因）。
+    // 所以直接盯住子进程句柄：它一退出就发事件，与 PTY 的读行为无关。
+    // （Unix 上 EOF 可靠，仍走读线程那条路径，不动。）
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = child.process_id() {
+        let app_wait = app_clone.clone();
+        let id_wait = id.clone();
+        std::thread::spawn(move || unsafe {
+            // SYNCHRONIZE 在 windows-sys 里的模块/feature 归属不稳定（Foundation / Threading
+            // 都取不到），这里直接用它的字面量 0x00100000，少一个 feature 依赖。
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{
+                OpenProcess, WaitForSingleObject, INFINITE,
+            };
+            const SYNCHRONIZE: u32 = 0x0010_0000;
+            // 只要能 SYNCHRONIZE 拿句柄，就能等它退出（不需要查询权限）
+            let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+            if handle.is_null() {
+                return;
+            }
+            WaitForSingleObject(handle, INFINITE);
+            CloseHandle(handle);
+            let _ = app_wait.emit("terminal-closed", TerminalClosed { id: id_wait });
+        });
+    }
+
     let reader_thread = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {

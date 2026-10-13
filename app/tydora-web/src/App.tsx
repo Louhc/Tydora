@@ -4,6 +4,7 @@ bootStamp("App_module_imported");
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+
 import { readTextFile, writeTextFile, rename, exists } from "@tauri-apps/plugin-fs";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -48,7 +49,7 @@ import { loadImageSettings, IMAGE_SETTINGS_KEY, type ImageSettings } from "./ser
 import { loadEditorSettings, type EditorSettings, EDITOR_SETTINGS_KEY, SHORTCUTS_KEY, GRAPH_SETTINGS_KEY, DEFAULT_GRAPH, type SidebarTab, type SidebarSide, type SidebarTabPlacement, sidebarTabsForSide, DEFAULT_GENERAL, TOGGLE_SIDEBAR_EVENT, TOGGLE_RIGHT_SIDEBAR_EVENT } from "./Settings";
 import { applyFontSettings } from "./utils/systemFonts";
 import { applyMenuDensity, applyEditorSpacingFromSettings, normalizeMenuDensity } from "./utils/menuDensity";
-import { checkForUpdate, downloadAndInstall, relaunchApp, exitApp, isPortableVersion, type UpdateInfo } from "./services";
+import { downloadAndInstall, relaunchApp, exitApp, isPortableVersion, type UpdateInfo } from "./services";
 import { LinkIndexService } from "./wikilink";
 import { WikiLinkAutocomplete } from "./wikilink";
 import { WikiLinkPreview } from "./wikilink";
@@ -1145,7 +1146,9 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   const [publishConfigOpen, setPublishConfigOpen] = useState(false);
 
   // 更新状态
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  // 更新提示已按要求移除（自动检查关闭，主窗口不再弹"有新版本"）。
+  // setter 仍保留（下面下载/安装流程里会用到），用下划线前缀避免 noUnusedLocals 报错。
+  const [updateInfo, _setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDownloading, setUpdateDownloading] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total: number | null }>({ downloaded: 0, total: null });
   const [updateCopied, setUpdateCopied] = useState(false);
@@ -1161,6 +1164,10 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   const [showExportFormatPicker, setShowExportFormatPicker] = useState(false);
   const [exportPreview, setExportPreview] = useState<{ format: ExportFormat; artifact: BuiltArtifact } | null>(null);
   const [findReplaceDialogMode, setFindReplaceDialogMode] = useState<"find" | "replace" | null>(null);
+  /** 打开查找框时预填的内容（编辑器内选中的纯文本，见 openFindReplace） */
+  const [findInitialQuery, setFindInitialQuery] = useState("");
+  /** 每次打开查找自增：即使查找框已经开着，再按 Ctrl+F 也能重新聚焦/全选 */
+  const [findFocusToken, setFindFocusToken] = useState(0);
 
   // 小红书图文导出分栏
   const [xhsPreviewOpen, setXhsPreviewOpen] = useState(false);
@@ -1458,15 +1465,18 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     localStorage.setItem(XHS_PREVIEW_WIDTH_KEY, String(xhsPreviewWidth));
   }, [xhsPreviewWidth]);
 
-  // 启动后延迟检查更新（不阻塞首屏渲染）
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      checkForUpdate().then((info) => {
-        if (info) setUpdateInfo(info);
-      }).catch(() => {});
-    }, 2000);
-    return () => clearTimeout(timer);
-  }, []);
+  // 启动自动检查更新：**已按需求关闭**（不再请求 GitHub releases，也不再弹更新提示）。
+  // 需要检查时可去「设置 → 关于」手动点「检查更新」（那条是用户显式触发，保留）。
+  // 想恢复自动检查：把下面这段取消注释，并把 checkForUpdate 加回上面的 import。
+  //
+  // useEffect(() => {
+  //   const timer = setTimeout(() => {
+  //     checkForUpdate().then((info) => {
+  //       if (info) setUpdateInfo(info);
+  //     }).catch(() => {});
+  //   }, 2000);
+  //   return () => clearTimeout(timer);
+  // }, []);
 
   // 新窗口：打开指定文件（通过 URL 参数）。内容直接写入激活缓冲，
   // 由 Editor 的 value 同步机制驱动视图（无需手动 setValue 推送）。
@@ -3242,16 +3252,65 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
       }
       if (matchShortcut(e, shortcutsConfig.app["find"])) {
         e.preventDefault();
-        setFindReplaceDialogMode("find");
+        openFindReplace("find");
       }
       if (matchShortcut(e, shortcutsConfig.app["replace"])) {
         e.preventDefault();
-        setFindReplaceDialogMode("replace");
+        openFindReplace("replace");
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [handleClose, closePane, vimShouldTakeOver]);
+
+  /**
+   * 取当前选区的**纯文本**（无格式），用于打开查找框时预填。
+   *
+   * 用 DOM 选区而不是编辑器的 marks：`toString()` 拿到的天然只有文字，粗体/斜体等
+   * 标记不会带进来。只认编辑器内的选区 —— 侧栏文件名、顶栏标题之类不该进查找框。
+   */
+  const readSelectedPlainText = useCallback((): string => {
+    try {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return "";
+      const anchor = sel.anchorNode;
+      const el = anchor instanceof HTMLElement ? anchor : (anchor?.parentElement ?? null);
+      if (!el?.closest(".ProseMirror, .cm-editor, .codemirror-editor")) return "";
+      return sel.toString();
+    } catch {
+      return "";
+    }
+  }, []);
+
+  /**
+   * 打开查找 / 替换框：
+   *   - 编辑器里选中了文本 → 预填选中的纯文本（无格式）；
+   *   - 没有选中 → 预填**剪贴板内容**（Tauri 剪贴板，走 Rust 侧、不弹权限窗）。
+   * 剪贴板只取"像一段查找词"的内容：单行且不超过 200 字符 —— 否则整篇长文填进
+   * 单行查找框既没意义，还会把用户上次的输入冲掉。
+   */
+  const openFindReplace = useCallback(
+    (mode: "find" | "replace") => {
+      const selected = readSelectedPlainText();
+      // token 自增：查找框已开着时也能重新聚焦并全选（选中的文本与上次相同也能生效）
+      setFindFocusToken((t) => t + 1);
+      setFindReplaceDialogMode(mode);
+      if (selected) {
+        setFindInitialQuery(selected);
+        return;
+      }
+      void (async () => {
+        try {
+          const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+          const text = ((await readText()) ?? "").trim();
+          if (text && !text.includes("\n") && text.length <= 200) setFindInitialQuery(text);
+        } catch {
+          /* 剪贴板读不到（空/无权限）就保持原样，不影响打开查找框 */
+        }
+      })();
+    },
+    [readSelectedPlainText],
+  );
 
   // Ctrl+,（macOS：⌘+,）开关设置弹框；可在设置-快捷键中自定义
   const settingsOpenRef = useRef(false);
@@ -4570,7 +4629,7 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
                       className="editor-topbar-more-menu-item"
                       onClick={() => {
                         setMoreMenuOpen(false);
-                        setFindReplaceDialogMode("find");
+                        openFindReplace("find");
                       }}
                     >
                       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -4582,7 +4641,7 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
                       className="editor-topbar-more-menu-item"
                       onClick={() => {
                         setMoreMenuOpen(false);
-                        setFindReplaceDialogMode("replace");
+                        openFindReplace("replace");
                       }}
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -4875,6 +4934,10 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
               <FindReplaceDialog
                 editorHandle={editorHandleRef.current}
                 mode={findReplaceDialogMode}
+                initialQuery={findInitialQuery}
+                showReplaceRow={findReplaceDialogMode === "replace"}
+                focusToken={findFocusToken}
+                docContent={content}
                 onClose={() => setFindReplaceDialogMode(null)}
               />
             )}

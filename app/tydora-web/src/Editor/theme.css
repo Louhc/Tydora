@@ -1716,6 +1716,74 @@ html.platform-macos .tiptap-editor .frontmatter-node {
      旧式 -webkit-mask-composite: source-in），于是短划向两侧自然淡出；
    - 间距：上下 48px、两端各留 6%。
    调粗细/疏密：改 mask-size 的两处尺寸与 SVG 的 x1/x2/stroke-width（保持 x1 == 38-x2 即对称）。 */
+/**
+ * 平假名注音 {{Ruby|漢字|かんじ}}
+ *
+ * DOM 刻意是**单个 span + 单个文本节点**，注音放在 data-rt 属性里、由 ::after 画到上方。
+ * 原因：ProseMirror 按"一个文档节点 ↔ 一个 DOM 节点、其文本即节点文本"映射位置，
+ * 若在叶子节点里嵌 <rt> 等子元素，选区边界解析会不稳定（拖选闪烁、无法以它为选区边界）。
+ */
+.tiptap-editor .md-ruby {
+  position: relative;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.tiptap-editor .md-ruby:hover {
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.14);
+}
+
+.tiptap-editor .md-ruby::after {
+  content: attr(data-rt);
+  position: absolute;
+  left: 50%;
+  top: -0.5em;
+  transform: translateX(-50%);
+  font-size: 0.5em;
+  font-weight: 400;
+  line-height: 1;
+  color: var(--text-secondary, #888);
+  white-space: nowrap;
+  pointer-events: none; /* 不参与命中测试，选区边界只落在 base 文本上 */
+}
+
+/* 注音就地编辑浮层：挂在 document.body 上，所以这里不能嵌套在选择器里。
+   固定定位 + 贴在节点上方（超出视口时由脚本翻到下方）。 */
+.ruby-edit-popover {
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  min-width: 132px;
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+}
+
+.ruby-edit-popover input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: var(--bg-secondary, #f5f5f5);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 4px;
+  outline: none;
+}
+
+.ruby-edit-popover input:focus {
+  border-color: var(--accent, #0969da);
+}
+
+.ruby-edit-popover .ruby-edit-rt {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 .tiptap-editor hr {
   /* 上下间距用变量集中管理：上宽下窄。
      关键：mask 的纵向位置必须写成 var(--hr-gap-top) 而不是 center ——

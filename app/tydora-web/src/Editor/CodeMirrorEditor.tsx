@@ -999,6 +999,28 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
             useMarkdownHighlighting ? markdownHighlighting : codeHighlighting
           ),
           keymap.of([
+            // End / Home = 跳到整篇文档的末尾 / 开头（默认是行末 / 行首），与 IR 模式一致。
+            // 与下面 Mod-c / Mod-x 同理：同一数组里的绑定优先于 CM 默认键位。
+            {
+              key: "End",
+              run: (view) => {
+                view.dispatch({
+                  selection: { anchor: view.state.doc.length },
+                  scrollIntoView: true,
+                });
+                return true;
+              },
+            },
+            {
+              key: "Home",
+              run: (view) => {
+                view.dispatch({
+                  selection: { anchor: 0 },
+                  scrollIntoView: true,
+                });
+                return true;
+              },
+            },
             // 无选区时 Ctrl+C / Ctrl+X = 复制 / 剪切整行（VS Code 习惯）。
             // 有选区时返回 false，交回默认的复制 / 剪切。
             // 注：Vim 模式由 @replit/codemirror-vim 用更高优先级接管，不受这里影响（那边用 yy / dd）。

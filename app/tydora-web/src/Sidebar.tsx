@@ -17,6 +17,7 @@ import { TagPanel, parseTagSearchQuery, resolveTagFileSet } from "./tags";
 import { type SidebarTab } from "./Settings";
 import { FileTreeIcon } from "./SidebarFileIcons";
 import { displayFileName, isMarkdownFileName, restoreExtension, validateFileName } from "./utils/fileName";
+import { isStarred, toggleStarred } from "./utils/starred-paths";
 import { formatBytes } from "./utils/formatBytes";
 import { getTrashMaxBytes, measureTotalUsage, moveToTrash, restoreTrashEntry } from "./services/recycleBin";
 import "./Sidebar.css";
@@ -880,6 +881,10 @@ interface FileActions {
   onOpenTerminal: () => void;
   onNewWindow: () => void;
   onBookmark: () => void;
+  /** 星标（轻量就地标记）：标签与图标随当前状态变化，只作用于该节点自身 */
+  starLabel: string;
+  starIcon: React.ReactNode;
+  onToggleStar: () => void;
   onMoveTo: () => void;
   onOpenInNewPanel: () => void;
 }
@@ -901,6 +906,18 @@ const menuIcon = (children: ReactNode): ReactNode => (
 );
 
 const MENU_ICONS = {
+  // 星标：未标星用空心五角星，已标星用实心（fill 覆盖 menuIcon 的 fill="none"）
+  star: menuIcon(
+    <path d="M12 3.2l2.62 5.31 5.86.85-4.24 4.13 1 5.84L12 16.57l-5.24 2.76 1-5.84L3.52 9.36l5.86-.85L12 3.2z" />,
+  ),
+  starFilled: menuIcon(
+    <path
+      d="M12 3.2l2.62 5.31 5.86.85-4.24 4.13 1 5.84L12 16.57l-5.24 2.76 1-5.84L3.52 9.36l5.86-.85L12 3.2z"
+      // 用内联 style 而不是 fill 属性：CSS 声明会覆盖表现属性，内联样式则一定能赢，
+      // 免得被某处的 `svg { fill: none }` 一类规则把实心星吃成空的
+      style={{ fill: "currentColor", stroke: "none" }}
+    />,
+  ),
   open: menuIcon(
     <>
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -1038,6 +1055,8 @@ function getFileMenuItems(
     { label: t("sidebar.contextMenu.newFolder"), icon: MENU_ICONS.newFolder, onClick: actions.onNewFolder },
     { label: t("sidebar.contextMenu.favorite"), icon: MENU_ICONS.favorite, onClick: actions.onBookmark, separator: true },
     { label: t("sidebar.contextMenu.rename"), icon: MENU_ICONS.rename, onClick: actions.onRename, separator: true },
+    // 标星 / 取消标星：只在树里把该项强调出来（不进收藏面板，标文件夹不连带子项）
+    { label: actions.starLabel, icon: actions.starIcon, onClick: actions.onToggleStar, separator: true },
     {
       label: t("sidebar.contextMenu.duplicate"),
       icon: MENU_ICONS.duplicate,
@@ -1071,6 +1090,8 @@ function getFolderMenuItems(actions: FileActions, t: (key: string) => string): C
     { label: t("sidebar.contextMenu.newFolder"), icon: MENU_ICONS.newFolder, onClick: actions.onNewFolder, separator: true },
     { label: t("sidebar.contextMenu.favorite"), icon: MENU_ICONS.favorite, onClick: actions.onBookmark },
     { label: t("sidebar.contextMenu.rename"), icon: MENU_ICONS.rename, onClick: actions.onRename, separator: true },
+    // 标星 / 取消标星：只在树里把该项强调出来（不进收藏面板，标文件夹不连带子项）
+    { label: actions.starLabel, icon: actions.starIcon, onClick: actions.onToggleStar, separator: true },
     { label: t("sidebar.contextMenu.moveTo"), icon: MENU_ICONS.moveTo, onClick: actions.onMoveTo },
     { label: t("sidebar.contextMenu.delete"), icon: MENU_ICONS.delete, onClick: actions.onDelete, danger: true, separator: true },
     {
@@ -1350,10 +1371,57 @@ function TreeNodeComp({
     }
   }, [isEditing]);
 
+  /**
+   * 自建双击判定（窗口 250ms）。
+   *
+   * 浏览器的 dblclick / e.detail 用的是系统设置里的双击间隔（通常约 500ms）：
+   * 那个窗口太长，会把"连续点击文件夹展开/收起"误判成双击而丢掉第二次点击。
+   * 所以自己判一次：
+   *   - 窗口内 = 双击 → 进就地重命名（文件与文件夹一致）；
+   *   - 超出窗口 = 两次独立单击（文件夹照常展开/收起）。
+   *
+   * 窗口取 250ms：真人双击间隔一般 100–250ms，取 100ms 太紧会点不出来（文件夹的
+   * dblclick 又被主动挡掉了，就没有第二次机会）；250ms 仍比系统值短一半，
+   * 正常速度的连续点击不会被吞。想再快/再稳就改这一个数字。
+   */
+  const lastClickAtRef = useRef(0);
+
+  /**
+   * 收起动画：展开状态（node.expanded）翻转成 false 时，先把子节点继续挂 160ms 播完
+   * 收起动画再卸载 —— 否则 React 立刻卸载，根本没有动画可看。
+   * 用渲染期派生状态（本组件 setState）而不是 effect：effect 会晚一帧，首帧就已经没了。
+   */
+  const [collapsing, setCollapsing] = useState(false);
+  const prevExpandedRef = useRef(!!node.expanded);
+  if (prevExpandedRef.current !== !!node.expanded) {
+    const nowExpanded = !!node.expanded;
+    prevExpandedRef.current = nowExpanded;
+    if (!nowExpanded && !collapsing) setCollapsing(true);
+    if (nowExpanded && collapsing) setCollapsing(false);
+  }
+  useEffect(() => {
+    if (!collapsing) return;
+    const timer = window.setTimeout(() => setCollapsing(false), 160);
+    return () => window.clearTimeout(timer);
+  }, [collapsing]);
   const handleToggle = useCallback(async (e: React.MouseEvent) => {
-    // 双击的第二次 click：交给 onDoubleClick（文件 = 进重命名），不要再重复打开/切换一次。
-    // 空对象调用（actions.onOpen）时 detail 是 undefined，比较结果为 false，不受影响。
-    if (e.detail > 1) return;
+    const now = Date.now();
+    const isDoubleByOwnWindow = now - lastClickAtRef.current < 250;
+    lastClickAtRef.current = now;
+    // 只有双击在**文件名文字**上才改名：双击箭头、图标、行内其余空白等区域不改名
+    //（那些地方的语义是展开/收起或选中）。
+    const onNameText = !!(e.target as HTMLElement | null)?.closest?.(".tree-name");
+    if (isDoubleByOwnWindow && onNameText) {
+      e.preventDefault();
+      e.stopPropagation();
+      onStartEdit(node.path);
+      return;
+    }
+    // 双击的第二次 click：交给 onDoubleClick（文件 = 进重命名），不要再重复打开一次。
+    // 但**只对文件**这么处理：文件夹没有"双击进重命名"的语义，若也在这里 return，
+    // 浏览器双击判定窗口内的第二次点击会被丢弃 —— 表现就是
+    // "文件夹不能连续点击，必须等动画结束后再点才有效"。
+    if (e.detail > 1 && !node.isDirectory) return;
     if (!node.isDirectory) {
       // Shift+click: range select
       if (e.shiftKey) {
@@ -1394,6 +1462,13 @@ function TreeNodeComp({
     }
     node.expanded = !node.expanded;
     onToggleExpand(node.path, node.expanded);
+    /**
+     * 点击文件夹也要把多选集合**替换**为它自己（VS Code 语义：点谁选谁）。
+     * 原来这里完全不动集合 —— 如果之前用「定位当前文件」或 Ctrl+点击选过别的东西，
+     * 那个选中会一直留着，表现就是"文件和文件夹同时被选中"。
+     */
+    onMultiSelect([node.path], 'replace');
+    lastClickedPathRef.current = node.path;
     onRefresh();
   }, [node, onSelect, onRefresh, onMultiSelect, lastClickedPathRef, onToggleExpand]);
 
@@ -1467,6 +1542,18 @@ function TreeNodeComp({
     }
   }, [node]);
 
+  /**
+   * 标星 / 取消标星：轻量的"就地标记"，只影响这一个节点本身
+   *（标文件夹不连带子项，也不进收藏面板）。
+   * 之后调 onRefresh() 让树重渲染 —— 星标状态存在 localStorage，React 不会自动感知。
+   */
+  const handleToggleStar = useCallback(() => {
+    // 不做 toast：星标后树里立刻出现/消失小星，反馈已经足够；
+    // 少两个 i18n 键就少一处"忘了翻译"的风险（收藏对话框就吃过这个亏）。
+    toggleStarred(node.path);
+    onRefresh();
+  }, [node.path, onRefresh]);
+
   const handleDuplicate = useCallback(async () => {
     try {
       // duplicate_file 返回新副本的完整路径；按产品决定：复制后**切换到副本**
@@ -1512,6 +1599,10 @@ function TreeNodeComp({
     onNewWhiteboard: handleNewWhiteboard,
     onSearch: showDevAlert,
     onRename: handleRename,
+    // 星标：标签随当前状态变化（标星 / 取消标星），只作用于该节点自身
+    starLabel: i18n.t(isStarred(node.path) ? "sidebar.contextMenu.unstar" : "sidebar.contextMenu.star"),
+    starIcon: isStarred(node.path) ? MENU_ICONS.starFilled : MENU_ICONS.star,
+    onToggleStar: handleToggleStar,
     onDuplicate: handleDuplicate,
     onDuplicateAndCopy: handleDuplicateAndCopy,
     onCopyFile: handleCopyFileToClipboard,
@@ -1540,6 +1631,8 @@ function TreeNodeComp({
 
   const isPending = pendingActivePath === node.path;
   const isSelected = selectedPaths.has(node.path);
+  // 星标：只影响本行外观（强调），不带任何筛选/面板行为
+  const starred = isStarred(node.path);
   // 每级缩进 8px：对齐 VSCode 的 workbench.tree.indent 默认值（原先 22px，层级一深就太散）
   const indent = depth * 8;
   const isDragOver = node.isDirectory && dragOverPath === node.path;
@@ -1548,12 +1641,16 @@ function TreeNodeComp({
     <div className="tree-branch">
       <div
         ref={nodeRef}
-        className={`tree-node${isPending ? " pending-active" : ""}${isSelected ? " selected" : ""}${isDragOver ? " drag-over" : ""}`}
+        className={`tree-node${isPending ? " pending-active" : ""}${isSelected ? " selected" : ""}${isDragOver ? " drag-over" : ""}${starred ? " starred" : ""}`}
         style={{ paddingLeft: `${8 + indent}px` }}
         onClick={handleToggle}
         onDoubleClick={(e) => {
-          // 双击文件 = 重命名（与 F2、右键「重命名」同一个入口）；
-          // 目录保持原语义（单击展开/折叠，不抢双击），免得顺手双击文件夹就进改名框。
+          // 双击**文件名的文字部分**（.tree-name）= 重命名，与 F2、右键「重命名」同一入口。
+          // 双击箭头 / 图标 / 行内空白不改名 —— 那些区域的语义是展开、收起、选中。
+          if (!(e.target as HTMLElement | null)?.closest?.(".tree-name")) return;
+          // 文件夹刻意不在这里改名：它只认 handleToggle 里那个 250ms 的快速双击窗口，
+          // 稍慢的双击应当被当成两次独立的展开/收起（浏览器 dblclick 的窗口约 500ms，
+          // 若不在这里挡掉，稍慢的双击也会误入改名框）。
           if (node.isDirectory) return;
           e.preventDefault();
           e.stopPropagation();
@@ -1604,12 +1701,31 @@ function TreeNodeComp({
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="tree-name">{displayFileName(node.name, node.isDirectory)}</span>
+          <>
+            <span className="tree-name">{displayFileName(node.name, node.isDirectory)}</span>
+            {/* 星标：行内 SVG 实心五角星（不用文字 ★ —— 各字体下形状/基线不一致） */}
+            {starred && (
+              <svg
+                className="tree-star"
+                width="11"
+                height="11"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+                // 内联样式（而非 fill 属性）：确保一定被填充，不被样式表覆盖
+                style={{ fill: "currentColor", stroke: "none" }}
+              >
+                <path d="M12 3.2l2.62 5.31 5.86.85-4.24 4.13 1 5.84L12 16.57l-5.24 2.76 1-5.84L3.52 9.36l5.86-.85L12 3.2z" />
+              </svg>
+            )}
+          </>
         )}
       </div>
 
-      {node.isDirectory && node.expanded && node.children && (
-        <div className="tree-children" style={{ '--tree-depth': depth } as React.CSSProperties}>
+      {node.isDirectory && (node.expanded || collapsing) && node.children && (
+        <div
+          className={`tree-children${collapsing ? " collapsing" : ""}`}
+          style={{ '--tree-depth': depth } as React.CSSProperties}
+        >
           {node.children.map((child) => (
             <TreeNodeComp
               key={child.path}
@@ -1895,6 +2011,25 @@ function FileTree({
 
   const handleRevealActiveFile = useCallback(async () => {
     if (!activePath || !activePath.startsWith(rootPath)) return;
+    /**
+     * 定位 = 展开到它 + 滚动过去 + **选中它**。
+     * 只滚不选中，用户看不出"定位到了哪一项"（尤其是同名文件或长列表里）。
+     *
+     * 注意：handleMultiSelect 声明在本函数之后（L2174 附近），所以
+     *  - 只能在函数体里引用（调用时才求值，那时已完成初始化）；
+     *  - **不能写进依赖数组** —— 依赖数组在渲染期同步求值，会撞上 TDZ 报错。
+     * 它本身只依赖 setSelectedPaths（稳定），不放进 deps 没有陈旧闭包风险。
+     */
+    handleMultiSelect([activePath], "replace");
+    setPendingActivePath(activePath);
+    pendingActivePathRef.current = activePath;
+    /**
+     * 还要把**焦点**交给树：树上的快捷键（F2 改名 / Ctrl+C 复制副本 / Delete 删除 /
+     * Ctrl+Z 撤销删除）的判据是"焦点在树内 或 鼠标悬停在树上"。只选中不聚焦的话，
+     * 焦点仍在编辑器里，按 F2 会被编辑器接走。点"定位"按钮本身就意味着注意力在侧栏，
+     * 所以这里聚焦是符合预期的。
+     */
+    treeRef.current?.focus();
     const dirs = ancestorDirs(parentPath(activePath), rootPath);
     if (dirs.length === 0) {
       scrollToPath(activePath);
@@ -2543,6 +2678,10 @@ function FileTree({
     onNewWhiteboard: handleNewRootWhiteboard,
     onSearch: showDevAlert,
     onRename: () => {},
+    // 树空白区的菜单没有"标的物"，星标在这里是空操作（类型上仍需提供）
+    starLabel: "",
+    starIcon: null,
+    onToggleStar: () => {},
     onDuplicate: showDevAlert,
     onDuplicateAndCopy: showDevAlert,
     onCopyFile: () => {},

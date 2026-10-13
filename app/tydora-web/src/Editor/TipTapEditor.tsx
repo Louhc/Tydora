@@ -1,6 +1,6 @@
 import { useRef, useEffect, forwardRef, useImperativeHandle, useCallback, useState, useSyncExternalStore } from "react";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
-import { markInputRule } from "@tiptap/core";
+import { Extension, markInputRule } from "@tiptap/core";
 import type { EditorView } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 import Paragraph from "@tiptap/extension-paragraph";
@@ -38,6 +38,7 @@ import { Toc } from "./extensions/toc";
 import { Mermaid } from "./extensions/mermaid";
 import { WikiLink } from "./extensions/wiki-link";
 import { Tag } from "./extensions/tag";
+import { Ruby } from "./extensions/ruby";
 import { SearchHighlight } from "./extensions/search-highlight";
 import {
   HIGHLIGHT_COLORS,
@@ -748,6 +749,58 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       extensions: [
         // 无选区时 Ctrl+C / Ctrl+X = 复制 / 剪切整行（见 extensions/copy-line.ts）
         CopyLineOnEmptySelection,
+        // End / Home = 跳到**整篇文档的末尾 / 开头**（ProseMirror 的 baseKeymap 默认是
+        // "当前文本块末尾 / 开头"）。priority 2000 盖过 core 的 baseKeymap；
+        // Ctrl/⌘+End、Ctrl/⌘+Home 的标准行为不受影响。
+        Extension.create({
+          name: "endToDocumentEnd",
+          priority: 2000,
+          addKeyboardShortcuts() {
+            return {
+              End: () => {
+                const { state, commands } = this.editor;
+                commands.setTextSelection(state.doc.content.size);
+                commands.scrollIntoView();
+                return true;
+              },
+              Home: () => {
+                const { commands } = this.editor;
+                commands.setTextSelection(0);
+                commands.scrollIntoView();
+                return true;
+              },
+            };
+          },
+        }),
+        // 分隔线后的空段落开头按 Backspace：**不要** joinBackward。
+        // joinBackward 会把前面的 horizontalRule 删掉、把 markdown 源码 "---" 留成文本，
+        // 再被 Typography 把开头的 "--" 变成 em-dash —— 用户看到的就是分隔线变成了 "—-"。
+        // 改成选中那条分隔线：再按一次 Backspace/Delete 才会删它（与主流编辑器一致）。
+        Extension.create({
+          name: "guardBackspaceAfterHr",
+          priority: 2000,
+          addKeyboardShortcuts() {
+            return {
+              Backspace: () => {
+                const { state, commands } = this.editor;
+                const { selection } = state;
+                if (!selection.empty) return false;
+                const { $from } = selection;
+                if ($from.parentOffset !== 0) return false;
+                /**
+                 * 注意：这里必须看**段落自身之前**的节点，而不是 $from.nodeBefore ——
+                 * 后者是"段落内部、光标前的节点"，空段落里恒为 null，守卫就永远不会生效
+                 *（上一版就是这么写的，所以没修好）。
+                 */
+                const blockStart = $from.before($from.depth);
+                if (blockStart <= 0) return false;
+                const before = state.doc.resolve(blockStart).nodeBefore;
+                if (!before || before.type.name !== "horizontalRule") return false;
+                return commands.setNodeSelection(blockStart - before.nodeSize);
+              },
+            };
+          },
+        }),
         StarterKit.configure({
           paragraph: false,
           codeBlock: false,
@@ -1549,6 +1602,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             ]
           : []),
         Tag,
+        // 平假名注音：{{Ruby|漢字|かんじ}}（见 extensions/ruby.ts）
+        Ruby,
         SearchHighlight,
         HeadingHighlight,
         CodeBlockToolbar,
@@ -1861,6 +1916,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
            */
           if (plainPasteRef.current) {
             plainPasteRef.current = false;
+            // 编辑器尚未就绪或已销毁时不处理：否则下面 editor.chain() 会抛
+            // "Cannot read properties of null (reading 'chain')" 这类未捕获异常
+            if (!editor || editor.isDestroyed) return false;
             const text = event.clipboardData?.getData("text/plain") ?? "";
             event.preventDefault();
             if (text) {
@@ -2542,11 +2600,23 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       },
       highlightSearch: (query: string) => {
         if (!isEditorAlive(editor)) return;
-        editor.commands.setSearchHighlight(query);
+        // 包一层 try/catch：TipTap 的 editor.commands.* 内部会走 CommandManager.chain()，
+        // 编辑器正在销毁 / 视图已被替换时会抛
+        // "Cannot read properties of null (reading 'chain')" —— 那是个未捕获异常（整页报错条）。
+        // 查找高亮失败不该影响编辑，所以这里吞掉并只记一条 warn。
+        try {
+          editor.commands.setSearchHighlight(query);
+        } catch (err) {
+          console.warn("[find] 设置搜索高亮失败：", err);
+        }
       },
       clearHighlight: () => {
         if (!isEditorAlive(editor)) return;
-        editor.commands.clearSearchHighlight();
+        try {
+          editor.commands.clearSearchHighlight();
+        } catch {
+          /* 同上：编辑器销毁/视图替换期间的竞态 */
+        }
       },
       executeCommand: (name: string) => {
         if (!isEditorAlive(editor)) return;
@@ -2746,7 +2816,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
   const plainPasteRef = useRef(false);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const keys = loadShortcuts().find((s) => s.id === "paste-plain")?.keys;
+      // 键位读用户配置；**必须带默认值兜底** —— 用户 localStorage 里的快捷键表可能是
+      // 新增 paste-plain 之前保存的，查不到就会让这个快捷键永远不生效。
+      const keys = loadShortcuts().find((s) => s.id === "paste-plain")?.keys ?? ["Ctrl", "Shift", "V"];
       if (!keys || !matchShortcut(e, keys)) return;
       plainPasteRef.current = true;
       window.setTimeout(() => {
@@ -3235,10 +3307,16 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       if (!el) return;
       const onMouseDownCapture = (e: MouseEvent) => {
         if (e.button !== 2) return;
+        // 只在编辑区正文里右键才弹菜单：顶栏、侧栏、正文外的留白等"无意义区域"不该弹
+        //（监听挂在整个容器上，不判就会在这些地方也弹出格式菜单）
+        const v = getEditorView(editor);
+        if (!v || !v.dom.contains(e.target as Node)) return;
         e.preventDefault();
         openContextMenuAt(e.clientX, e.clientY);
       };
       const onContextMenuCapture = (e: MouseEvent) => {
+        const v = getEditorView(editor);
+        if (!v || !v.dom.contains(e.target as Node)) return;
         e.preventDefault();
         openContextMenuAt(e.clientX, e.clientY);
       };

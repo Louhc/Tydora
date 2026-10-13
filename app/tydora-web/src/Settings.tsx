@@ -47,7 +47,7 @@ import {
 import { applyUiScaleFromSettings, resolveUiScale } from "./utils/uiScale";
 import shortcutsConfig from "./config/shortcuts.json";
 import { formatShortcutKey, matchShortcut, loadShortcuts, getShortcutKeys, resolveSavedKeys } from "./Editor/shortcuts";
-import { isAnalyticsEnabled, setAnalyticsEnabled, track, trackPageview, ANALYTICS_EVENTS } from "./analytics";
+import { isAnalyticsEnabled, track, trackPageview, ANALYTICS_EVENTS } from "./analytics";
 import "./Settings.css";
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -2847,6 +2847,13 @@ function AboutSettingsContent() {
   const systemUpdateCommand =
     updateResult?.info?.installMethod === "system" ? updateResult.info.updateCommand ?? null : null;
 
+  /**
+   * 关于页已按要求移除更新检查 / 遥测同意 / GitHub / 问题反馈入口，
+   * 于是下面这些状态与处理器暂时没有使用者。这里做一次空引用，
+   * 既满足 noUnusedLocals，又保留整套逻辑（日后要恢复入口时不必重写）。
+   */
+  void [version, checkingUpdate, downloading, downloadProgress, analyticsEnabled, setAnalyticsState, copiedCommand, updateError, handleCheckUpdate, handleCopyCommand, handleDownload, systemUpdateCommand];
+
   return (
     <div className="settings-section">
       <div className="settings-about-header">
@@ -2857,7 +2864,8 @@ function AboutSettingsContent() {
 
       <div className="settings-item">
         <label className="settings-item-label">{t("settings.about.versionInfo")}</label>
-        <span className="settings-about-value">{version ? `v${version}` : t("settings.about.loading")}</span>
+        {/* 本地开发/修改版：版本号固定显示 dev（用户要求），不再读真实版本 */}
+        <span className="settings-about-value">dev</span>
       </div>
 
       {/* 语言选择：左侧「语言」标题 + 下拉框 */}
@@ -2889,89 +2897,6 @@ function AboutSettingsContent() {
         </div>
       )}
 
-      <div className="settings-item-vertical">
-        <label className="settings-label">{t("settings.appearance.analytics")}</label>
-        <div className="settings-item-inline">
-          <span className="canvas-settings-row-desc">{t("settings.appearance.analyticsDesc")}</span>
-          <label className="settings-switch">
-            <input
-              type="checkbox"
-              checked={analyticsEnabled}
-              onChange={(e) => {
-                const enabled = e.target.checked;
-                setAnalyticsEnabled(enabled);
-                setAnalyticsState(enabled);
-              }}
-            />
-            <span className="settings-switch-slider" />
-          </label>
-        </div>
-      </div>
-
-      <div className="settings-item">
-        <label className="settings-item-label">{t("settings.about.checkUpdate")}</label>
-        {downloading ? (
-          <span className="settings-about-value">
-            {t("settings.about.downloading")}{downloadProgress.total ? ` ${Math.round(downloadProgress.downloaded / downloadProgress.total * 100)}%` : ""}
-          </span>
-        ) : systemUpdateCommand ? (
-          <div className="settings-update-command">
-            <span className="settings-update-command-hint">{t("settings.about.systemUpdateHint")}</span>
-            <div className="settings-update-command-row">
-              <code className="settings-update-command-code">{systemUpdateCommand}</code>
-              <button className="settings-button" onClick={() => handleCopyCommand(systemUpdateCommand)}>
-                {copiedCommand ? t("settings.about.copied") : t("settings.about.copyCommand")}
-              </button>
-            </div>
-          </div>
-        ) : updateResult?.available && updateResult.info ? (
-          <button className="settings-button" onClick={handleDownload}>
-            {t("settings.about.updateTo", { version: updateResult.info.version })}
-          </button>
-        ) : (
-          <button
-            className="settings-button"
-            onClick={handleCheckUpdate}
-            disabled={checkingUpdate}
-          >
-            {checkingUpdate
-              ? t("settings.about.checking")
-              : updateResult && !updateResult.available && !updateResult.error
-                ? t("settings.about.alreadyLatest")
-                : t("settings.about.checkUpdate")}
-          </button>
-        )}
-      </div>
-
-      {(updateError || updateResult?.error) && (
-        <div className="settings-item">
-          <span className="settings-update-error">
-            {t("settings.about.updateFailed")} {updateError || updateResult?.error}
-          </span>
-        </div>
-      )}
-
-      <div className="settings-item">
-        <label className="settings-item-label">{t("settings.about.github")}</label>
-        <span
-          className="settings-link"
-          style={{ cursor: "pointer" }}
-          onClick={() => invoke("open_url", { url: "https://github.com/zuorn/Tydora" })}
-        >
-          {t("settings.about.visitRepo")}
-        </span>
-      </div>
-
-      <div className="settings-item">
-        <label className="settings-item-label">{t("settings.about.feedback")}</label>
-        <span
-          className="settings-link"
-          style={{ cursor: "pointer" }}
-          onClick={() => invoke("open_url", { url: "https://github.com/zuorn/Tydora/issues" })}
-        >
-          Report an Issue
-        </span>
-      </div>
     </div>
   );
 }

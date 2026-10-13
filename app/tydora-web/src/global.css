@@ -41,7 +41,17 @@ body {
 /* Windows/Linux：WebView2/Chromium 对根合成层的 overflow 圆角裁剪不做抗锯齿，
    且 backdrop-filter 采样会溢出圆角，导致四角锯齿与半透明残影。
    改用 clip-path（栅格化遮罩、自带抗锯齿），与 macOS 方案一致。 */
-html.platform-windows #root,
+/* Windows：窗口是有装饰的（decorations: true + Overlay 标题栏），Windows 11 会给出
+   **原生圆角**（约 8px，随 DPI 缩放）。若这里再用 clip-path 画一个 12px 圆角，两层半径
+   不一致 —— 原生圆角之内、CSS 圆角之外的那条窄带没有内容遮挡，会露出桌面/合成层的浅色，
+   表现为窗口四角的一道白边（antialiasing 缝）。
+   所以 Windows 上不再自己裁剪，交给系统原生圆角；Linux 没有原生圆角，仍需 clip-path。 */
+html.platform-windows #root {
+  overflow: visible;
+  border-radius: 0;
+  clip-path: none;
+}
+
 html.platform-linux #root {
   overflow: visible;
   clip-path: inset(0 round 12px);

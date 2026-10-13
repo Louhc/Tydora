@@ -1,7 +1,8 @@
 import type { Editor } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "prosemirror-state";
 import type { Transaction } from "prosemirror-state";
-import type { Node } from "prosemirror-model";
+import { DOMParser as PMDOMParser, type Node } from "prosemirror-model";
+import { invoke } from "@tauri-apps/api/core";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 
 /**
@@ -447,38 +448,111 @@ export function executeCommand(name: string, editor: Editor | null) {
     case "copy":
       document.execCommand("copy");
       break;
-    case "paste":
-      document.execCommand("paste");
-      break;
-    case "paste-plain": {
+    case "paste": {
       /**
-       * 无格式粘贴：读系统剪切板的纯文本，按行切成**段落节点**插入。
-       * 刻意不走 ProseMirror 的 HTML/Markdown 解析链 —— 字面字符原样保留
-       *（`**粗**` 不会变粗、`- x` 不会变列表），也绕开 Markdown 扩展的
-       * transformPastedText；多行必须切成多个段落，因为文本节点里不能有换行。
-       * 用编辑器自己的 chain 生成在异步回调里，避免复用外部已消费的 chain。
+       * 右键菜单的「粘贴」：**优先插入带格式的 HTML**，剪贴板里没有 HTML 时退回纯文本。
+       *
+       * HTML 由自定义命令 read_clipboard_html（Rust + arboard）读取 —— Tauri 的 clipboard
+       * 插件只有 readText / writeHtml、没有读 HTML 的能力，而浏览器侧的
+       * navigator.clipboard.read() 会弹权限窗。插入走 ProseMirror 自己的粘贴管线
+       * （view.pasteHTML），因此与用户直接 Ctrl+V 的效果、以及各扩展的过滤规则一致。
        */
       void (async () => {
+        // 编辑器可能尚未就绪或已被销毁（例如切换文件/面板重建期间触发）：
+        // 不判空会抛 "Cannot read properties of null (reading 'chain')" 这类未捕获异常。
+        if (!editor || editor.isDestroyed) return;
+        let inserted = false;
         try {
-          const text = await navigator.clipboard.readText();
-          if (!text) return;
-          const lines = text.split(/\r?\n/);
-          if (lines.length === 1) {
-            // 单行以文本插入：用段落节点会劈开当前段落并多出一个空段落
-            //（在行末粘贴表现为自动换行）。insertText 是字面插入，不解析 Markdown。
+          const html = await invoke<string | null>("read_clipboard_html");
+          if (html) {
             const view = editor.view;
-            view.dispatch(view.state.tr.insertText(text));
-            return;
+            const withPasteHtml = view as unknown as { pasteHTML?: (h: string) => void };
+            if (typeof withPasteHtml.pasteHTML === "function") {
+              withPasteHtml.pasteHTML(html);
+            } else {
+              const parsed = new DOMParser().parseFromString(html, "text/html");
+              const slice = PMDOMParser.fromSchema(view.state.schema).parseSlice(parsed.body, {
+                preserveWhitespace: true,
+              });
+              view.dispatch(view.state.tr.replaceSelection(slice));
+            }
+            inserted = true;
           }
-          const content = lines.map((line) =>
-            line
-              ? { type: "paragraph", content: [{ type: "text", text: line }] }
-              : { type: "paragraph" },
-          );
-          editor.chain().focus().insertContent(content).run();
         } catch (err) {
-          console.error("[paste-plain] 读取剪切板失败:", err);
+          console.warn("[paste] 读取剪贴板 HTML 失败，退回纯文本:", err);
         }
+        if (inserted) return;
+        // 剪贴板里没有 HTML（例如从纯文本编辑器复制）：退回纯文本插入
+        let plain = "";
+        try {
+          const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+          plain = (await readText()) ?? "";
+        } catch {
+          try {
+            plain = await navigator.clipboard.readText();
+          } catch {
+            plain = "";
+          }
+        }
+        if (!plain) return;
+        const view = editor.view;
+        const lines = plain.split(/\r?\n/);
+        if (lines.length === 1) {
+          view.dispatch(view.state.tr.insertText(plain));
+          return;
+        }
+        editor
+          .chain()
+          .focus()
+          .insertContent(
+            lines.map((line) =>
+              line
+                ? { type: "paragraph", content: [{ type: "text", text: line }] }
+                : { type: "paragraph" },
+            ),
+          )
+          .run();
+      })();
+      break;
+    }
+    case "paste-plain": {
+      /**
+       * 粘贴为纯文本（Ctrl+Shift+V 与右键菜单的「粘贴为纯文本」）。
+       *
+       * 读剪切板优先用 Tauri 的 clipboard 插件：它走 Rust 侧，**不会触发浏览器的
+       * 剪贴板读取权限弹窗** —— navigator.clipboard.readText 与 execCommand("paste")
+       * 都会弹权限窗（这正是"右键点粘贴会请求权限"的来源），所以它们只作兜底。
+       *
+       * 插入方式：单行用 insertText（字面插入、不劈段落、不会在行末多出空行）；
+       * 多行按段落节点插入（文本节点里不能有换行）。两者都不解析 Markdown。
+       */
+      void (async () => {
+        if (!editor || editor.isDestroyed) return;
+        let text = "";
+        try {
+          const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+          text = (await readText()) ?? "";
+        } catch (err) {
+          console.warn("[paste-plain] Tauri 剪贴板读取失败，回退 navigator.clipboard:", err);
+          try {
+            text = await navigator.clipboard.readText();
+          } catch {
+            text = "";
+          }
+        }
+        if (!text) return;
+        const lines = text.split(/\r?\n/);
+        if (lines.length === 1) {
+          const view = editor.view;
+          view.dispatch(view.state.tr.insertText(text));
+          return;
+        }
+        const content = lines.map((line) =>
+          line
+            ? { type: "paragraph", content: [{ type: "text", text: line }] }
+            : { type: "paragraph" },
+        );
+        editor.chain().focus().insertContent(content).run();
       })();
       break;
     }

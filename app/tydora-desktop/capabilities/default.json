@@ -69,6 +69,7 @@
     "window-state:default",
     "updater:default",
     "process:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "clipboard-manager:allow-read-text"
   ]
 }

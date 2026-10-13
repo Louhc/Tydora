@@ -1,4 +1,18 @@
 /* ========== Sidebar 布局 ========== */
+/**
+ * 点击文件树会把焦点交给树容器（Sidebar.tsx 的 onTreeDown，为了让 Ctrl+C / F2 /
+ * Delete / Ctrl+Z 等树上快捷键直接生效），侧栏根与树容器都带 tabIndex={-1}。
+ * 但这两个容器被聚焦时，Chromium 会画出默认的聚焦描边 —— 在深色侧栏上就是一条白线
+ *（右键文件夹也会走同一条 onTreeDown，所以"右键时"尤其容易看到）。
+ * 焦点行为需要保留，只去掉这条描边。
+ */
+.sidebar:focus,
+.sidebar:focus-visible,
+.sidebar-tree:focus,
+.sidebar-tree:focus-visible {
+  outline: none;
+}
+
 .sidebar {
   position: relative;
   width: 260px;
@@ -232,6 +246,24 @@
   background: rgba(var(--accent-rgb, 137, 180, 250), 0.06);
 }
 
+/**
+ * 星标：把该项在树里"强调"出来 —— 名称用主题强调色 + 尾部一枚小星。
+ * 星本身用伪元素画，不额外加 DOM（树节点很多，少一层元素少一层开销）。
+ * 颜色全部取自主题变量，换主题自动适配。
+ */
+.tree-node.starred .tree-name {
+  color: var(--accent, #0969da);
+  font-weight: 600;
+}
+
+/* 行内 SVG 星标：紧跟文件名，垂直居中对齐文字 */
+.tree-star {
+  flex-shrink: 0;
+  margin-left: 4px;
+  color: var(--accent, #0969da);
+  vertical-align: -1px;
+}
+
 .tree-chevron {
   flex-shrink: 0;
   width: 16px;
@@ -265,6 +297,46 @@
 /* ── Tree children ── */
 .tree-children {
   position: relative;
+  overflow: hidden;
+  /* 展开：从上方滑入淡现；收起由 Sidebar.tsx 的 collapsing 状态延迟 160ms 卸载后播 collapse。
+     这里刻意不做"高度 0 → 自适应"的动画：那需要测量高度或用 grid 技巧，而树在收起时会
+     卸载子节点，用 grid 就得让整棵子树常驻 DOM —— 会影响 Shift 范围选择依赖的
+     .tree-node[data-path] 列表（那会把已收起的行也算进去）。 */
+  animation: tree-expand 0.16s ease-out both;
+}
+
+.tree-children.collapsing {
+  animation: tree-collapse 0.16s ease-in both;
+  pointer-events: none;
+}
+
+@keyframes tree-expand {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tree-collapse {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-children,
+  .tree-children.collapsing {
+    animation: none;
+  }
 }
 
 /* 缩进引导线：贴在子级行左缘（与 Sidebar.tsx 里每级 8px 的缩进保持一致） */
@@ -306,10 +378,10 @@
       rgba(255, 255, 255, calc(0.18 * var(--sidebar-chrome-opacity, 1))) 0%,
       rgba(255, 255, 255, calc(0.08 * var(--sidebar-chrome-opacity, 1))) 40%,
       rgba(255, 255, 255, calc(0.12 * var(--sidebar-chrome-opacity, 1))) 100%);
-  backdrop-filter: blur(calc(20px * var(--sidebar-chrome-opacity, 1)))
-    saturate(calc(100% + 70% * var(--sidebar-chrome-opacity, 1)));
-  -webkit-backdrop-filter: blur(calc(20px * var(--sidebar-chrome-opacity, 1)))
-    saturate(calc(100% + 70% * var(--sidebar-chrome-opacity, 1)));
+  backdrop-filter: blur(calc(6px * var(--sidebar-chrome-opacity, 1)))
+    saturate(calc(100% + 20% * var(--sidebar-chrome-opacity, 1)));
+  -webkit-backdrop-filter: blur(calc(6px * var(--sidebar-chrome-opacity, 1)))
+    saturate(calc(100% + 20% * var(--sidebar-chrome-opacity, 1)));
   border: 1px solid rgba(255, 255, 255, calc(0.2 * var(--sidebar-chrome-opacity, 1)));
   border-radius: 12px;
   color: var(--text-primary);
@@ -357,10 +429,10 @@
       rgba(255, 255, 255, calc(0.18 * var(--sidebar-chrome-opacity, 1))) 0%,
       rgba(255, 255, 255, calc(0.08 * var(--sidebar-chrome-opacity, 1))) 40%,
       rgba(255, 255, 255, calc(0.12 * var(--sidebar-chrome-opacity, 1))) 100%);
-  backdrop-filter: blur(calc(20px * var(--sidebar-chrome-opacity, 1)))
-    saturate(calc(100% + 70% * var(--sidebar-chrome-opacity, 1)));
-  -webkit-backdrop-filter: blur(calc(20px * var(--sidebar-chrome-opacity, 1)))
-    saturate(calc(100% + 70% * var(--sidebar-chrome-opacity, 1)));
+  backdrop-filter: blur(calc(6px * var(--sidebar-chrome-opacity, 1)))
+    saturate(calc(100% + 20% * var(--sidebar-chrome-opacity, 1)));
+  -webkit-backdrop-filter: blur(calc(6px * var(--sidebar-chrome-opacity, 1)))
+    saturate(calc(100% + 20% * var(--sidebar-chrome-opacity, 1)));
   border: 1px solid rgba(255, 255, 255, calc(0.2 * var(--sidebar-chrome-opacity, 1)));
   border-radius: 12px;
   cursor: pointer;
@@ -727,35 +799,34 @@ html:not(.platform-macos) .sidebar-header {
       rgba(255, 255, 255, calc(0.22 * var(--sidebar-chrome-opacity, 1))) 0%,
       rgba(255, 255, 255, calc(0.1 * var(--sidebar-chrome-opacity, 1))) 40%,
       rgba(255, 255, 255, calc(0.15 * var(--sidebar-chrome-opacity, 1))) 100%);
-  backdrop-filter: blur(calc(24px * var(--sidebar-chrome-opacity, 1)))
-    saturate(calc(100% + 80% * var(--sidebar-chrome-opacity, 1)));
-  -webkit-backdrop-filter: blur(calc(24px * var(--sidebar-chrome-opacity, 1)))
-    saturate(calc(100% + 80% * var(--sidebar-chrome-opacity, 1)));
+  backdrop-filter: blur(calc(8px * var(--sidebar-chrome-opacity, 1)))
+    saturate(calc(100% + 24% * var(--sidebar-chrome-opacity, 1)));
+  -webkit-backdrop-filter: blur(calc(8px * var(--sidebar-chrome-opacity, 1)))
+    saturate(calc(100% + 24% * var(--sidebar-chrome-opacity, 1)));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, calc(0.3 * var(--sidebar-chrome-opacity, 1))),
+    inset 0 1px 0 rgba(255, 255, 255, calc(0.12 * var(--sidebar-chrome-opacity, 1))),
     inset 0 -1px 0 rgba(0, 0, 0, calc(0.06 * var(--sidebar-chrome-opacity, 1))),
     0 0 0 1px rgba(0, 0, 0, calc(0.06 * var(--sidebar-chrome-opacity, 1))),
     0 2px 6px rgba(0, 0, 0, calc(0.06 * var(--sidebar-chrome-opacity, 1))),
     0 4px 16px rgba(0, 0, 0, calc(0.04 * var(--sidebar-chrome-opacity, 1)));
-  border: 1px solid rgba(255, 255, 255, calc(0.25 * var(--sidebar-chrome-opacity, 1)));
+  /* 容器边框原来用白色 @0.25（+ 顶部 inset 高光 @0.3），在深色底上就是一圈很亮的白边。
+     这里压到 0.10 / 0.12，只留一点轮廓感。想更淡继续改这两个数字；
+     完全不要就写 border-color: transparent。 */
+  border: 1px solid rgba(255, 255, 255, calc(0.10 * var(--sidebar-chrome-opacity, 1)));
   overflow: hidden;
 }
 
-.sidebar-tabs-wrapper::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 8%;
-  right: 8%;
-  height: 1px;
-  background: linear-gradient(90deg,
-      transparent,
-      rgba(255, 255, 255, calc(0.4 * var(--sidebar-chrome-opacity, 1))) 30%,
-      rgba(255, 255, 255, calc(0.45 * var(--sidebar-chrome-opacity, 1))) 50%,
-      rgba(255, 255, 255, calc(0.4 * var(--sidebar-chrome-opacity, 1))) 70%,
-      transparent);
-  border-radius: 1px;
-}
+/* 容器顶部那条 1px 高光线（原来由 ::before 绘制，中间 rgba(255,255,255,.45)、两端渐隐）
+   已按需求删除 —— 它在深色底上太抢眼。想恢复就把这段还原为：
+   .sidebar-tabs-wrapper::before {
+     content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 1px;
+     background: linear-gradient(90deg, transparent,
+       rgba(255,255,255,calc(0.4 * var(--sidebar-chrome-opacity,1))) 30%,
+       rgba(255,255,255,calc(0.45 * var(--sidebar-chrome-opacity,1))) 50%,
+       rgba(255,255,255,calc(0.4 * var(--sidebar-chrome-opacity,1))) 70%, transparent);
+     border-radius: 1px;
+   }
+   若只想去掉容器边框：把 .sidebar-tabs-wrapper 的 border-color 改为 transparent。 */
 
 .sidebar-tab {
   position: relative;
@@ -810,14 +881,25 @@ html:not(.platform-macos) .sidebar-header {
     0,
     calc(var(--sidebar-chrome-opacity, 1) + var(--sidebar-tab-active-opacity-delta, 0.18))
   );
-  background: linear-gradient(135deg,
-      rgba(var(--accent-rgb, 137, 180, 250), calc(0.2 * var(--sidebar-tab-active-opacity))) 0%,
-      rgba(255, 255, 255, calc(0.15 * var(--sidebar-tab-active-opacity))) 100%);
+  /**
+   * 填充用 color-mix：把主题强调色按比例**混进面板底色** —— 得到的是**不透明**的颜色
+   *（不会透出后面的内容），同时仍然是主题色，而不是被黑色底吞掉。
+   *
+   * 之前两版各错一半：只用半透明强调色 → 发虚又泛黄；用 var(--bg-primary) 打底 →
+   * 更实了但颜色变黑（深色主题下 bg-primary 接近纯黑）。color-mix 同时满足两点。
+   * 百分比仍乘 --sidebar-tab-active-opacity：把"侧栏 chrome 不透明度"调低时会自动变淡。
+   */
+  background: color-mix(in srgb,
+      var(--accent, #0969da) calc(20% * var(--sidebar-tab-active-opacity, 1)),
+      var(--bg-primary, #1e1e1e));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, calc(0.2 * var(--sidebar-tab-active-opacity))),
     inset 0 -1px 0 rgba(0, 0, 0, calc(0.05 * var(--sidebar-tab-active-opacity))),
     0 1px 4px rgba(0, 0, 0, calc(0.06 * var(--sidebar-tab-active-opacity)));
-  border: 0.5px solid rgba(var(--accent-rgb, 137, 180, 250), calc(0.25 * var(--sidebar-tab-active-opacity)));
+  /* 选中框用主题强调色，但压得很淡：暖色主题（琥珀/橙）在深色底上，0.25 就显得扎眼。
+     0.10 只留一圈若隐若现的暗示。想更淡继续调小；完全不要就写 border: none。
+     该值仍乘 --sidebar-tab-active-opacity，跟随"侧栏 chrome 不透明度"设置。 */
+  border: 0.5px solid rgba(var(--accent-rgb, 137, 180, 250), calc(0.10 * var(--sidebar-tab-active-opacity)));
 }
 
 /* 拖拽中的源 tab：淡出，表示"拿起来了" */
