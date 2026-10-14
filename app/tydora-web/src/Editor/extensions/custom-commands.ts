@@ -300,6 +300,29 @@ export function executeCommand(name: string, editor: Editor | null) {
       break;
     }
 
+    case "ruby": {
+      /**
+       * 注音：把选中的文字包成源码字面量 `{{Ruby|本体|读音}}`，光标停在读音处
+       *（`|` 与 `}}` 之间），输入读音后光标一移开就自动渲染成注音节点
+       *（见 extensions/ruby.ts 的自动转换）。
+       *
+       * 两点注意：
+       * - 读音留空，所以字面量**不会**被提前转换（转换要求两段都非空），
+       *   于是可以直接在里面打字；
+       * - 用 text 节点插入而不是字符串（字符串会走 HTML 解析，连续空格会被折叠）。
+       */
+      const { from, to } = editor.state.selection;
+      const selected = editor.state.doc.textBetween(from, to, " ").trim();
+      const literal = `{{Ruby|${selected}|}}`;
+      const caret = from + literal.length - 2; // 落在 `|` 之后、`}}` 之前
+      editor
+        .chain()
+        .insertContentAt({ from, to }, { type: "text", text: literal })
+        .setTextSelection(caret)
+        .run();
+      break;
+    }
+
     // 块级格式
     case "quote":
       chain.toggleBlockquote().run();

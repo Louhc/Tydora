@@ -71,6 +71,20 @@ const ICONS = {
       <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
     </svg>
   ),
+  // 粘贴为纯文本：与上面的"空白剪贴板"（普通粘贴）区分 —— 里面多一个「T」（纯文本）
+  pastePlain: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+      <path d="M9 12h6M12 12v6" />
+    </svg>
+  ),
+  // 注音（Ruby）：汉字上方一条小横线（表示读音）+ 「あ」本体 —— 18px 下也一眼可辨
+  ruby: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 6.5h10" />
+      <text x="12" y="20" textAnchor="middle" fontSize="13" fill="currentColor" stroke="none">あ</text>
+    </svg>
+  ),
   trash: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
@@ -210,7 +224,7 @@ function createIconRows(t: (key: string) => string): IconItem[][] {
       { name: "copy", label: t("editor.contextMenu.copy"), shortcutId: null, icon: ICONS.copy },
       { name: "paste", label: t("editor.contextMenu.paste"), shortcutId: null, icon: ICONS.paste },
       // 无格式粘贴：只插入纯文本、不解析 Markdown、不带网页样式
-      { name: "paste-plain", label: t("editor.contextMenu.pastePlain"), shortcutId: "paste-plain", icon: ICONS.paste },
+      { name: "paste-plain", label: t("editor.contextMenu.pastePlain"), shortcutId: "paste-plain", icon: ICONS.pastePlain },
       { name: "delete", label: t("editor.contextMenu.delete"), shortcutId: null, icon: ICONS.trash },
     ],
     // 第二行：行内格式
@@ -219,6 +233,8 @@ function createIconRows(t: (key: string) => string): IconItem[][] {
       { name: "italic", label: t("editor.contextMenu.italic"), shortcutId: "italic", icon: ICONS.italic },
       { name: "strike", label: t("editor.contextMenu.strikethrough"), shortcutId: "strike", icon: ICONS.strikethrough },
       { name: "inline-code", label: t("editor.contextMenu.inlineCode"), shortcutId: "inline-code", icon: ICONS.code },
+      // 注音：把选中的汉字包成 {{Ruby|本体|读音}}，补完读音、光标移开即渲染成注音
+      { name: "ruby", label: t("editor.contextMenu.ruby"), shortcutId: "ruby", icon: ICONS.ruby },
       { name: "link", label: t("editor.contextMenu.link"), shortcutId: "link", icon: ICONS.link },
     ],
     // 第三行：块级格式

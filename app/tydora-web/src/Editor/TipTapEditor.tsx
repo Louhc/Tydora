@@ -1893,7 +1893,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
               const commandMap: Record<string, string> = {
                 "bold": "bold", "italic": "italic", "strike": "strike",
                 "inline-code": "inline-code", "code-block": "code",
-                "link": "link", "highlight": "highlight", "quote": "quote",
+                "link": "link", "highlight": "highlight", "quote": "quote", "ruby": "ruby",
                 "hr": "line", "unordered-list": "list",
                 "ordered-list": "ordered-list", "check-list": "check",
                 "indent": "indent", "outdent": "outdent", "task-toggle": "task-toggle",

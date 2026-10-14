@@ -121,6 +121,8 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
 let pendingLiteral = false;
 /** 一次性抑制：由我们自己的展开/收起引起的那次更新不参与邻近判断 */
 let suppressAutoExpandOnce = false;
+/** 自跟踪的组字状态（见 handleDOMEvents 的说明：不能只信 view.composing） */
+let composingHere = false;
 
 export const Ruby = Node.create({
   name: "ruby",
@@ -206,6 +208,31 @@ export const Ruby = Node.create({
         props: {
           handleDOMEvents: {
             /**
+             * 自跟踪组字状态（不能只信 view.composing）。
+             *
+             * 背景：PM 的 view.composing 靠 compositionend 事件复位，而某些输入法
+             *（搜狗在"标点内联提交"等情况下）**不发这个事件** → 标志卡死为 true →
+             * 守卫永久跳过 → 输完冒号后怎么移动光标都不收起（实测如此）。
+             * 所以这里自己记一份，并且：
+             *   - compositionstart/end 更新它；
+             *   - 任何 keydown 若浏览器标注 isComposing === false，就认定已不在组字
+             *    （方向键、Esc 等若真在组字中会被输入法吃掉，能到编辑器就说明已提交）。
+             * 最终判定要求**两个标志同时为真**才跳过 —— 任一信号说"没在组字"就放行。
+             */
+            compositionstart: () => {
+              composingHere = true;
+              return false;
+            },
+            compositionend: () => {
+              composingHere = false;
+              return false;
+            },
+            keydown: (_view, event) => {
+              const ke = event as KeyboardEvent;
+              if (ke.isComposing === false) composingHere = false;
+              return false;
+            },
+            /**
              * 左键单击注音 → 展开。光标按点击落在左半/右半决定（左半 → 左端，右半 → 右端）。
              */
             mousedown: (view, event) => {
@@ -239,13 +266,15 @@ export const Ruby = Node.create({
         view: () => ({
           update: (view: any, prevState: any) => {
             /**
-             * ⚠️ 输入法组字期间**绝不动文档**（日志实测：全角标点在内联组字态会停留数秒，
-             * 看起来像"直接打出来"，但系统层面仍未提交）。
-             * 这期间若 dispatch（展开/收起），输入法的组合会被打断并重新提交 →
-             * 表现为"字符重复出现"（打一个「：」出现两个）。组字结束后
-             * ProseMirror 会再触发一次 update，那时本逻辑照常执行（收起就在那一帧完成）。
+             * ⚠️ 两个标志**同时**为真才认为在组字，才跳过：
+             * 只信 view.composing 会因输入法不发 compositionend 而永久卡住（实测：
+             * 输完冒号后用方向键四处移动都不收起）；只信自跟踪标志又可能在
+             * 我们注册监听之前就已开始组字。两者取"与"，任一信号说没在组字就放行。
+             *
+             * 组字期间不动文档的原因：此时 dispatch（展开/收起）会打断输入法的组合并
+             * 重新提交 → 表现为"字符重复出现"（打一个「：」出现两个）。
              */
-            if (view.composing) return;
+            if (view.composing && composingHere) return;
 
             const docChanged = !view.state.doc.eq(prevState.doc);
             const selChanged = !view.state.selection.eq(prevState.selection);

@@ -9,6 +9,7 @@
     { "id": "link", "label": "超链接", "keys": ["Ctrl", "K"], "group": "格式" },
     { "id": "highlight", "label": "高亮", "keys": ["Ctrl", "="], "group": "格式" },
     { "id": "quote", "label": "引用", "keys": ["Ctrl", ";"], "group": "格式" },
+    { "id": "ruby", "label": "注音（Ruby）", "keys": ["Ctrl", "G"], "group": "格式" },
     { "id": "hr", "label": "水平分割线", "keys": ["Ctrl", "Shift", "H"], "group": "格式" },
     { "id": "unordered-list", "label": "无序列表", "keys": ["Ctrl", "L"], "group": "列表" },
     { "id": "ordered-list", "label": "有序列表", "keys": [], "group": "列表" },
