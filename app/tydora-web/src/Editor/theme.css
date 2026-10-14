@@ -1872,7 +1872,14 @@ html.platform-macos .tiptap-editor .frontmatter-node {
 /* 搜索高亮 */
 .tiptap-editor .search-highlight {
   background: var(--bg-search-highlight, #fff3b0);
+}
+
+/* 当前命中：比普通命中更醒目（查找框保持焦点时原生选区会被清空，靠它给出反馈） */
+.tiptap-editor .search-highlight-current {
+  background: var(--accent, #0969da);
+  color: var(--bg-primary, #fff);
   border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--accent, #0969da);
 }
 
 /* 标题高亮（点击大纲后）- 内联方式，只高亮文字 */

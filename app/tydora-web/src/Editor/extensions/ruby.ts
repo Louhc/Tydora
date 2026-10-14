@@ -57,6 +57,7 @@ function expandRubyAt(view: any, pos: number): boolean {
   const tr = view.state.tr.replaceWith(pos, pos + node.nodeSize, view.state.schema.text(literal));
   tr.setSelection(TextSelection.create(tr.doc, wasBefore ? pos : pos + literal.length));
   pendingLiteral = true;
+  sawLiteralExpand = true; // 记住"本会话展开过"，此后收起不再依赖 pendingLiteral
   suppressAutoExpandOnce = true; // 展开动作自身引起的那次更新不参与判断
   view.dispatch(tr);
   return true;
@@ -99,7 +100,14 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
     },
   );
   if (hits.length === 0) {
-    pendingLiteral = skipped > 0;
+    /**
+     * ⚠️ 只有**全文档扫描**（未给 range）才能改写"是否还有字面量"这个全局判断。
+     * 块内扫描看不到别的块里的字面量，若也改写，就会把标志误清 —— 紧接着光标移到
+     * 另一段时全文档扫描不再执行，那段字面量就永远收不起来
+     *（实测："按方向键离开 Ruby 区不收起，除非撞到另一个 Ruby"）。
+     */
+    if (!range) pendingLiteral = skipped > 0;
+    else if (skipped > 0) pendingLiteral = true;
     return pendingLiteral;
   }
   const tr = state.tr;
@@ -113,7 +121,12 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
     suppressAutoExpandOnce = true; // 收起是我们自己造成的，那一次不参与判断
     view.dispatch(tr);
   }
-  pendingLiteral = skipped > 0;
+  /**
+   * 结束后的标志：**只有全文档扫描**才允许把它清零。
+   * 块内扫描若发现"本块还有被跳过的字面量"，则保持它为真（提示别处也可能有）。
+   */
+  if (!range) pendingLiteral = skipped > 0;
+  else if (skipped > 0) pendingLiteral = true;
   return pendingLiteral;
 }
 
@@ -123,6 +136,15 @@ let pendingLiteral = false;
 let suppressAutoExpandOnce = false;
 /** 自跟踪的组字状态（见 handleDOMEvents 的说明：不能只信 view.composing） */
 let composingHere = false;
+/**
+ * 本次会话是否展开过注音（一经展开就置位，不再清除）。
+ *
+ * 为什么需要它：`pendingLiteral` 会被块内扫描/空扫描等路径清掉，日志实测它在
+ * "输入法提交后按上键"那一刻是 false → 全文档扫描不执行 → 字面量收不起来。
+ * 与其让"收起"依赖一个随时可能被清掉的标志，不如记住"本次会话出现过字面量"，
+ * 之后每次光标移动都全文档扫一遍（扫描是正则遍历文本节点，普通笔记上是亚毫秒级）。
+ */
+let sawLiteralExpand = false;
 
 export const Ruby = Node.create({
   name: "ruby",
@@ -196,6 +218,23 @@ export const Ruby = Node.create({
   },
 
   /**
+   * 让注音的**本体**参与纯文本投影。
+   *
+   * 注音是 atom 节点、文字存在属性里，因此对"基于文本"的功能（查找、匹配计数、
+   * textBetween 等）完全不可见 —— 这正是"Ctrl+F 搜不到 Ruby"的原因。
+   * ProseMirror 的 leafText 正是声明"叶子节点贡献给 textBetween/textContent 的文本"。
+   * TipTap 的 NodeConfig 不直接暴露该字段，所以用 extendNodeSchema 注入原始 NodeSpec。
+   *
+   * 只投影**本体**（base），不含读音（rt）：读音若也进入投影，会与 markdown 的
+   * 位置映射（markdown-position-map）及序列化产生偏差，得不偿失。
+   */
+  extendNodeSchema() {
+    return {
+      leafText: (node: any) => node.attrs.base ?? "",
+    };
+  },
+
+  /**
    * 就地编辑：**点击**注音或光标**移动到它左右两侧**即展开成源码字面量，直接改本体与读音；
    * 光标**越出字面量**（含停在其右端之后一格）就渲染回注音节点。
    *
@@ -232,11 +271,19 @@ export const Ruby = Node.create({
               if (ke.isComposing === false) composingHere = false;
               return false;
             },
+            /** 失焦同样说明输入告一段落 */
+            blur: () => {
+              composingHere = false;
+              return false;
+            },
             /**
              * 左键单击注音 → 展开。光标按点击落在左半/右半决定（左半 → 左端，右半 → 右端）。
              */
             mousedown: (view, event) => {
               const me = event as MouseEvent;
+              // 鼠标操作必然不在组字中：有的输入法提交后不发 compositionend，
+              // 靠这里（以及 keydown/blur）兜底解除组字标志，否则守卫会一直卡住。
+              composingHere = false;
               if (me.button !== 0) return false;
               const rubyEl = (me.target as HTMLElement | null)?.closest?.(
                 "span.md-ruby",
@@ -266,15 +313,18 @@ export const Ruby = Node.create({
         view: () => ({
           update: (view: any, prevState: any) => {
             /**
-             * ⚠️ 两个标志**同时**为真才认为在组字，才跳过：
-             * 只信 view.composing 会因输入法不发 compositionend 而永久卡住（实测：
-             * 输完冒号后用方向键四处移动都不收起）；只信自跟踪标志又可能在
-             * 我们注册监听之前就已开始组字。两者取"与"，任一信号说没在组字就放行。
+             * ⚠️ 只用**自己跟踪**的组字标志，不与 view.composing 取"与"。
              *
-             * 组字期间不动文档的原因：此时 dispatch（展开/收起）会打断输入法的组合并
-             * 重新提交 → 表现为"字符重复出现"（打一个「：」出现两个）。
+             * 取"与"看似更安全，实际会造成卡死：有的输入法（Sogou / Google 日语输入法都遇到过）
+             * 提交后**不发 compositionend**，于是两个标志里总有一个残留为真，守卫永不解除 →
+             * 输完标点后怎么移动光标都不收起。
+             * 自己的标志有多个可靠的解除信号（compositionend / 非组字 keydown / 鼠标 / 失焦），
+             * 所以以它为准。
+             *
+             * 组字期间不动文档的原因：此时 dispatch（展开/收起）会打断输入法的组合并重新提交 →
+             * 表现为"字符重复出现"（打一个「：」出现两个）。
              */
-            if (view.composing && composingHere) return;
+            if (composingHere) return;
 
             const docChanged = !view.state.doc.eq(prevState.doc);
             const selChanged = !view.state.selection.eq(prevState.selection);
@@ -289,14 +339,18 @@ export const Ruby = Node.create({
 
             if (!docChanged && !selChanged && !pendingLiteral) return;
 
-            // ② 文档变化：只扫光标所在块
+            // ② 文档变化：只扫光标所在块（便宜）
             if (docChanged) {
               const $from = view.state.selection.$from;
               convertLiterals(view, { from: $from.start(), to: $from.end() });
             }
 
-            // ③ 仍有待收起的字面量 → 全文档补扫一次（光标越出即收起）
-            if (pendingLiteral) convertLiterals(view);
+            /**
+             * ③ 全文档扫描（收起）。
+             * 条件是"还有字面量"**或**"本次会话展开过注音" —— 后者保证标志被误清时
+             * 收起依然有效（日志实测：输入法提交那一刻 pending 为 false，导致不收起）。
+             */
+            if (pendingLiteral || sawLiteralExpand) convertLiterals(view);
           },
         }),
       }),

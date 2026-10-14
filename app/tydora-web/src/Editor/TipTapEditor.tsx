@@ -2716,6 +2716,21 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           /* 同上：编辑器销毁/视图替换期间的竞态 */
         }
       },
+      /**
+       * 标记"当前命中"。
+       *
+       * 用途：查找框保持焦点时，焦点移入 <input> 会清空文档里的原生选区 ——
+       * 于是"按回车跳到下一个"看不到选中效果（点按钮却正常）。
+       * 改为用一条装饰把当前命中单独画出来，焦点始终留在查找框。
+       */
+      setCurrentMatch: (from: number, to: number) => {
+        if (!isEditorAlive(editor)) return;
+        try {
+          editor.commands.setSearchHighlightCurrent(from, to);
+        } catch {
+          /* 同上：竞态期间忽略 */
+        }
+      },
       executeCommand: (name: string) => {
         if (!isEditorAlive(editor)) return;
         executeCommand(name, editor);
@@ -2804,6 +2819,22 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             startIndex = idx + 1;
           }
         });
+        /**
+         * 注音节点单独扫一遍。
+         *
+         * 上面那套用 textBetween(..., "\uFFFC") 把**所有行内原子节点**替换成占位符
+         *（为了保持块内索引与 PM 位置一一对应），而这个第 4 参数会**覆盖**节点自身的
+         * leafText —— 所以注音的本体在这套投影里根本不存在（"有两个一行却只算了一个"）。
+         * 这里按 attrs.base 命中补一条，范围取整个节点（导航时会选中它）。
+         * 不会重复计数：注音在上面的投影里只是占位符，不可能被匹配到。
+         */
+        editor.state.doc.descendants((node: any, pos: number) => {
+          if (node.type.name !== "ruby") return;
+          const base = String(node.attrs.base ?? "");
+          if (!base || !base.toLowerCase().includes(lowerQuery)) return;
+          results.push({ from: pos, to: pos + node.nodeSize });
+        });
+        results.sort((a, b) => a.from - b.from);
         return results;
       },
       selectMatch: (from: number, to: number) => {

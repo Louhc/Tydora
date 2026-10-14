@@ -157,6 +157,8 @@ export default function FindReplaceDialog({
      */
     const focused = document.activeElement as HTMLElement | null;
     editorHandle.selectAndScroll(list[next].from, list[next].to);
+    // 用装饰标出"当前命中"：焦点保持在查找框时原生选区会被清空，靠它给出可见反馈
+    (editorHandle as any).setCurrentMatch?.(list[next].from, list[next].to);
     if (focused && (focused === findInputRef.current || focused === replaceInputRef.current)) {
       focused.focus();
       // 再补一次：selectAndScroll 若把焦点交给编辑器（有些实现是在下一帧做的），
@@ -177,6 +179,8 @@ export default function FindReplaceDialog({
     setCurrentIndex(prev);
     const focused = document.activeElement as HTMLElement | null;
     editorHandle.selectAndScroll(list[prev].from, list[prev].to);
+    // 同上：当前命中用装饰标记（焦点留在查找框）
+    (editorHandle as any).setCurrentMatch?.(list[prev].from, list[prev].to);
     if (focused && (focused === findInputRef.current || focused === replaceInputRef.current)) {
       focused.focus();
       // 再补一次：selectAndScroll 若把焦点交给编辑器（有些实现是在下一帧做的），
