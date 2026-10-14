@@ -166,7 +166,13 @@ export function deleteCurrentLine(editor: Editor): void {
 }
 
 export function executeCommand(name: string, editor: Editor | null) {
-  if (!editor) return;
+  /**
+   * 只判 `!editor` 不够：编辑器**已销毁**时实例对象仍在，但内部 view/state 已释放，
+   * 继续 chain() 会抛 "Cannot read properties of null (reading 'chain')" 这类未捕获异常
+   *（Ctrl+B 报错就是这么来的，与之前 Ctrl+F 那次同源）。
+   * 切换模式/文件时旧实例会先销毁，而快捷键分发可能晚一拍，所以必须在这里拦住。
+   */
+  if (!editor || editor.isDestroyed) return;
 
   const chain = editor.chain().focus();
 

@@ -32,8 +32,9 @@ export function closeRubyEditor(): void {
 export function openRubyEditor({ editor, getPos, anchor }: OpenOptions): void {
   closeRubyEditor();
 
-  const base = (editor.state.doc.nodeAt(getPos() ?? -1)?.attrs.base ?? "") as string;
-  const rt = (editor.state.doc.nodeAt(getPos() ?? -1)?.attrs.rt ?? "") as string;
+  const node = editor.state.doc.nodeAt(getPos() ?? -1);
+  const base = (node?.attrs.base ?? "") as string;
+  const rt = (node?.attrs.rt ?? "") as string;
 
   const panel = document.createElement("div");
   panel.className = "ruby-edit-popover";
@@ -63,15 +64,17 @@ export function openRubyEditor({ editor, getPos, anchor }: OpenOptions): void {
 
   const commit = () => {
     const pos = getPos();
-    if (typeof pos === "number") {
-      const nextBase = baseInput.value.trim();
-      const nextRt = rtInput.value.trim();
-      // 两段都非空才提交：否则节点会变成零宽的空注音（会被 ProseMirror 判为无效内容）
-      if (nextBase && nextRt) {
-        editor.view.dispatch(
-          editor.state.tr.setNodeMarkup(pos, undefined, { base: nextBase, rt: nextRt }),
-        );
-      }
+    if (typeof pos !== "number") {
+      closeRubyEditor();
+      return;
+    }
+    const node = editor.state.doc.nodeAt(pos);
+    const nextBase = baseInput.value.trim();
+    const nextRt = rtInput.value.trim();
+    // 两段都非空才提交：否则会变成零宽空注音（ProseMirror 会判为无效内容）
+    if (node && nextBase && nextRt) {
+      // 本体与读音都在属性里（节点无内容，见 ruby.ts 的 atom 说明）
+      editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, { base: nextBase, rt: nextRt }));
     }
     closeRubyEditor();
   };

@@ -796,7 +796,61 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
                 if (blockStart <= 0) return false;
                 const before = state.doc.resolve(blockStart).nodeBefore;
                 if (!before || before.type.name !== "horizontalRule") return false;
+                /**
+                 * 分两种情形：
+                 *  1) **空段落**（分隔线下面那一行空行）→ 直接删掉这一行，分隔线保留。
+                 *     这是"删掉多余空行"的常见诉求；一律改成"选中分隔线"会让空行永远删不掉。
+                 *  2) **段落里有文字** → 不能 joinBackward（那会把 horizontalRule 删掉、
+                 *     把 markdown 源码 "---" 留成文本，再被 Typography 变成 "—-"），
+                 *     改为选中分隔线，再按一次才删它。
+                 */
+                if ($from.parent.content.size === 0) {
+                  if (state.doc.childCount <= 1) return false; // 只剩这一块时交给默认行为
+                  return commands.deleteRange({
+                    from: blockStart,
+                    to: blockStart + $from.parent.nodeSize,
+                  });
+                }
                 return commands.setNodeSelection(blockStart - before.nodeSize);
+              },
+            };
+          },
+        }),
+        // 引用块（>）内的**空行**上按 Shift+Enter：把这一空块提到引用之外，新建一行。
+        // 其它情况不接管 —— Shift+Enter 仍是原来的软换行（hardBreak）。
+        // 说明：这是"把空块 lift 出父节点"的标准做法，等价于在引用里连按两次回车的退出行为。
+        Extension.create({
+          name: "exitBlockquoteOnShiftEnter",
+          priority: 2000,
+          addKeyboardShortcuts() {
+            return {
+              "Shift-Enter": () => {
+                const { state, commands } = this.editor;
+                const { $from, empty } = state.selection;
+                if (!empty) return false;
+
+                // 找到祖先里的 blockquote（可能嵌在列表里，所以逐层向上找）
+                let quoteDepth = -1;
+                for (let d = $from.depth; d > 0; d--) {
+                  if ($from.node(d).type.name === "blockquote") {
+                    quoteDepth = d;
+                    break;
+                  }
+                }
+                if (quoteDepth < 0) return false;
+
+                // 只对**正文段落**生效：列表项 / 标题等保持原样（Shift+Enter 仍是软换行）
+                if ($from.parent.type.name !== "paragraph") return false;
+
+                // ① 空段落：把它整个提到引用之外（标准退出行为，不留下残余空行）
+                if ($from.parent.content.size === 0) {
+                  return commands.lift("blockquote");
+                }
+
+                // ② 有文字的正文段落：在光标处**拆分**，并把后半段提到引用之外
+                //    （splitBlock 先在本块内拆出后半段，lift 再把它移到 blockquote 之后）。
+                //    光标在行尾时后半段是空段落，效果就是"在引用外另起一行"。
+                return this.editor.chain().splitBlock().lift("blockquote").run();
               },
             };
           },
@@ -1855,11 +1909,20 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
               for (const shortcut of shortcuts) {
                 const cmdName = commandMap[shortcut.id];
                 if (cmdName && matchShortcut(event, shortcut.keys)) {
+                  /**
+                   * ⚠️ 必须用 vimEditorRef.current，不能用闭包里的 `editor`：
+                   * 本处理器是在 useEditor 的 editorProps 里创建的，只创建一次，
+                   * 闭包捕获的是**首次渲染**时的 editor（那时为 null）→ 之前 Ctrl+B 抛
+                   * "Cannot read properties of null (reading 'chain')"，加了守卫后又变成
+                   * "按了没反应"（Ctrl+K 等全部静默失效）。ref 在渲染期始终指向最新实例。
+                   */
+                  const ed = vimEditorRef.current;
+                  if (!ed) return false;
                   // table-row-delete 与 app 级 split-tb 共用 Ctrl+-：
                   // 仅当光标在表格内时执行删行并阻止冒泡（避免同时触发分屏）；
                   // 不在表格内则跳过本条，让事件冒泡到 window 触发上下分屏。
                   if (shortcut.id === "table-row-delete") {
-                    const { $from } = editor.state.selection;
+                    const { $from } = ed.state.selection;
                     let inTable = false;
                     for (let d = $from.depth; d > 0; d--) {
                       const n = $from.node(d);
@@ -1872,16 +1935,33 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
                   }
                   event.preventDefault();
                   event.stopPropagation();
-                  executeCommand(cmdName, editor);
+                  executeCommand(cmdName, ed);
                   return true;
                 }
               }
             }
 
-            // Tab / Shift-Tab：列表缩进/反缩进
+            // Tab / Shift-Tab：代码块内插入四个空格；列表里缩进/反缩进
             if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
-              const { state } = editor;
-              const { $from } = state.selection;
+              // 同快捷键分发：闭包里的 editor 是首次渲染捕获的（可能为 null），取最新实例
+              const tabEd = vimEditorRef.current;
+              if (!tabEd) return false;
+              const { state, view } = tabEd;
+              const { $from, from, to } = state.selection;
+
+              /**
+               * 代码块：插入四个空格。
+               * ⚠️ 必须放在这里，不能只写成 addKeyboardShortcuts 的 Tab —— 本处理器是
+               * handleDOMEvents.keydown，ProseMirror 会**先**跑它再跑 keymap，
+               * 所以写在扩展里的 Tab 绑定永远轮不到（实测"按了没反应"）。
+               * 用 tr.insertText 直接插文本节点：字符串走 insertContent 会被当 HTML 解析，
+               * 纯空白会被折叠掉。
+               */
+              if ($from.parent.type.name === "codeBlock") {
+                event.preventDefault();
+                view.dispatch(state.tr.insertText("    ", from, to).scrollIntoView());
+                return true;
+              }
 
               // 判断光标是否在列表项内（listItem 或 taskItem）
               let listType: string | null = null;
@@ -1896,9 +1976,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
               if (listType) {
                 event.preventDefault();
                 if (event.shiftKey) {
-                  editor.chain().focus().liftListItem(listType).run();
+                  tabEd.chain().focus().liftListItem(listType).run();
                 } else {
-                  editor.chain().focus().sinkListItem(listType).run();
+                  tabEd.chain().focus().sinkListItem(listType).run();
                 }
                 return true;
               }
@@ -2318,7 +2398,25 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         e.preventDefault();
         e.stopPropagation();
 
-        // 如果正在编辑另一个链接，先恢复它，再处理当前点击
+        /**
+         * 打开方式分工（避免"单击就把链接变成转义字面量"）：
+         *   - 单击：**什么都不做**，只阻止默认行为（Tauri webview 会尝试在应用内导航），
+         *     光标照常落在链接文字上 —— Link 是 mark，文字本身可直接编辑；
+         *   - Ctrl / Cmd + 单击：用系统浏览器打开；
+         *   - Alt + 单击：转成源码字面量编辑（原行为）。
+         *
+         * 为什么单击不再转换：转出来的 `[文本](url)` 是**纯文本无 mark**，序列化时
+         * getMarkdown() 必须把方括号转义成 `\[文本\](url)`（否则会被重新解析成链接），
+         * 显示难看，且自动保存可能把这个转义版本写进磁盘（CLAUDE.md 记录的已知隐患）。
+         * 需要改链接地址请用 Ctrl+K（超链接对话框）。
+         */
+        if (e.ctrlKey || e.metaKey) {
+          void invoke("open_url", { url: href });
+          return;
+        }
+        if (!e.altKey) return; // 单击：交给 ProseMirror 正常放置光标
+
+        // Alt + 单击：进入源码编辑（下面这段是原行为，含"先恢复上一个正在编辑的链接"）
         if (linkEditRef.current) {
           restoreLinkEdit();
           // 恢复后 DOM 可能已更新，用坐标重新定位链接元素

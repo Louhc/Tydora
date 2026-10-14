@@ -25,6 +25,7 @@ import Sidebar, {
   SIDEBAR_DRAG_THRESHOLD,
 } from "./Sidebar";
 import { baseNameOf, displayFileName, joinDirLike, normalizePathKey, replaceBaseNameLike, restoreExtension } from "./utils/fileName";
+import { flushDocHistory, initDocHistory, popDocHistory, pushDocHistory, redoDocHistory } from "./utils/doc-history";
 import VaultManagerModal from "./VaultManager/VaultManagerModal";
 import AppModal from "./components/AppModal";
 import appIcon from "./assets/icon.png";
@@ -443,7 +444,16 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
   const setFileName = useCallback((v: string | null) => updateBuffer(activeBufferIdRef.current, { fileName: v }), [updateBuffer]);
   const setModified = useCallback((v: boolean) => updateBuffer(activeBufferIdRef.current, { modified: v }), [updateBuffer]);
   // 切换激活窗格的编辑模式（per-pane mode 存于 pane.mode）
-  const setViewMode = useCallback((m: EditorMode) => setPanes((ps) => ps.map((p) => (p.id === activePaneIdRef.current ? { ...p, mode: m } : p))), []);
+  const setViewMode = useCallback((m: EditorMode) => {
+    /**
+     * 切模式前**强制立帧**：保证"切换前的状态"一定进入文档级撤销栈
+     * （否则切换前 500ms 内的编辑还在合并窗口里，切换后第一下 Ctrl+Z 会跳过头）。
+     * historyPathRef / contentForHistoryRef 声明在下方，但这里只在调用时读取，无 TDZ 问题。
+     */
+    const path = historyPathRef.current;
+    if (path) flushDocHistory(path, contentForHistoryRef.current);
+    setPanes((ps) => ps.map((p) => (p.id === activePaneIdRef.current ? { ...p, mode: m } : p)));
+  }, []);
   // 合并读取：此前 7 个 useState 各自独立 localStorage.getItem + JSON.parse 同一个 key，
   // 现在只读一次、解析一次，复用于全部 useState 初始化。
   const generalSettingsRead = useRef(false);
@@ -1626,6 +1636,65 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     window.addEventListener("tydora-tree-interact", onTreeInteract);
     return () => window.removeEventListener("tydora-tree-interact", onTreeInteract);
   }, []);
+
+  // ── 文档级撤销栈（跨 IR/SV 的兜底历史）──────────────────────────────
+  // 背景：IR（TipTap）与 SV（CodeMirror）是两个独立编辑器实例，各自持有撤销栈；
+  // 切换模式会卸载其中一个 → 那一侧历史丢失，Ctrl+Z 无法恢复（架构固有缺口）。
+  // 这里在**文档层**记录快照（内部按 500ms 合并连续输入），并在"原生栈耗尽"时兜底接管。
+  const historyPathRef = useRef<string | null>(null);
+  /** 供 Ctrl+Z 处理器读取最新内容，避免把 content 放进依赖里反复重挂监听 */
+  const contentForHistoryRef = useRef(content);
+  contentForHistoryRef.current = content;
+
+  useEffect(() => {
+    const path = activeBuffer.fileName;
+    if (!path) return; // 未命名的新文件不记录历史
+    if (historyPathRef.current !== path) {
+      historyPathRef.current = path;
+      initDocHistory(path, content); // 换文件：只重置基线，不产生快照
+      return;
+    }
+    pushDocHistory(path, content); // 同文件内容变化：按合并窗口记录
+  }, [activeBuffer.fileName, content]);
+
+  useEffect(() => {
+    /**
+     * 统一的撤销 / 重做（**捕获阶段**，早于编辑器）。
+     *
+     * 目的：让 IR 与 SV 共用**一条按时间顺序的历史** —— 无论在哪个模式下的编辑，
+     * Ctrl+Z 都撤销"最近的那次修改"，而不是"先撤本模式、再撤另一模式"。
+     * 做法：捕获阶段拦下 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y，直接应用文档级快照；
+     * 两个编辑器的原生撤销因此不会介入（它们各自的历史不再被使用，避免两边打架）。
+     *
+     * 不拦截的情形（让各自的原生行为生效）：
+     *   - Vim 模式：vim 有自己的撤销体系；
+     *   - 焦点在输入框 / 重命名框 / 查找框里：控件自己的撤销；
+     *   - 浮层打开时（注音编辑框、确认框、对话框）；
+     *   - 文档级历史为空时：不消费事件，退回编辑器原生撤销。
+     */
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const k = e.key.toLowerCase();
+      const isUndo = k === "z" && !e.shiftKey;
+      const isRedo = (k === "z" && e.shiftKey) || k === "y";
+      if (!isUndo && !isRedo) return;
+      if (vimShouldTakeOver(e)) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (document.querySelector(".ruby-edit-popover, .confirm-dialog-overlay, [role='dialog']")) return;
+      const path = historyPathRef.current;
+      if (!path) return;
+      const current = contentForHistoryRef.current;
+      const next = isUndo ? popDocHistory(path, current) : redoDocHistory(path, current);
+      if (next === null) return; // 没有可用历史 → 不消费事件，交给编辑器原生撤销
+      e.preventDefault();
+      e.stopPropagation();
+      setContent(next);
+      setModified(true);
+    };
+    window.addEventListener("keydown", onKeyDown, true); // 捕获阶段：早于编辑器
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [setContent, setModified, vimShouldTakeOver]);
 
   /**
    * 文件树里改名（F2 / 双击 / 内联改名 / 新建后的就地命名）之后，把**已经打开该文件**
