@@ -129,6 +129,13 @@ interface SidebarProps {
   currentFilePath: string | null;
   content: string;
   onSelectFile: (path: string, line?: number, query?: string) => void;
+  /**
+   * 侧栏搜索被清空时通知外层（用来**撤销编辑器里的搜索高亮**）。
+   *
+   * 高亮是点搜索结果时由 App 调 `highlightSearch()` 画上去的，此前没有任何人撤销 ——
+   * 于是「点 × 清空搜索框后，正文里的高亮仍留着」。
+   */
+  onClearSearchHighlight?: () => void;
   onSelectHeading: (level: number, text: string, line: number) => void;
   onRemoveVault: (index: number) => void;
   onNewWindow: (filePath: string) => void;
@@ -4091,6 +4098,7 @@ export default function Sidebar({
   showFileIcons = true,
   onCollapseByHandle,
   boundaryDragging = false,
+  onClearSearchHighlight,
 }: SidebarProps) {
   bootStart("sidebar_component_render");
   bootStamp("sidebar_component_entered");
@@ -4111,6 +4119,20 @@ export default function Sidebar({
     visibleTabs[0] ?? "files",
   );
   const [searchQuery, setSearchQuery] = useState("");
+  /**
+   * 侧栏搜索框内容变化。
+   *
+   * 清空时（点 × / Esc / 删到空 / 切走 search 页签）必须**同时撤销编辑器里的搜索高亮**：
+   * 高亮是点搜索结果时由 App 调 `highlightSearch()` 画上去的，此前无人撤销 ——
+   * 所以「点 × 清空搜索框后正文里的高亮还留着」。
+   */
+  const handleSearchQueryChange = useCallback(
+    (q: string) => {
+      setSearchQuery(q);
+      if (!q.trim()) onClearSearchHighlight?.();
+    },
+    [onClearSearchHighlight],
+  );
   // 局部关系图谱放大弹窗
   const [localGraphExpanded, setLocalGraphExpanded] = useState(false);
 
@@ -4180,9 +4202,10 @@ export default function Sidebar({
     if (!visibleTabs.includes(tab)) return;
     setActiveTab(tab);
     if (tab !== "search") {
-      setSearchQuery("");
+      // 离开搜索页签会把查询清掉，正文里的高亮也要一起撤
+      handleSearchQueryChange("");
     }
-  }, [visibleTabs]);
+  }, [visibleTabs, handleSearchQueryChange]);
 
   // 当前文档的 wiki 链接情况，用于决定「关系图谱 / Linked references」是否需要展示：
   // - hasOutLinks：文档自身含有 [[...]] 出链
@@ -4339,14 +4362,14 @@ export default function Sidebar({
           const next = prev === "search" ? "files" : "search";
           // 本侧栏不渲染目标 tab 时不动（让另一侧栏接管，或保持现状）
           if (!visibleTabs.includes(next)) return prev;
-          if (next !== "search") setSearchQuery("");
+          if (next !== "search") handleSearchQueryChange("");
           return next;
         });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [visibleTabs]);
+  }, [visibleTabs, handleSearchQueryChange]);
 
   // Vim Leader 菜单的全局搜索：监听 vim-sidebar-tab 事件切换侧栏 tab
   useEffect(() => {
@@ -4576,7 +4599,7 @@ export default function Sidebar({
             <>
               <SearchBar
                 query={searchQuery}
-                onQueryChange={setSearchQuery}
+                onQueryChange={handleSearchQueryChange}
                 onClose={() => switchTab("files")}
               />
               {searchQuery.trim() ? (

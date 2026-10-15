@@ -1914,8 +1914,17 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     updateBuffer(pane.bufferId, { content: value, modified: isModified });
     if (pane.id === activePaneIdRef.current) {
       setSaveStatus(isModified ? "modified" : "idle");
-      // Clear search highlights when user edits
-      editorHandleRef.current?.clearHighlight();
+      /**
+       * 撤销搜索高亮 —— 但**只在内容真的被改动时**（`isModified`），不是"收到 onChange 就清"。
+       *
+       * 为什么：程序化装载也会走 onChange（换文件后的 setContent、注音展开/收起、
+       * AI 写入回显……），它们并不是用户编辑。以前一律清，于是
+       * 「点搜索结果的另一条 → 换文件 → 刚设好的高亮当场被清掉」，看起来就是
+       * 「点第二个目标没有高亮」（实测日志：clearHighlight 紧跟换文件那次 onUpdate）。
+       */
+      if (isModified) {
+        editorHandleRef.current?.clearHighlight();
+      }
       // Sync content to mindmap window if open
       syncMindmapContent(value);
 
@@ -2455,7 +2464,16 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
           editorHandleRef.current?.highlightSearch(query);
         }
         if (line != null) {
-          setTimeout(() => editorHandleRef.current?.scrollToLine(line), 350);
+          /**
+           * 这里刻意**不再**用 `setTimeout(..., 350)` 等编辑器装载完。
+           *
+           * 那个固定时长正是「先跳到错位置、再跳到对的位置」的来源：换文件时编辑器会
+           * 先渲染一次新文档的默认/存档位置（顶部或上次光标），350ms 后才轮到这次跳转。
+           * 改成把目标行连同文件路径立刻交给编辑器：需要换文件时它会把跳转排进
+           * 「setContent 落定」的那次 effect，与内容更新同帧完成，中途不渲染中间位置；
+           * 目标文件已经打开时则立即跳。
+           */
+          editorHandleRef.current?.scrollToLine(line, path);
         }
       }
 
@@ -4342,6 +4360,13 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
           currentFilePath={fileName}
           content={content}
           onSelectFile={handleSelectFile}
+          onClearSearchHighlight={() => {
+            // 清空侧栏搜索 → 撤掉所有分屏里的搜索高亮（侧栏搜索是全库行为，高亮不一定在当前分屏）
+            for (const handle of Object.values(paneHandlesRef.current)) {
+              handle?.clearHighlight?.();
+            }
+            editorHandleRef.current?.clearHighlight();
+          }}
           onSelectHeading={handleSelectHeading}
           onRemoveVault={handleRemoveVault}
           onNewWindow={handleNewWindow}
@@ -5231,6 +5256,13 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
             currentFilePath={fileName}
             content={content}
             onSelectFile={handleSelectFile}
+            onClearSearchHighlight={() => {
+              // 清空侧栏搜索 → 撤掉所有分屏里的搜索高亮（侧栏搜索是全库行为，高亮不一定在当前分屏）
+              for (const handle of Object.values(paneHandlesRef.current)) {
+                handle?.clearHighlight?.();
+              }
+              editorHandleRef.current?.clearHighlight();
+            }}
             onSelectHeading={handleSelectHeading}
             onRemoveVault={handleRemoveVault}
             onNewWindow={handleNewWindow}
