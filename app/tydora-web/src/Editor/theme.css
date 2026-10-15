@@ -1743,6 +1743,19 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   border-radius: 3px;
   /* 不要外框：注音靠 ::after 的小字本身就是标识。
      （曾经在悬停时画虚线框，用户明确要求去掉。） */
+
+  /**
+   * 读音比本体宽时，向两侧对称让出空间，避免相邻注音的小字互相压叠。
+   *
+   * 读音由 ::after 绝对定位绘制、不参与布局，所以长读音（如 昼食後/ちゅうしょくご）
+   * 会向两侧溢出压到邻居。CSS 测不出文字宽度，因此按字符数估算：
+   *   读音宽 ≈ 读音字数 × 0.5em（小字是 0.5em 字号）；本体宽 ≈ 本体字数 × 1em；
+   *   溢出量 = 两者之差，每边让一半。
+   * max(0em, …) 保证"读音比本体短"时不留多余空隙。
+   */
+  padding-inline: calc(
+    max(0em, var(--ruby-rt-len, 1) * 0.5em - var(--ruby-base-len, 1) * 1em) / 2
+  );
 }
 
 .tiptap-editor .md-ruby:hover {

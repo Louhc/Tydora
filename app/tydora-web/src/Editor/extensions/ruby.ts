@@ -212,7 +212,18 @@ export const Ruby = Node.create({
      */
     return [
       "span",
-      { class: "md-ruby", "data-rt": node.attrs.rt ?? "", contenteditable: "false" },
+      {
+        class: "md-ruby",
+        "data-rt": node.attrs.rt ?? "",
+        /**
+         * 读音与本体各自的字符数，供 CSS 估算"读音是否比本体宽"。
+         * 读音是绝对定位画上去的（不占布局），太长就会向两侧溢出压到相邻注音；
+         * CSS 测不出文字宽度，所以用内联 CSS 变量把长度交给样式（内联变量最可靠，
+         * 不依赖 attr() 的新语法）。
+         */
+        style: `--ruby-rt-len:${(node.attrs.rt ?? "").length};--ruby-base-len:${(node.attrs.base ?? "").length}`,
+        contenteditable: "false",
+      },
       node.attrs.base ?? "",
     ];
   },
