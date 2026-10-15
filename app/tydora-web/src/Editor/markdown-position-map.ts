@@ -10,6 +10,14 @@ export interface MarkdownPositionMarker {
 export interface MarkdownPositionMap {
   markers: MarkdownPositionMarker[];
   docSize: number;
+  /**
+   * 构建这份映射表时所序列化出的 Markdown 原文。
+   *
+   * 这是「原文偏移 ↔ PM 位置」的**同一份坐标系** —— 查找/替换必须拿它来匹配，
+   * 不能另取 `getMarkdown()`：两者在极端情况下会有几处空白修剪差异，
+   * 而且 `apply` 阶段视图状态还没换成新 state，另取会读到旧文档。
+   */
+  markdown: string;
 }
 
 /**
@@ -141,6 +149,23 @@ class TrackingMarkdownSerializerState extends MarkdownSerializerState {
       this.addMarker(pos);
     }
     super.render(node, parent, index);
+    /**
+     * 行内叶子节点（注音 / 行内公式 / 图片……）在输出**结束后**补一个 marker，
+     * 把「节点结束」对应到 pm 位置 `pos + nodeSize`。
+     *
+     * 为什么必须补：这类节点的 Markdown 写法比它在 PM 里占的宽度长得多 ——
+     * 注音 `{{Ruby|漢字|かんじ}}` 是 15 个字符，PM 里只有 1 格。只记起点时，
+     * 「落在字面量内部的偏移」会按片段模型被吸附到**片段末尾**，而那个末尾在
+     * 下一条 marker 处 —— 实测 `前`（位于字面量内）被吸到**下一段正文开头**
+     *（pm 251），于是「整块高亮该节点」的逻辑找不到节点、命中被丢弃。
+     * 补上结束 marker 后，字面量内部的偏移会稳稳落在节点右边界上。
+     *
+     * 注意此刻块分隔符（`\n\n`）尚未输出（由下一次 flushClose 写），所以这里记到的
+     * md 偏移正好是节点输出的末尾，与下一条 marker 的 md 不同，不会被去重掉。
+     */
+    if (node.isInline && node.isLeaf && !node.isText) {
+      this.addMarker((pos ?? this.currentNodePos) + node.nodeSize);
+    }
     this.currentNode = prevNode;
     this.currentNodePos = prevPos;
   }
@@ -162,15 +187,22 @@ class TrackingMarkdownSerializerState extends MarkdownSerializerState {
 }
 
 /**
- * 基于当前编辑器文档构建位置映射表。
- * 序列化整篇文档一次，记录每个节点边界的 Markdown 偏移。
+ * 基于编辑器文档构建位置映射表。
+ * 序列化整篇文档一次，记录每个节点边界的 Markdown 偏移，并把这份序列化结果
+ * 一起返回（`markdown`）—— 它就是「原文偏移」的坐标系。
+ *
+ * `docOverride`：指定要序列化的文档。插件在自己的 `apply` 里必须显式传 `newState.doc` ——
+ * 那个时刻视图状态**还没**换成新 state，从编辑器上取会拿到旧文档。
  */
-export function buildPositionMap(editor: { state: any; storage: any }): MarkdownPositionMap {
-  const doc = editor?.state?.doc;
-  if (!doc) return { markers: [], docSize: 0 };
+export function buildPositionMap(
+  editor: { state: any; storage: any },
+  docOverride?: any,
+): MarkdownPositionMap {
+  const doc = docOverride ?? editor?.state?.doc;
+  if (!doc) return { markers: [], docSize: 0, markdown: "" };
   const docSize = doc.content.size;
   const serializer = editor?.storage?.markdown?.serializer;
-  if (!serializer) return { markers: [], docSize };
+  if (!serializer) return { markers: [], docSize, markdown: "" };
   try {
     const state = new TrackingMarkdownSerializerState(
       serializer.nodes,
@@ -197,9 +229,9 @@ export function buildPositionMap(editor: { state: any; storage: any }): Markdown
     if (!last || last.pmPos !== docSize || last.md !== state.out.length) {
       markers.push({ pmPos: docSize, md: state.out.length });
     }
-    return { markers, docSize };
+    return { markers, docSize, markdown: state.out };
   } catch {
-    return { markers: [], docSize };
+    return { markers: [], docSize, markdown: "" };
   }
 }
 
@@ -247,4 +279,53 @@ export function mdOffsetToPmPos(map: MarkdownPositionMap, mdOffset: number): num
   const segmentLen = next.pmPos - marker.pmPos;
   const delta = offset - marker.md;
   return Math.min(docSize, marker.pmPos + Math.min(delta, segmentLen));
+}
+
+/**
+ * 按文档缓存的位置映射表。
+ *
+ * `buildPositionMap` 会**序列化整篇文档**；查找 / 高亮这类调用在输入时会被频繁触发，
+ * 每次重建太贵。ProseMirror 的文档对象不可变 —— 文档一变就是新对象，所以用 WeakMap
+ * 以 doc 为键缓存最自然：改了自然失效，也不会阻止旧文档被回收。
+ */
+const positionMapCache = new WeakMap<object, MarkdownPositionMap>();
+
+export function getCachedPositionMap(
+  editor: { state: any; storage: any },
+  docOverride?: any,
+): MarkdownPositionMap {
+  const doc = docOverride ?? editor?.state?.doc;
+  if (!doc) return { markers: [], docSize: 0, markdown: "" };
+  const cached = positionMapCache.get(doc);
+  if (cached) return cached;
+  const map = buildPositionMap(editor, doc);
+  positionMapCache.set(doc, map);
+  return map;
+}
+
+/**
+ * `pmPos` 落在某个**行内叶子节点**（注音、行内公式、图片……）的字面量内部时，
+ * 返回该节点在 PM 里的区间。
+ *
+ * 用途：Markdown 原文里的命中若位于这类节点的字面量内部（例如注音
+ * `{{Ruby|漢字|かんじ}}` 里的 `かんじ`），PM 里**没有字面量内部的坐标**
+ *（会被就近吸附到节点边界，映射出的区间长度为 0），显示上只能整块高亮该节点。
+ */
+export function inlineLeafRangeAt(
+  doc: any,
+  pmPos: number,
+  docSize?: number,
+): { from: number; to: number } | null {
+  const size = docSize ?? doc.content.size;
+  const p = Math.max(0, Math.min(pmPos, size));
+  try {
+    const $pos = doc.resolve(p);
+    const before = $pos.nodeBefore;
+    if (before && before.isInline && before.isLeaf) return { from: p - before.nodeSize, to: p };
+    const after = $pos.nodeAfter;
+    if (after && after.isInline && after.isLeaf) return { from: p, to: p + after.nodeSize };
+  } catch {
+    /* 位置不合法时忽略 */
+  }
+  return null;
 }
