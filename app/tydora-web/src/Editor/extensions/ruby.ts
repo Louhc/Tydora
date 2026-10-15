@@ -38,6 +38,19 @@ function esc(s: string): string {  return s
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * 标记「注音展开 / 收起」这类**程序化**改写事务。
+ *
+ * 为什么需要：展开/收起会改文档（节点 ↔ 字面量文本），于是触发 TipTap 的 update，
+ * 编辑器再回调 App 的 onChange —— 而 App 在「用户编辑」时会清掉搜索高亮。
+ * 表现就是：**搜索跳行 → 命中处的注音自动展开 → 刚跳过去的高亮被清掉**
+ *（实测日志：点击后 500ms，`storage.searchHighlight.query` 变成了空字符串）。
+ *
+ * 而这两次改写序列化出的 Markdown 与改写前**完全一样**（都是 `{{Ruby|…}}`），
+ * 本来就不该算用户编辑 —— 打上这个标记，onUpdate 跳过 onChange（字数统计照常走）。
+ */
+export const RUBY_TOGGLE_META = "tydoraRubyToggle";
+
 /** 光标是否紧邻注音（**同一文本块内**，即视觉上的"左右两侧"）→ 是则返回展开位置 */
 function adjacentRuby(view: any): number | null {
   const { selection } = view.state;
@@ -61,6 +74,7 @@ function expandRubyAt(view: any, pos: number): boolean {
   const wasBefore = view.state.selection.from <= pos;
   const tr = view.state.tr.replaceWith(pos, pos + node.nodeSize, view.state.schema.text(literal));
   tr.setSelection(TextSelection.create(tr.doc, wasBefore ? pos : pos + literal.length));
+  tr.setMeta(RUBY_TOGGLE_META, true);
   pendingLiteral = true;
   sawLiteralExpand = true; // 记住"本会话展开过"，此后收起不再依赖 pendingLiteral
   suppressAutoExpandOnce = true; // 展开动作自身引起的那次更新不参与判断
@@ -124,6 +138,7 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
   }
   if (tr.docChanged) {
     suppressAutoExpandOnce = true; // 收起是我们自己造成的，那一次不参与判断
+    tr.setMeta(RUBY_TOGGLE_META, true);
     view.dispatch(tr);
   }
   /**

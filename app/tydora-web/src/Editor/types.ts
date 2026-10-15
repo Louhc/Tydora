@@ -15,19 +15,55 @@ export interface EditorHandle {
   clearHighlight: () => void;
   executeCommand: (name: string) => void;
   scrollToHeading: (text: string, line: number) => void;
-  scrollToLine: (line: number) => void;
+  /**
+   * 跳到 Markdown 行号（侧栏搜索结果）。
+   *
+   * `path` 为目标文件路径：需要换文件时编辑器会把跳转排到内容装载后同帧执行，
+   * 避免先渲染一次中间位置（顶部 / 上次光标）造成可见的两次跳动。
+   */
+  scrollToLine: (line: number, path?: string) => void;
   getCursorOffset: () => number;
   isSourceMode: () => boolean;
   /** 克隆当前渲染内容元素（用于导出）；源码模式下返回 null */
   getContentElement: () => HTMLElement | null;
   /** 全文搜索，返回所有匹配位置 */
-  findMatches: (query: string) => Array<{ from: number; to: number }>;
-  /** 选中指定范围并滚动到可见位置（不聚焦编辑器，用于搜索高亮） */
+  findMatches: (query: string) => SearchMatch[];
+  /**
+   * 选中指定范围并滚动到可见位置（不聚焦编辑器，用于搜索高亮）。
+   *
+   * ⚠️ 参数口径随模式变：**IR 是 ProseMirror 位置，SV 是 Markdown 原文偏移**
+   *（SV 的查找/替换直接在源码上做，见 findMatches 的说明）。
+   */
   selectMatch: (from: number, to: number) => void;
-  /** 选中指定范围并滚动到可见位置（同时聚焦编辑器，用于导航跳转） */
+  /** 选中指定范围并滚动到可见位置（同时聚焦编辑器，用于导航跳转）。参数口径同 selectMatch */
   selectAndScroll: (from: number, to: number) => void;
-  /** 替换指定范围内容 */
-  replaceAt: (from: number, to: number, replacement: string) => void;
+  /**
+   * 标记"当前命中"（查找框保持焦点时原生选区会被清空，需要单独一条装饰）。
+   * 参数是 **Markdown 原文偏移** —— Ruby 展开/收起后按当前文档重算，不会错位。
+   */
+  setCurrentMatch?: (mdFrom: number, mdTo: number) => void;
+  /**
+   * 替换若干处命中。
+   *
+   * ⚠️ 用**Markdown 原文偏移**（不是 PM 位置）：替换一律在原文上做字符串替换
+   *（SV 语义），IR 只负责把新原文写回编辑器重新渲染。
+   * 之所以不能用 PM 区间：命中落在注音字面量内部时，PM 侧只能整块高亮节点，
+   * 但替换必须只动命中那几个字，否则会把整个 `{{Ruby|漢字|かんじ}}` 换掉。
+   */
+  replaceMatches: (items: Array<{ mdFrom: number; mdTo: number }>, replacement: string) => void;
+}
+
+/**
+ * 一处查找命中。
+ *
+ * `mdFrom/mdTo` 是 **Markdown 原文偏移**（匹配的真理源）；
+ * `from/to` 是映射到显示位置的区间 —— IR 下是 ProseMirror 位置，SV 下与 md 相同。
+ */
+export interface SearchMatch {
+  from: number;
+  to: number;
+  mdFrom: number;
+  mdTo: number;
 }
 
 export type EditorMode = "ir" | "sv";

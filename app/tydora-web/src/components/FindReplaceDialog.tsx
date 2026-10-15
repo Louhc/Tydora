@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { EditorHandle } from "../Editor/types";
+import type { EditorHandle, SearchMatch } from "../Editor/types";
 import { useDebounce } from "../hooks/useDebounce";
 import "./FindReplaceDialog.css";
 
@@ -31,7 +31,7 @@ export default function FindReplaceDialog({
   const [query, setQuery] = useState(initialQuery);
   const debouncedQuery = useDebounce(query, DEBOUNCE_DELAY);
   const [replaceText, setReplaceText] = useState("");
-  const [matches, setMatches] = useState<Array<{ from: number; to: number }>>([]);
+  const [matches, setMatches] = useState<SearchMatch[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   // 默认收起替换行（与 VS Code 一致），点左侧箭头展开
   const [showReplace, setShowReplace] = useState(showReplaceRow);
@@ -157,8 +157,9 @@ export default function FindReplaceDialog({
      */
     const focused = document.activeElement as HTMLElement | null;
     editorHandle.selectAndScroll(list[next].from, list[next].to);
-    // 用装饰标出"当前命中"：焦点保持在查找框时原生选区会被清空，靠它给出可见反馈
-    (editorHandle as any).setCurrentMatch?.(list[next].from, list[next].to);
+    // 用装饰标出"当前命中"：焦点保持在查找框时原生选区会被清空，靠它给出可见反馈。
+    // 传**原文偏移**——Ruby 展开/收起后插件按当前文档重算，不会错位。
+    (editorHandle as any).setCurrentMatch?.(list[next].mdFrom, list[next].mdTo);
     if (focused && (focused === findInputRef.current || focused === replaceInputRef.current)) {
       focused.focus();
       // 再补一次：selectAndScroll 若把焦点交给编辑器（有些实现是在下一帧做的），
@@ -179,8 +180,8 @@ export default function FindReplaceDialog({
     setCurrentIndex(prev);
     const focused = document.activeElement as HTMLElement | null;
     editorHandle.selectAndScroll(list[prev].from, list[prev].to);
-    // 同上：当前命中用装饰标记（焦点留在查找框）
-    (editorHandle as any).setCurrentMatch?.(list[prev].from, list[prev].to);
+    // 同上：当前命中用装饰标记（焦点留在查找框），参数是原文偏移
+    (editorHandle as any).setCurrentMatch?.(list[prev].mdFrom, list[prev].mdTo);
     if (focused && (focused === findInputRef.current || focused === replaceInputRef.current)) {
       focused.focus();
       // 再补一次：selectAndScroll 若把焦点交给编辑器（有些实现是在下一帧做的），
@@ -195,7 +196,12 @@ export default function FindReplaceDialog({
   const replaceCurrent = useCallback(() => {
     if (!editorHandle || matches.length === 0 || currentIndex < 0 || currentIndex >= matches.length) return;
     const match = matches[currentIndex];
-    editorHandle.replaceAt(match.from, match.to, replaceText);
+    /**
+     * 替换用**Markdown 原文偏移**，等价于"在 SV 里改文本"：
+     * 命中落在注音字面量内部时（rt 里的字），PM 侧只能整块高亮节点，
+     * 但替换必须只动命中那几个字，所以交给编辑器在原文上替换再写回。
+     */
+    editorHandle.replaceMatches([{ mdFrom: match.mdFrom, mdTo: match.mdTo }], replaceText);
     // Refresh matches after replace
     const newResults = editorHandle.findMatches(query);
     setMatches(newResults);
@@ -222,10 +228,11 @@ export default function FindReplaceDialog({
   // Replace all matches
   const replaceAll = useCallback(() => {
     if (!editorHandle || matches.length === 0) return;
-    // Replace from last to first to preserve positions
-    for (let i = matches.length - 1; i >= 0; i--) {
-      editorHandle.replaceAt(matches[i].from, matches[i].to, replaceText);
-    }
+    // 全部替换同样在 Markdown 原文上一次性完成（从后往前替换，偏移不会互相打乱）
+    editorHandle.replaceMatches(
+      matches.map((m) => ({ mdFrom: m.mdFrom, mdTo: m.mdTo })),
+      replaceText,
+    );
     setMatches([]);
     setCurrentIndex(-1);
     editorHandle.clearHighlight();

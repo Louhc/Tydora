@@ -38,7 +38,7 @@ import { Toc } from "./extensions/toc";
 import { Mermaid } from "./extensions/mermaid";
 import { WikiLink } from "./extensions/wiki-link";
 import { Tag } from "./extensions/tag";
-import { Ruby } from "./extensions/ruby";
+import { Ruby, RUBY_TOGGLE_META } from "./extensions/ruby";
 import { SearchHighlight } from "./extensions/search-highlight";
 import {
   HIGHLIGHT_COLORS,
@@ -75,7 +75,12 @@ import type { VimMode } from "../vim/types";
 import { prefixGConfig } from "../vim/config/prefixG";
 import { prefixZConfig } from "../vim/config/prefixZ";
 import { prefixTConfig } from "../vim/config/prefixT";
-import { buildPositionMap, mdOffsetToPmPos, pmPosToMdOffset } from "./markdown-position-map";
+import { buildPositionMap, getCachedPositionMap, inlineLeafRangeAt, mdOffsetToPmPos, pmPosToMdOffset } from "./markdown-position-map";
+import {
+  applyMarkdownReplacements,
+  caretOffsetAfterReplace,
+  findMarkdownMatches,
+} from "./markdown-search";
 import { computeSpliceDiff } from "./text-patch";
 import { DOMParser as ProseMirrorDOMParser, Fragment, Slice } from "@tiptap/pm/model";
 import type { Node as PMNode } from "@tiptap/pm/model";
@@ -227,6 +232,24 @@ function dropUndoHistory(editor: Editor): void {
       selection: state.selection,
     }),
   );
+  /**
+   * ⚠️ 上面那次 updateState 会把**所有**插件的内部状态按各自的 `init()` 重建
+   * （新 EditorState 只沿用了 plugin 实例），而且没有经过 dispatch，插件的
+   * `apply` 一次都不会跑 —— 凡是把数据存在插件状态里的功能，状态就没了。
+   *
+   * 搜索高亮的装饰集正是存在插件状态里（`init: () => DecorationSet.empty`），
+   * 于是表现为：**换文件后第一次点搜索结果没有高亮，点第二次才有**
+   *（第二次不换文件、不经过这里，`setSearchHighlight` 自己那次 forceUpdate
+   *  就能算出装饰）。这里补一次 forceUpdate，让高亮按当前查询词重算。
+   */
+  const query = (editor.storage as Record<string, any> | undefined)?.searchHighlight?.query;
+  if (query) {
+    try {
+      view.dispatch(view.state.tr.setMeta("forceUpdate", true));
+    } catch {
+      /* 视图未就绪时忽略 */
+    }
+  }
 }
 
 /**
@@ -319,6 +342,86 @@ function pmPosForMarkdownLine(
   const map = buildPositionMap(editor);
   if (map.markers.length === 0) return null;
   return mdOffsetToPmPos(map, offset);
+}
+
+/**
+ * 行号 → PM 位置，带兜底。
+ *
+ * 优先走 `pmPosForMarkdownLine`（Markdown 偏移映射，实测精确）；只有映射表不可用时
+ * （拿不到 serializer 等）才退回「每个 textblock 一行 + hardBreak 额外一行」的旧行表
+ * —— 那张表只对"一个块恰好占一行"的文档成立，是历史实现，仅作保险。
+ *
+ * @returns 无法定位时返回 null。
+ */
+function pmPosForMarkdownLineWithFallback(
+  editor: Editor,
+  markdown: string,
+  line: number,
+): number | null {
+  const mapped = pmPosForMarkdownLine(editor, markdown, line);
+  if (mapped !== null) return mapped;
+  if (!isEditorAlive(editor)) return null;
+  const lineStarts: number[] = [];
+  editor.state.doc.descendants((node: any, p: number) => {
+    if (!node.isTextblock) return;
+    lineStarts.push(p + 1);
+    let offset = 0;
+    node.content.forEach((child: any) => {
+      if (child.type.name === "hardBreak") lineStarts.push(p + 1 + offset + child.nodeSize);
+      offset += child.nodeSize;
+    });
+  });
+  if (lineStarts.length === 0) return null;
+  return lineStarts[Math.max(1, Math.min(line, lineStarts.length)) - 1];
+}
+
+/**
+ * 把光标落到指定 Markdown 行，并把它滚到视口上三分之一处。
+ *
+ * 与 `scrollEditorToHeading` 同一套做法（先 setTextSelection、再在 rAF 里按
+ * coordsAtPos 调整 scrollTop）。抽成函数是因为有两条调用路径，且换文件那条
+ * **必须在 setContent 的同一次 effect 里**调用，否则会先渲染一次中间位置。
+ */
+function applyLineJumpToView(
+  editor: Editor,
+  markdown: string,
+  line: number,
+  container: HTMLElement | null,
+): void {
+  if (!isEditorAlive(editor)) return;
+  const pos = pmPosForMarkdownLineWithFallback(editor, markdown, line);
+  if (pos === null) return;
+  try {
+    editor.chain().focus().setTextSelection(pos).run();
+  } catch {
+    /* editor 已销毁时忽略 */
+  }
+  requestAnimationFrame(() => {
+    const scrollContainer = container?.querySelector(".tiptap-editor") as HTMLElement | null;
+    if (!scrollContainer) return;
+    const view = getEditorView(editor);
+    const coords = view?.coordsAtPos?.(pos);
+    if (coords) {
+      const containerRect = scrollContainer.getBoundingClientRect();
+      scrollContainer.scrollTop += coords.top - containerRect.top - containerRect.height / 3;
+    }
+  });
+}
+
+/**
+ * 命中范围若恰好覆盖一个**行内叶子节点**（例如注音里读音命中的那一次），返回该节点起点。
+ *
+ * 导航时用它改成「折叠光标落在节点起点」，而不是选中整个节点 —— 注音的自动展开条件是
+ * **折叠光标贴到它旁边**（ruby.ts 的 adjacentRuby 里 `if (!selection.empty) return null`），
+ * 选中整块反而不会展开。光标落上去后注音会按既有规则展开成字面量，
+ * 高亮也随之从「整块节点」变成「字面量内部的精确命中」。
+ */
+function leafRangeStart(editor: Editor, from: number, to: number): number | null {
+  if (!isEditorAlive(editor)) return null;
+  if (to !== from + 1) return null; // 行内叶子节点的 nodeSize 恒为 1
+  const node = editor.state.doc.nodeAt(from);
+  if (!node || !node.isInline || !node.isLeaf || node.isText) return null;
+  return from;
 }
 
 /**
@@ -706,6 +809,18 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
      * 「光标在开头、滚动为 0」，也不会影响本次恢复。
      */
     const pendingRestoreSnapshotRef = useRef<FileViewPosition | null>(null);
+    /**
+     * 待执行的「跳转到 Markdown 行号」请求（侧栏搜索结果点击）。
+     *
+     * 为什么不在 App 那边等固定时长再跳：换文件时编辑器会先渲染一次新文档的
+     * **默认/存档位置**（顶部或上次光标），然后才轮到跳转 —— 用户看到的就是
+     * 「先跳到错位置、再跳到对的位置」。改成把目标记在这里，等 setContent 落定后
+     * 在**同一次 effect 里**直接落到目标行，中途不渲染中间位置，也不需要任何延时。
+     *
+     * **不能**在拿到请求时立刻执行：那一刻（App 的 state 还没提交）编辑器里还是
+     * 上一份文档，跳了就是跳到旧文件上。所以用 path 判断是否要换文件。
+     */
+    const pendingLineJumpRef = useRef<{ line: number; path: string } | null>(null);
     // SV 侧：源码偏移 + ratio/scrollRatio → SV → IR 时恢复
     const sourceViewStateRef = useRef<{ anchor: number; head: number; ratio: number; scrollRatio: number }>({
       anchor: 0, head: 0, ratio: 0, scrollRatio: 0,
@@ -796,19 +911,28 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           name: "endToDocumentEnd",
           priority: 2000,
           addKeyboardShortcuts() {
+            /**
+             * ⚠️ 必须写成 chain（一条事务、一次 dispatch），不要拆成：
+             *   const { commands } = this.editor;
+             *   commands.setTextSelection(..);
+             *   commands.scrollIntoView();
+             *
+             * `editor.commands` 是 getter：**解构一次就只建一个 `tr`**，而 @tiptap/core 的
+             * CommandManager 里所有 method 共用那个 tr、各自 `view.dispatch(tr)`。
+             * 于是第二次 dispatch 的是"已经应用过"的事务 —— 平时看不出问题（选区类步骤
+             * 幂等），但只要第一次 dispatch 期间有插件的 view.update 顺手改了文档，
+             * 第二次就会抛 `RangeError: Applying a mismatched transaction`。
+             * 实际踩到的路径：搜索/Ruby 邻近展开过字面量后，按 End 让光标离开它 →
+             * 第一次 dispatch 里 Ruby 插件把字面量收起（文档变了）→ 第二次 dispatch 抛错。
+             */
             return {
-              End: () => {
-                const { state, commands } = this.editor;
-                commands.setTextSelection(state.doc.content.size);
-                commands.scrollIntoView();
-                return true;
-              },
-              Home: () => {
-                const { commands } = this.editor;
-                commands.setTextSelection(0);
-                commands.scrollIntoView();
-                return true;
-              },
+              End: () =>
+                this.editor
+                  .chain()
+                  .setTextSelection(this.editor.state.doc.content.size)
+                  .scrollIntoView()
+                  .run(),
+              Home: () => this.editor.chain().setTextSelection(0).scrollIntoView().run(),
             };
           },
         }),
@@ -1711,12 +1835,21 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         ...createTiptapVimExtensions(vimEnabled),
       ],
       content: value || "",
-      onUpdate: ({ editor: ed }) => {
+      onUpdate: ({ editor: ed, transaction }) => {
         const md = getMarkdownSafe(ed);
 
-        if (isInternalRef.current) {
+        /**
+         * 注音的展开 / 收起是**程序化**改写（节点 ↔ 字面量文本），序列化出的 Markdown
+         * 与改写前完全一样，不能当成用户编辑 —— 否则 App 那边「编辑即清搜索高亮」
+         * 会把刚跳过去的高亮清掉（实测：搜索跳行 → 命中处自动展开 → 高亮消失）。
+         * 只跳过 onChange，字数统计照常走。
+         */
+        const rubyToggle = !!transaction?.getMeta?.(RUBY_TOGGLE_META);
+        const wasInternal = isInternalRef.current;
+        if (wasInternal) {
           isInternalRef.current = false;
-        } else if (!mountingRef.current && md != null) {
+        }
+        if (!wasInternal && !rubyToggle && !mountingRef.current && md != null) {
           onChangeRef.current(md);
         }
 
@@ -2678,6 +2811,22 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     // hook 本身通过内部 keydown listener 生效，不需要显式调用其方法。
     void leader.open; void prefixM.open; void prefixG.open; void prefixZ.open; void prefixT.open;
 
+    /**
+     * 当前编辑器的 **Markdown 原文** —— 查找 / 替换的真理源。
+     *
+     * - SV：源码编辑器里的内容（用户看到的、能编辑的就是它）；
+     * - IR：序列化结果（与位置映射表同一份，保证「原文偏移 ↔ PM 位置」对得上）。
+     *
+     * 两边都用原文，搜索口径才一致：注音的读音（rt）也是原文里的普通字符串，
+     * 理应能被搜到；IR 只负责把命中的偏移映射成 PM 坐标来显示。
+     */
+    const currentMarkdownSource = useCallback((): string => {
+      if (mode === "sv") return sourceEditorRef.current?.getValue() ?? value ?? "";
+      // IR：必须用**位置映射表所依据的那份原文**，否则在某些空白修剪差异上偏移会对不齐
+      if (isEditorAlive(editor)) return getCachedPositionMap(editor).markdown || value || "";
+      return value ?? "";
+    }, [mode, editor, value]);
+
     // 暴露 API
     useImperativeHandle(ref, () => ({
       getValue: () => {
@@ -2740,6 +2889,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         }
       },
       highlightSearch: (query: string) => {
+        /**
+         * SV：匹配与高亮都由 CodeMirror 负责（导航会选中命中，CM 自带的
+         * highlightSelectionMatches 把同词全部标出），这里不必也不该去动
+         * ProseMirror —— SV 期间它的文档是不同步的。
+         */
+        if (mode === "sv") return;
         if (!isEditorAlive(editor)) return;
         // 包一层 try/catch：TipTap 的 editor.commands.* 内部会走 CommandManager.chain()，
         // 编辑器正在销毁 / 视图已被替换时会抛
@@ -2752,6 +2907,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         }
       },
       clearHighlight: () => {
+        if (mode === "sv") return;
         if (!isEditorAlive(editor)) return;
         try {
           editor.commands.clearSearchHighlight();
@@ -2766,10 +2922,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
        * 于是"按回车跳到下一个"看不到选中效果（点按钮却正常）。
        * 改为用一条装饰把当前命中单独画出来，焦点始终留在查找框。
        */
-      setCurrentMatch: (from: number, to: number) => {
+      setCurrentMatch: (mdFrom: number, mdTo: number) => {
+        if (mode === "sv") return; // SV 下由 CodeMirror 的选中匹配高亮负责
         if (!isEditorAlive(editor)) return;
         try {
-          editor.commands.setSearchHighlightCurrent(from, to);
+          // 传**原文偏移**：Ruby 展开/收起后插件会按当前文档重算，不会错位
+          editor.commands.setSearchHighlightCurrent(mdFrom, mdTo);
         } catch {
           /* 同上：竞态期间忽略 */
         }
@@ -2788,53 +2946,28 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         if (!isEditorAlive(editor)) return;
         scrollEditorToHeading(editor, containerRef.current, text);
       },
-      scrollToLine: (line: number) => {
+      /**
+       * 跳转到 Markdown 行号（侧栏搜索结果点击）。
+       *
+       * `path` 用来判断是否需要换文件：
+       *   - 同一份文档已在编辑器里 → 立刻跳（点同一文件里的另一条命中）；
+       *   - 要换文件 → 只记下来，交给「文件切换」那次 effect 在 setContent 之后
+       *     同帧落位（见 pendingLineJumpRef 的说明）。这里**不能**先跳：此刻
+       *     编辑器里还是上一份文档。
+       */
+      scrollToLine: (line: number, path?: string) => {
         // 源码模式同理：搜索结果跳行也要走 CodeMirror，不然在 SV 下点了没反应
         if (mode === "sv") {
           sourceEditorRef.current?.scrollToLine(line);
           return;
         }
         if (!isEditorAlive(editor)) return;
-        /**
-         * 行号 → PM 位置走 Markdown 偏移映射（实测数据见 pmPosForMarkdownLine）。
-         *
-         * 旧实现是"每个 textblock 算一行 + hardBreak 额外一行"的自建行表，只对
-         * "一个块恰好占一行"的文档成立：空行、多行代码块、frontmatter、表格都会让它
-         * 与文件行号错位。实测一份 1039 行的笔记该表只有 510 条 → 第 1027 行被
-         * `min(1027, 510)` clamp 到文末，正是"高亮对、光标飞走"的原因。
-         */
-        let pos = pmPosForMarkdownLine(editor, value, line);
-        if (pos === null) {
-          // 兜底：仅当映射表不可用（拿不到 serializer 等）时才退回旧的自建行表
-          const lineStarts: number[] = [];
-          editor.state.doc.descendants((node: any, p: number) => {
-            if (!node.isTextblock) return;
-            lineStarts.push(p + 1);
-            let offset = 0;
-            node.content.forEach((child: any) => {
-              if (child.type.name === "hardBreak") lineStarts.push(p + 1 + offset + child.nodeSize);
-              offset += child.nodeSize;
-            });
-          });
-          if (lineStarts.length === 0) return;
-          pos = lineStarts[Math.max(1, Math.min(line, lineStarts.length)) - 1];
+        const target = path ?? currentFilePath ?? "";
+        if (normalizePathKey(target) !== normalizePathKey(currentFilePath ?? "")) {
+          pendingLineJumpRef.current = { line, path: target };
+          return;
         }
-        try {
-          editor.chain().focus().setTextSelection(pos).run();
-        } catch { /* editor 已销毁时忽略 */ }
-
-        requestAnimationFrame(() => {
-          const scrollContainer = containerRef.current?.querySelector('.tiptap-editor');
-          if (!scrollContainer) return;
-
-          const view = getEditorView(editor);
-          const coords = view?.coordsAtPos?.(pos);
-          if (coords) {
-            const containerRect = scrollContainer.getBoundingClientRect();
-            const scrollTop = coords.top - containerRect.top - containerRect.height / 3;
-            scrollContainer.scrollTop += scrollTop;
-          }
-        });
+        applyLineJumpToView(editor, value, line, containerRef.current);
       },
       getCursorOffset: () => {
         if (!editor) return -1;
@@ -2846,53 +2979,57 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         if (!editor || !editor.view?.dom) return null;
         return (editor.view.dom as HTMLElement).cloneNode(true) as HTMLElement;
       },
+      /**
+       * 查找：**一律在 Markdown 原文上匹配**（与 SV 模式同一套语义）。
+       *
+       * IR 只把命中的偏移映射成 PM 坐标来显示；SV 下返回的 from/to 直接就是 Markdown
+       * 偏移（导航/替换交给 CodeMirror）。两边口径因此完全一致 —— 注音的**读音（rt）**
+       * 里出现的字也能被搜到（原文里它只是普通字符串），而展开成字面量后命中范围
+       * 会自动变成字面量内部的精确区间。
+       */
       findMatches: (query: string) => {
-        if (!editor || !query) return [];
-        const results: Array<{ from: number; to: number }> = [];
-        const lowerQuery = query.toLowerCase();
-        // 逐 textblock（段落/标题/代码块等）搜索，而不是用 doc.textContent：
-        // textContent 不带块间分隔符，索引无法映射回 PM 位置（每跨一个块漂移 2），
-        // 且相邻块首尾拼接会产生跨段误匹配。
-        // 行内原子节点（图片/行内公式/硬换行）用 \uFFFC 占位（PM 尺寸恰为 1），
-        // 保证块内字符串索引与 PM 位置一一对应。
-        editor.state.doc.descendants((node: any, pos: number) => {
-          if (!node.isTextblock) return;
-          const text: string = node.textBetween(0, node.content.size, "", "\uFFFC");
-          const lowerText = text.toLowerCase();
-          let startIndex = 0;
-          while (startIndex <= lowerText.length - lowerQuery.length) {
-            const idx = lowerText.indexOf(lowerQuery, startIndex);
-            if (idx === -1) break;
-            results.push({ from: pos + 1 + idx, to: pos + 1 + idx + query.length });
-            startIndex = idx + 1;
+        if (!query) return [];
+        const md = currentMarkdownSource();
+        const raw = findMarkdownMatches(md, query);
+        if (mode === "sv") {
+          return raw.map((m) => ({ from: m.mdFrom, to: m.mdTo, mdFrom: m.mdFrom, mdTo: m.mdTo }));
+        }
+        if (!isEditorAlive(editor)) return [];
+        const map = getCachedPositionMap(editor);
+        if (map.markers.length === 0) return [];
+        const doc = editor.state.doc;
+        const size = doc.content.size;
+        const out: Array<{ from: number; to: number; mdFrom: number; mdTo: number }> = [];
+        for (const m of raw) {
+          let from = mdOffsetToPmPos(map, m.mdFrom);
+          let to = mdOffsetToPmPos(map, m.mdTo);
+          if (to <= from) {
+            // 命中落在行内原子节点（注音等）的字面量内部：PM 没有更细坐标 → 整块高亮该节点
+            const leaf = inlineLeafRangeAt(doc, from, size);
+            if (!leaf) continue;
+            from = leaf.from;
+            to = leaf.to;
           }
-        });
-        /**
-         * 注音节点单独扫一遍。
-         *
-         * 上面那套用 textBetween(..., "\uFFFC") 把**所有行内原子节点**替换成占位符
-         *（为了保持块内索引与 PM 位置一一对应），而这个第 4 参数会**覆盖**节点自身的
-         * leafText —— 所以注音的本体在这套投影里根本不存在（"有两个一行却只算了一个"）。
-         * 这里按 attrs.base 命中补一条，范围取整个节点（导航时会选中它）。
-         * 不会重复计数：注音在上面的投影里只是占位符，不可能被匹配到。
-         */
-        editor.state.doc.descendants((node: any, pos: number) => {
-          if (node.type.name !== "ruby") return;
-          const base = String(node.attrs.base ?? "");
-          if (!base || !base.toLowerCase().includes(lowerQuery)) return;
-          results.push({ from: pos, to: pos + node.nodeSize });
-        });
-        results.sort((a, b) => a.from - b.from);
-        return results;
+          out.push({ from, to, mdFrom: m.mdFrom, mdTo: m.mdTo });
+        }
+        return out;
       },
       selectMatch: (from: number, to: number) => {
+        if (mode === "sv") {
+          // SV：from/to 就是 Markdown 偏移
+          sourceEditorRef.current?.setSelectionAndFocus(from, to);
+          return;
+        }
         if (!editor) return;
         // 查找结果缓存的位置可能因文档变化（输入/外部更新/切换文件）而失效，
         // 越界时忽略本次操作，避免 ProseMirror "Position X out of range" 崩溃
         const range = sanitizeSelectionRange(editor, from, to);
         if (!range) return;
+        // 整块行内叶子节点（注音读音命中）→ 折叠光标，让注音自己展开；否则照旧选中范围
+        const leafStart = leafRangeStart(editor, range.from, range.to);
         try {
-          editor.chain().setTextSelection(range).run();
+          if (leafStart !== null) editor.chain().setTextSelection(leafStart).run();
+          else editor.chain().setTextSelection(range).run();
         } catch { /* 文档状态竞争时兜底，忽略 */ }
         requestAnimationFrame(() => {
           const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
@@ -2907,11 +3044,18 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         });
       },
       selectAndScroll: (from: number, to: number) => {
+        if (mode === "sv") {
+          sourceEditorRef.current?.setSelectionAndFocus(from, to);
+          return;
+        }
         if (!editor) return;
         const range = sanitizeSelectionRange(editor, from, to);
         if (!range) return;
+        // 同上：整块行内叶子节点用折叠光标（让它展开），其余照旧选中范围
+        const leafStart = leafRangeStart(editor, range.from, range.to);
         try {
-          editor.chain().focus().setTextSelection(range).run();
+          if (leafStart !== null) editor.chain().focus().setTextSelection(leafStart).run();
+          else editor.chain().focus().setTextSelection(range).run();
         } catch { /* 文档状态竞争时兜底，忽略 */ }
         requestAnimationFrame(() => {
           const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
@@ -2925,13 +3069,47 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           }
         });
       },
-      replaceAt: (from: number, to: number, replacement: string) => {
-        if (!editor) return;
-        const range = sanitizeSelectionRange(editor, from, to);
-        if (!range) return;
+      /**
+       * 替换：同样落在 **Markdown 原文**上（SV 语义）—— 在原文里做字符串替换，
+       * 再把新的原文写回编辑器，IR 只负责重新渲染。
+       *
+       * `items` 用**原文偏移**（mdFrom/mdTo），不是 PM 位置：命中落在注音字面量内部时，
+       * PM 侧只能整块高亮节点，但替换必须只动命中那几个字（否则会把整个
+       * `{{Ruby|漢字|かんじ}}` 换掉）。
+       */
+      replaceMatches: (items: Array<{ mdFrom: number; mdTo: number }>, replacement: string) => {
+        if (!items.length) return;
+        const md = currentMarkdownSource();
+        const sorted = [...items].sort((a, b) => a.mdFrom - b.mdFrom);
+        const next = applyMarkdownReplacements(md, sorted, replacement);
+        if (next === md) return;
+        const caretMd = caretOffsetAfterReplace(sorted, sorted.length - 1, replacement);
+        if (mode === "sv") {
+          const cm = sourceEditorRef.current;
+          if (!cm) return;
+          cm.setValue(next);
+          cm.setSelectionAndFocus(caretMd, caretMd);
+          return;
+        }
+        if (!isEditorAlive(editor)) return;
+        /**
+         * IR：把替换后的原文写回编辑器。
+         * **不**置 isInternalRef —— 这是真实的内容改动，必须让 onUpdate → onChange 走通，
+         * App 才会更新 buffer、标记已修改并触发存盘。
+         */
         try {
-          editor.chain().focus().setTextSelection(range).insertContent(replacement).run();
-        } catch { /* 文档状态竞争时兜底，忽略 */ }
+          editor.commands.setContent(next);
+        } catch {
+          return;
+        }
+        const fresh = getCachedPositionMap(editor);
+        if (fresh.markers.length > 0) {
+          const docSize = editor.state.doc.content.size;
+          const pos = Math.max(1, Math.min(mdOffsetToPmPos(fresh, caretMd), docSize));
+          try {
+            editor.chain().focus().setTextSelection(pos).run();
+          } catch { /* 竞态忽略 */ }
+        }
       },
     }));
 
@@ -3152,6 +3330,30 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           // 丢弃上一个文件的撤销历史：否则切文件后按 Ctrl+Z 会把旧文件内容撤回来。
           // 必须放在 setContent 之后 —— 换文档那次事务本身也不能留在栈里。
           dropUndoHistory(editor);
+          /**
+           * 有「搜索跳行」待办时：就在**这一次 effect 里**直接落到目标行。
+           *
+           * 为什么必须在这一步做：上面刚 setContent 完，浏览器还没机会绘制 ——
+           * 在这里把选区与滚动一起定到目标位置，屏幕上只会出现一次「新文档 + 正确位置」。
+           * 若交给下面那个「恢复上次位置」的 effect（或 App 那边的定时器），中间必然
+           * 先渲染一次新文档的默认位置（顶部 / 上次光标），就是用户看到的
+           * 「先跳到错位置、再跳到对的位置」。
+           *
+           * 同时标记该文件位置已恢复并解除存档写保护：否则下面那个 effect 随后会
+           * 把视口拉回存档位置，把刚跳好的位置又冲掉。
+           */
+          const jump = pendingLineJumpRef.current;
+          if (jump) {
+            // 无论匹配与否都清掉：过期的跳转请求不该留到下一次换文件时误用
+            pendingLineJumpRef.current = null;
+            if (normalizePathKey(jump.path) === normalizePathKey(currentFilePath ?? "")) {
+              // 必须存**原样**的 currentFilePath：恢复 effect 用 `===` 比对它
+              restoredPathRef.current = currentFilePath ?? null;
+              pendingRestorePathRef.current = null;
+              pendingRestoreSnapshotRef.current = null;
+              applyLineJumpToView(editor, value, jump.line, containerRef.current);
+            }
+          }
           // 位置的恢复不在这里做：见下面「打开文件时恢复上次位置」那个 effect。
           // 刷新时编辑器是**重新挂载**的（实例一出生 currentFilePath 就已经是目标文件，
           // 根本不会有「文件切换」），挂在 fileChanged 分支里会一次都不执行。
