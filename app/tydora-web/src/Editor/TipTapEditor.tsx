@@ -283,6 +283,45 @@ function scrollEditorToHeading(
 }
 
 /**
+ * Markdown 行号 → ProseMirror 位置（IR 模式下搜索跳转用）。
+ *
+ * 侧栏搜索给的是**文件真实行号**（`content.split("\n")` 的下标 + 1），而 IR 文档里
+ * 根本没有"空行"这种节点，两者并不同构。旧实现是"每个 textblock 算一行 + hardBreak
+ * 额外一行"的自建行表，只对"一个块恰好占一行"的文档成立：空行、多行代码块、
+ * frontmatter、表格都会让它与文件行号错位。
+ *
+ * 实测（一份 1039 行、内容行与空行相间的日语笔记）：
+ *   - 旧自建行表只有 510 条 → `min(1027, 510)` 把第 1027 行 clamp 到**文末**；
+ *   - 逐行核对：旧行表 510 行里只有 2 行落对；
+ *   - 走本函数（行号 → Markdown 偏移 → markdown-position-map）：**510/510 全对**
+ *     （该文件序列化结果与磁盘文件逐字符一致，11811 字符零分歧）。
+ *
+ * 所以先"行号 → Markdown 字符偏移"（用编辑器里的 Markdown 原文，即磁盘文件内容），
+ * 再交给 `mdOffsetToPmPos` 换算。
+ *
+ * @returns 换算成功返回 PM 位置；行号非法或映射表不可用时返回 null（调用方自行兜底）。
+ */
+function pmPosForMarkdownLine(
+  editor: Editor,
+  markdown: string,
+  line: number,
+): number | null {
+  if (!isEditorAlive(editor)) return null;
+  if (!Number.isFinite(line) || line < 1) return null;
+  // Markdown 原文为空（拿不到行结构）时交给调用方兜底，别把光标扔到文首
+  if (!markdown) return null;
+  const lines = String(markdown).split("\n");
+  if (lines.length === 0) return null;
+  // 越界时夹到末行：文件刚被外部改动导致行号过期时，跳到末尾比什么都不做更有用
+  const target = Math.min(Math.floor(line), lines.length);
+  let offset = 0;
+  for (let i = 0; i < target - 1; i++) offset += lines[i].length + 1;
+  const map = buildPositionMap(editor);
+  if (map.markers.length === 0) return null;
+  return mdOffsetToPmPos(map, offset);
+}
+
+/**
  * 源码模式（CodeMirror）下的标题定位。
  *
  * 优先用行号：大纲面板点标题给的就是 Markdown 行号。
@@ -2756,25 +2795,30 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           return;
         }
         if (!isEditorAlive(editor)) return;
-        const { doc } = editor.state;
-        // doc.textContent 不带换行（块间无分隔符），split("\n") 永远只有 1 行，
-        // 旧实现任何 line>1 都会跳到文末。这里按「每个 textblock 一行 +
-        // hardBreak 额外换行」建立 行号 → PM 位置 表。
-        const lineStarts: number[] = [];
-        doc.descendants((node: any, pos: number) => {
-          if (!node.isTextblock) return;
-          lineStarts.push(pos + 1);
-          let offset = 0;
-          node.content.forEach((child: any) => {
-            if (child.type.name === "hardBreak") {
-              lineStarts.push(pos + 1 + offset + child.nodeSize);
-            }
-            offset += child.nodeSize;
+        /**
+         * 行号 → PM 位置走 Markdown 偏移映射（实测数据见 pmPosForMarkdownLine）。
+         *
+         * 旧实现是"每个 textblock 算一行 + hardBreak 额外一行"的自建行表，只对
+         * "一个块恰好占一行"的文档成立：空行、多行代码块、frontmatter、表格都会让它
+         * 与文件行号错位。实测一份 1039 行的笔记该表只有 510 条 → 第 1027 行被
+         * `min(1027, 510)` clamp 到文末，正是"高亮对、光标飞走"的原因。
+         */
+        let pos = pmPosForMarkdownLine(editor, value, line);
+        if (pos === null) {
+          // 兜底：仅当映射表不可用（拿不到 serializer 等）时才退回旧的自建行表
+          const lineStarts: number[] = [];
+          editor.state.doc.descendants((node: any, p: number) => {
+            if (!node.isTextblock) return;
+            lineStarts.push(p + 1);
+            let offset = 0;
+            node.content.forEach((child: any) => {
+              if (child.type.name === "hardBreak") lineStarts.push(p + 1 + offset + child.nodeSize);
+              offset += child.nodeSize;
+            });
           });
-        });
-        if (lineStarts.length === 0) return;
-        const clampedLine = Math.max(1, Math.min(line, lineStarts.length));
-        const pos = lineStarts[clampedLine - 1];
+          if (lineStarts.length === 0) return;
+          pos = lineStarts[Math.max(1, Math.min(line, lineStarts.length)) - 1];
+        }
         try {
           editor.chain().focus().setTextSelection(pos).run();
         } catch { /* editor 已销毁时忽略 */ }
