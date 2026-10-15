@@ -59,6 +59,7 @@ import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFl
 import { deleteCurrentLine, executeCommand } from "./extensions/custom-commands";
 import { normalizePathKey } from "../utils/fileName";
 import { Math as MathExtension } from "./extensions/math";
+import { installImageWordMarkRule } from "./extensions/markdown-setup";
 import { saveImageToLocal, loadImageSettings, resolveRelativePath, dirName, ImageSaveCancelledError, IMAGE_SETTINGS_KEY, readImageAsBlobUrl } from "../services";
 import { loadFileViewPosition, saveFileViewPosition, clearFileViewPosition, type FileViewPosition } from "../services/editorViewPosition";
 import { LinkIndexService } from "../wikilink";
@@ -1032,6 +1033,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
                 parse: {
                   // 解析 `![alt|300](src)` 中的宽度（Obsidian 风格）
                   setup(md: any) {
+                    // 词边界标记：让紧贴图片的 mark 分隔符（`**![…](…)**`）也能开 / 能闭。
+                    // 幂等，放在守卫之前，保证每次 setup 都确保已安装。见 markdown-setup.ts。
+                    installImageWordMarkRule(md);
                     if ((md as any).__tydoraImageWidthPatched) return;
                     (md as any).__tydoraImageWidthPatched = true;
                     const esc = (v: string) =>

@@ -25,9 +25,30 @@ const PLAIN_TEXT_BLOCK_NODES = new Set(["codeBlock", "code_block", "frontmatter"
  * 与 SV（源码）之间建立双向的光标位置映射。
  *
  * 说明：与 editor.storage.markdown.serializer 使用的序列化器保持一致，
- * 唯一差异是 tiptap-markdown 针对 expelEnclosingWhitespace 标记（行内代码、
- * 删除线等）做的空白修剪未在此复刻，因此这类标记附近（仅当分隔符两侧存在
- * 空白时）的映射可能有 1~2 个字符的偏差。
+ * 唯一差异是 tiptap-markdown 针对 expelEnclosingWhitespace 标记（加粗、斜体、
+ * 行内代码、删除线等）做的空白修剪未在此复刻，因此这类标记附近（分隔符两侧
+ * 存在空白时）的映射可能相差数个字符（实测 `あ **bold tail** はい世界` 中标记
+ * 内文本相差 1~3）。
+ *
+ * 关于注音节点 `ruby`（`{{Ruby|base|rt}}`）：它是行内叶子节点，PM 侧只占
+ * nodeSize = 1，而 Markdown 侧占 base.length + rt.length + 10（`{{Ruby|` 7 个
+ * 字符 + `|` 1 个 + `}}` 2 个）。两侧长度不等，但这里**不需要、也不能加“注音
+ * 修正项”**：marker 的 md 一律取自本次序列化真实的 out.length，这个差值本来
+ * 就已经落在注音前后两个 marker 之间，因此 md↔PM 两个方向在节点边界上都是
+ * 精确的（实测：注音位于段首 / 段中 / 段尾、前后带空格、标题内、列表项内，
+ * 含多个注音时往返误差均为 0）。若在此再叠加一次
+ * `base.length + rt.length + 9` 的“修正”，等于把同一个差值算两遍。
+ * 字面量**内部**的 md 偏移会被就近吸附到注音的右边界（p + 1）——这是叶子节点
+ * 固有的粒度（PM 在节点内部没有可落位的坐标），不是误差。
+ *
+ * 关于 mark（加粗 / 斜体 / 删除线）紧贴注音的旧偏差 —— **已修**：tiptap-markdown 的
+ * trimInline 曾按 markdown-it 的 flanking 规则把分隔符挪进字面量内部
+ *（`前<strong>{{Ruby|際|きわ}}</strong>後の世界` 序列化成 `前{**{Ruby|際|きわ}**}後の世界`），
+ * 既毁掉磁盘文件里的注音，也让本映射（复刻的是**修剪前**的输出）与文件差 1 个字符。
+ * 现在 patches/tiptap-markdown+0.9.0.patch 给 trimInline 加了守卫：分隔符不许停进行内
+ * 原子节点（注音 / 图片 / 公式）的输出内部，所以这类标记的分隔符不再移动，本映射与
+ * 序列化结果在这里已经一致（实测 `前**{{Ruby|際|きわ}}**後の世界` 两个方向误差 0）。
+ * 仍不复刻的只有 expelEnclosingWhitespace 的空白修剪（见上）。
  */
 class TrackingMarkdownSerializerState extends MarkdownSerializerState {
   constructor(

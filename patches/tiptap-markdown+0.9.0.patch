@@ -1,8 +1,121 @@
 diff --git a/node_modules/tiptap-markdown/dist/tiptap-markdown.es.js b/node_modules/tiptap-markdown/dist/tiptap-markdown.es.js
-index da5639e..0e34e29 100644
+index da5639e..a23a359 100644
 --- a/node_modules/tiptap-markdown/dist/tiptap-markdown.es.js
 +++ b/node_modules/tiptap-markdown/dist/tiptap-markdown.es.js
-@@ -528,7 +528,14 @@ const Table$1 = Table.extend({
+@@ -71,9 +71,37 @@ function shiftDelim(text, delim, start, offset) {
+   res = res.substring(0, start + offset) + delim + res.substring(start + offset);
+   return res;
+ }
+-function trimStart(text, delim, from, to) {
++/**
++ * [Tydora patch] 行内非文本叶子节点（注音 `{{Ruby|…}}`、图片 `![…](…)`、公式……）
++ * 在输出串里占据的区间。分隔符可以停在它**外面**，但不许停进它的字面量内部。
++ *
++ * 为什么必须拦：trimInline 按 markdown-it 的 flanking 规则挪分隔符，而它只看输出串
++ * 的字符 —— `{` `}`（Unicode Ps/Pe）、`!` `)`（ASCII 标点）全都算标点，于是紧贴行内
++ * 原子节点的分隔符会被挪进字面量里：
++ *   `前**{{Ruby|際|きわ}}**後の世界` → `前{**{Ruby|際|きわ}**}後の世界`
++ * 字面量被拦腰切断，重新解析时就不再是注音节点 —— 一次「打开-保存」永久丢内容。
++ *
++ * 判定只用「被跨过的那个字符」的下标：shiftDelim 只把分隔符整体搬家、不改变其余
++ * 字符的相对顺序，所以扫描过程中每个被跨过的字符在原串里的下标是确定的
++ * （trimStart 为 pos + delim.length，trimEnd 为 pos - 1）。
++ *
++ * 只写出空白的节点（Tydora 的 hardBreak = `"  \n"`）**不**计入：把分隔符挪过空白
++ * 正是修剪的本意（`**a  \n**` 无法闭合，必须挪成 `**a**  \n`）。
++ */
++function crossesAtom(atoms, index) {
++  if (!atoms) return false;
++  for (let i = 0; i < atoms.length; i++) {
++    const a = atoms[i];
++    if (index >= a.from && index < a.to) return true;
++  }
++  return false;
++}
++function trimStart(text, delim, from, to, atoms) {
+   let pos = from, res = text;
+   while (pos < to) {
++    if (crossesAtom(atoms, pos + delim.length)) {
++      break;
++    }
+     if (scanDelims(res, pos).can_open) {
+       break;
+     }
+@@ -86,9 +114,12 @@ function trimStart(text, delim, from, to) {
+     to
+   };
+ }
+-function trimEnd(text, delim, from, to) {
++function trimEnd(text, delim, from, to, atoms) {
+   let pos = to, res = text;
+   while (pos > from) {
++    if (crossesAtom(atoms, pos - 1)) {
++      break;
++    }
+     if (scanDelims(res, pos).can_close) {
+       break;
+     }
+@@ -101,14 +132,14 @@ function trimEnd(text, delim, from, to) {
+     to: pos
+   };
+ }
+-function trimInline(text, delim, from, to) {
++function trimInline(text, delim, from, to, atoms) {
+   let state = {
+     text,
+     from,
+     to
+   };
+-  state = trimStart(state.text, delim, state.from, state.to);
+-  state = trimEnd(state.text, delim, state.from, state.to);
++  state = trimStart(state.text, delim, state.from, state.to, atoms);
++  state = trimEnd(state.text, delim, state.from, state.to, atoms);
+   if (state.to - state.from < delim.length + 1) {
+     state.text = state.text.substring(0, state.from) + state.text.substring(state.to + delim.length);
+   }
+@@ -119,9 +150,19 @@ class MarkdownSerializerState extends MarkdownSerializerState$1 {
+     super(nodes, marks, options !== null && options !== void 0 ? options : {});
+     __publicField(this, "inTable", false);
+     this.inlines = [];
++    // [Tydora patch] 行内原子节点的输出区间（见 crossesAtom）
++    this.atoms = [];
+   }
+   render(node, parent, index) {
++    const atomFrom = node.isInline && !node.isText && node.isLeaf ? this.out.length : -1;
+     super.render(node, parent, index);
++    // 只记「写出了非空白内容」的行内叶子节点：写空白的（尾随 hardBreak）不需要保护
++    if (atomFrom >= 0 && this.out.slice(atomFrom).trim().length > 0) {
++      this.atoms.push({
++        from: atomFrom,
++        to: this.out.length
++      });
++    }
+     const top = this.inlines[this.inlines.length - 1];
+     if (top !== null && top !== void 0 && top.start && top !== null && top !== void 0 && top.end) {
+       const {
+@@ -129,7 +170,20 @@ class MarkdownSerializerState extends MarkdownSerializerState$1 {
+         start,
+         end
+       } = this.normalizeInline(top);
+-      this.out = trimInline(this.out, delimiter, start, end);
++      const atoms = this.atoms.filter((a) => a.to > start && a.from < end);
++      const lenBefore = this.out.length;
++      this.out = trimInline(this.out, delimiter, start, end, atoms);
++      const removed = lenBefore - this.out.length;
++      if (removed > 0) {
++        // trimInline 判空标记时会把 `****` 整体删掉，其后的区间要同步左移
++        const cut = end + delimiter.length;
++        this.atoms.forEach((a) => {
++          if (a.from >= cut) {
++            a.from -= removed;
++            a.to -= removed;
++          }
++        });
++      }
+       this.inlines.pop();
+     }
+   }
+@@ -528,7 +582,14 @@ const Table$1 = Table.extend({
              if (!i) {
                const delimiterRow = Array.from({
                  length: row.childCount
@@ -19,10 +132,123 @@ index da5639e..0e34e29 100644
                state.ensureNewLine();
              }
 diff --git a/node_modules/tiptap-markdown/dist/tiptap-markdown.umd.js b/node_modules/tiptap-markdown/dist/tiptap-markdown.umd.js
-index b682117..1d477f7 100644
+index b682117..0a40cbc 100644
 --- a/node_modules/tiptap-markdown/dist/tiptap-markdown.umd.js
 +++ b/node_modules/tiptap-markdown/dist/tiptap-markdown.umd.js
-@@ -526,7 +526,14 @@ ${element.innerHTML}
+@@ -69,9 +69,37 @@ var __publicField = (obj, key, value) => {
+     res = res.substring(0, start + offset) + delim + res.substring(start + offset);
+     return res;
+   }
+-  function trimStart(text, delim, from, to) {
++  /**
++   * [Tydora patch] 行内非文本叶子节点（注音 `{{Ruby|…}}`、图片 `![…](…)`、公式……）
++   * 在输出串里占据的区间。分隔符可以停在它**外面**，但不许停进它的字面量内部。
++   *
++   * 为什么必须拦：trimInline 按 markdown-it 的 flanking 规则挪分隔符，而它只看输出串
++   * 的字符 —— `{` `}`（Unicode Ps/Pe）、`!` `)`（ASCII 标点）全都算标点，于是紧贴行内
++   * 原子节点的分隔符会被挪进字面量里：
++   *   `前**{{Ruby|際|きわ}}**後の世界` → `前{**{Ruby|際|きわ}**}後の世界`
++   * 字面量被拦腰切断，重新解析时就不再是注音节点 —— 一次「打开-保存」永久丢内容。
++   *
++   * 判定只用「被跨过的那个字符」的下标：shiftDelim 只把分隔符整体搬家、不改变其余
++   * 字符的相对顺序，所以扫描过程中每个被跨过的字符在原串里的下标是确定的
++   * （trimStart 为 pos + delim.length，trimEnd 为 pos - 1）。
++   *
++   * 只写出空白的节点（Tydora 的 hardBreak = `"  \n"`）**不**计入：把分隔符挪过空白
++   * 正是修剪的本意（`**a  \n**` 无法闭合，必须挪成 `**a**  \n`）。
++   */
++  function crossesAtom(atoms, index) {
++    if (!atoms) return false;
++    for (let i = 0; i < atoms.length; i++) {
++      const a = atoms[i];
++      if (index >= a.from && index < a.to) return true;
++    }
++    return false;
++  }
++  function trimStart(text, delim, from, to, atoms) {
+     let pos = from, res = text;
+     while (pos < to) {
++      if (crossesAtom(atoms, pos + delim.length)) {
++        break;
++      }
+       if (scanDelims(res, pos).can_open) {
+         break;
+       }
+@@ -84,9 +112,12 @@ var __publicField = (obj, key, value) => {
+       to
+     };
+   }
+-  function trimEnd(text, delim, from, to) {
++  function trimEnd(text, delim, from, to, atoms) {
+     let pos = to, res = text;
+     while (pos > from) {
++      if (crossesAtom(atoms, pos - 1)) {
++        break;
++      }
+       if (scanDelims(res, pos).can_close) {
+         break;
+       }
+@@ -99,14 +130,14 @@ var __publicField = (obj, key, value) => {
+       to: pos
+     };
+   }
+-  function trimInline(text, delim, from, to) {
++  function trimInline(text, delim, from, to, atoms) {
+     let state2 = {
+       text,
+       from,
+       to
+     };
+-    state2 = trimStart(state2.text, delim, state2.from, state2.to);
+-    state2 = trimEnd(state2.text, delim, state2.from, state2.to);
++    state2 = trimStart(state2.text, delim, state2.from, state2.to, atoms);
++    state2 = trimEnd(state2.text, delim, state2.from, state2.to, atoms);
+     if (state2.to - state2.from < delim.length + 1) {
+       state2.text = state2.text.substring(0, state2.from) + state2.text.substring(state2.to + delim.length);
+     }
+@@ -117,9 +148,19 @@ var __publicField = (obj, key, value) => {
+       super(nodes, marks, options !== null && options !== void 0 ? options : {});
+       __publicField(this, "inTable", false);
+       this.inlines = [];
++      // [Tydora patch] 行内原子节点的输出区间（见 crossesAtom）
++      this.atoms = [];
+     }
+     render(node, parent, index) {
++      const atomFrom = node.isInline && !node.isText && node.isLeaf ? this.out.length : -1;
+       super.render(node, parent, index);
++      // 只记「写出了非空白内容」的行内叶子节点：写空白的（尾随 hardBreak）不需要保护
++      if (atomFrom >= 0 && this.out.slice(atomFrom).trim().length > 0) {
++        this.atoms.push({
++          from: atomFrom,
++          to: this.out.length
++        });
++      }
+       const top = this.inlines[this.inlines.length - 1];
+       if (top !== null && top !== void 0 && top.start && top !== null && top !== void 0 && top.end) {
+         const {
+@@ -127,7 +168,20 @@ var __publicField = (obj, key, value) => {
+           start,
+           end
+         } = this.normalizeInline(top);
+-        this.out = trimInline(this.out, delimiter, start, end);
++        const atoms = this.atoms.filter((a) => a.to > start && a.from < end);
++        const lenBefore = this.out.length;
++        this.out = trimInline(this.out, delimiter, start, end, atoms);
++        const removed = lenBefore - this.out.length;
++        if (removed > 0) {
++          // trimInline 判空标记时会把 `****` 整体删掉，其后的区间要同步左移
++          const cut = end + delimiter.length;
++          this.atoms.forEach((a) => {
++            if (a.from >= cut) {
++              a.from -= removed;
++              a.to -= removed;
++            }
++          });
++        }
+         this.inlines.pop();
+       }
+     }
+@@ -526,7 +580,14 @@ ${element.innerHTML}
                if (!i) {
                  const delimiterRow = Array.from({
                    length: row.childCount

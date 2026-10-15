@@ -23,7 +23,12 @@
 
 import { InputRule, Node } from "@tiptap/core";
 import { Plugin, TextSelection } from "prosemirror-state";
-import { installMarkdownRuleOnce } from "./markdown-setup";
+import {
+  installMarkdownRuleOnce,
+  installWordMarkCleanup,
+  WORD_MARK_END,
+  WORD_MARK_START,
+} from "./markdown-setup";
 
 /** 转义 HTML 文本/属性里的特殊字符 */
 function esc(s: string): string {  return s
@@ -399,6 +404,8 @@ export const Ruby = Node.create({
         parse: {
           setup(markdownit: any) {
             if (!installMarkdownRuleOnce(markdownit, "md_ruby")) return;
+            // 解析期词边界标记的清理（见 markdown-setup.ts）。与图片扩展共用同一条规则。
+            installWordMarkCleanup(markdownit);
             /**
              * 通用表格保护：**必须在 `table` 规则之前**跑。
              *
@@ -446,7 +453,8 @@ export const Ruby = Node.create({
                     // 输出与 renderHTML 一致的**单元素 + data-rt** 结构：
                     // 不要产出 <ruby>+<rt> 的嵌套结构，那样会让叶子节点里出现多个子元素，
                     // 导致 ProseMirror 的选区边界解析不稳定（拖选闪烁、无法以它为边界）。
-                    return `<span class="md-ruby" data-rt="${esc(rt)}">${esc(base)}</span>`;
+                    // 两端的 U+E000 / U+E001 是"词边界"标记，见 markdown-setup.ts。
+                    return `${WORD_MARK_START}<span class="md-ruby" data-rt="${esc(rt)}">${esc(base)}</span>${WORD_MARK_END}`;
                   },
                 );
               });
