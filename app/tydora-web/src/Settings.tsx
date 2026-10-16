@@ -44,6 +44,7 @@ import {
   normalizeMenuDensity,
   type MenuDensity,
 } from "./utils/menuDensity";
+import { applyHideScrollbars } from "./utils/hideScrollbars";
 import { applyUiScaleFromSettings, resolveUiScale } from "./utils/uiScale";
 import shortcutsConfig from "./config/shortcuts.json";
 import { formatShortcutKey, matchShortcut, loadShortcuts, getShortcutKeys, resolveSavedKeys } from "./Editor/shortcuts";
@@ -124,6 +125,7 @@ interface GeneralSettings {
   autoHideTopbarOnCollapse: boolean;
   previewMaxWidth: number;
   typewriterMode: boolean;
+  hideScrollbars: boolean;
   lineHeight: number;
   /** 段落上下外边距（em） */
   paragraphSpacing: number;
@@ -163,6 +165,7 @@ export const DEFAULT_GENERAL: GeneralSettings = {
   autoHideTopbarOnCollapse: true,
   previewMaxWidth: 800,
   typewriterMode: false,
+  hideScrollbars: true,
   lineHeight: 1.6,
   paragraphSpacing: 0.5,
   codeLineHeight: 1.5,
@@ -428,6 +431,19 @@ function EditorSettingsContent({
               type="checkbox"
               checked={settings.typewriterMode}
               onChange={(e) => onChange({ ...settings, typewriterMode: e.target.checked })}
+            />
+            <span className="settings-switch-slider" />
+          </label>
+        </div>        <div className="canvas-settings-row">
+          <div className="canvas-settings-row-label">
+            <span className="canvas-settings-row-title">{t("settings.appearance.hideScrollbars")}</span>
+            <span className="canvas-settings-row-desc">{t("settings.appearance.hideScrollbarsDesc")}</span>
+          </div>
+          <label className="settings-switch">
+            <input
+              type="checkbox"
+              checked={settings.hideScrollbars}
+              onChange={(e) => onChange({ ...settings, hideScrollbars: e.target.checked })}
             />
             <span className="settings-switch-slider" />
           </label>
@@ -3052,6 +3068,7 @@ export default function Settings({ onClose }: { onClose?: () => void }) {
   useEffect(() => {
     localStorage.setItem(GENERAL_SETTINGS_KEY, JSON.stringify(generalSettings));
     applyMenuDensity(generalSettings.menuDensity);
+    applyHideScrollbars(generalSettings.hideScrollbars);
     applyEditorSpacingFromSettings(generalSettings);
     applyUiScaleFromSettings(generalSettings);
   }, [generalSettings]);

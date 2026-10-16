@@ -23,6 +23,16 @@ export interface EditorHandle {
    */
   scrollToLine: (line: number, path?: string) => void;
   getCursorOffset: () => number;
+  /** 把光标落到指定 Markdown 偏移（文档级撤销后恢复「编辑前的位置」用） */
+  setCaretAtMarkdownOffset(mdOffset: number): void;
+  /** 按内容字符串还原光标（撤销后优先用它；返回 false 表示无记录） */
+  setCaretForMarkdown(md: string): boolean;
+  /** 撤销/重做期间禁止写光标缓存（避免覆盖「编辑前的位置」） */
+  suppressCaretCache(on: boolean): void;
+  /** 最近一次内容变化之前的光标（App 立快照帧时取用） */
+  getCaretBeforeLastChange(): { from: number; to: number } | null;
+  /** 直接按 PM 坐标恢复光标（快照帧自带的光标） */
+  setCaretAtPmPosition(pos: { from: number; to: number }): boolean;
   isSourceMode: () => boolean;
   /** 克隆当前渲染内容元素（用于导出）；源码模式下返回 null */
   getContentElement: () => HTMLElement | null;

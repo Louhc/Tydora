@@ -50,6 +50,7 @@ import { loadImageSettings, IMAGE_SETTINGS_KEY, type ImageSettings } from "./ser
 import { loadEditorSettings, type EditorSettings, EDITOR_SETTINGS_KEY, SHORTCUTS_KEY, GRAPH_SETTINGS_KEY, DEFAULT_GRAPH, type SidebarTab, type SidebarSide, type SidebarTabPlacement, sidebarTabsForSide, DEFAULT_GENERAL, TOGGLE_SIDEBAR_EVENT, TOGGLE_RIGHT_SIDEBAR_EVENT } from "./Settings";
 import { applyFontSettings } from "./utils/systemFonts";
 import { applyMenuDensity, applyEditorSpacingFromSettings, normalizeMenuDensity } from "./utils/menuDensity";
+import { applyHideScrollbars, normalizeHideScrollbars } from "./utils/hideScrollbars";
 import { downloadAndInstall, relaunchApp, exitApp, isPortableVersion, type UpdateInfo } from "./services";
 import { LinkIndexService } from "./wikilink";
 import { WikiLinkAutocomplete } from "./wikilink";
@@ -451,7 +452,11 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
      * historyPathRef / contentForHistoryRef 声明在下方，但这里只在调用时读取，无 TDZ 问题。
      */
     const path = historyPathRef.current;
-    if (path) flushDocHistory(path, contentForHistoryRef.current);
+    if (path) {
+      // 切模式前立帧：把这帧的光标一起存上 —— 撤销回到这一帧时光标也能还原 ✓
+      const cur = paneHandlesRef.current[activePaneIdRef.current]?.getCursorOffset?.() ?? -1;
+      flushDocHistory(path, contentForHistoryRef.current, cur >= 0 ? { from: cur, to: cur } : undefined);
+    }
     setPanes((ps) => ps.map((p) => (p.id === activePaneIdRef.current ? { ...p, mode: m } : p)));
   }, []);
   // 合并读取：此前 7 个 useState 各自独立 localStorage.getItem + JSON.parse 同一个 key，
@@ -590,6 +595,7 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         document.documentElement.dataset.codeBlockToolbar =
           settings.codeBlockToolbarStyle === "classic" ? "classic" : "minimal";
         applyMenuDensity(normalizeMenuDensity(settings.menuDensity));
+      applyHideScrollbars(normalizeHideScrollbars(settings.hideScrollbars));
         // 侧栏 tab 分配变更后实时重算左/右栏可见 tab
         const placementSrc = settings.sidebarTabPlacement ?? {};
         const base = { ...DEFAULT_GENERAL.sidebarTabPlacement };
@@ -1651,10 +1657,24 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     if (!path) return; // 未命名的新文件不记录历史
     if (historyPathRef.current !== path) {
       historyPathRef.current = path;
-      initDocHistory(path, content); // 换文件：只重置基线，不产生快照
+      /**
+       * 换文件：只重置基线，不产生快照。
+       *
+       * ⚠️ 基线用**编辑器序列化出的 Markdown**，而不是缓冲区里的原文。
+       * 实测：文件从磁盘加载后，缓冲区原文与编辑器序列化结果会差 1 个字符
+       *（空白/分隔符上的差异）—— 两套空间混用会让「撤销后按内容恢复光标」永远落空 ✗。
+       * 统一到编辑器那份，撤销栈与编辑器的光标缓存才是同一套坐标 ✓。
+       */
+      const editorMd = paneHandlesRef.current[activePaneIdRef.current]?.getValue?.();
+      initDocHistory(path, editorMd || content);
       return;
     }
-    pushDocHistory(path, content); // 同文件内容变化：按合并窗口记录
+    /**
+     * 同文件内容变化：按合并窗口记录，并把「这次变化**之前**的光标」一并存进帧里
+     *（撤销时直接还原，不做按内容反查的匹配 ✓）。
+     */
+    const caretBefore = paneHandlesRef.current[activePaneIdRef.current]?.getCaretBeforeLastChange?.() ?? undefined;
+    pushDocHistory(path, content, caretBefore ?? undefined);
   }, [activeBuffer.fileName, content]);
 
   useEffect(() => {
@@ -1685,12 +1705,67 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
       const path = historyPathRef.current;
       if (!path) return;
       const current = contentForHistoryRef.current;
-      const next = isUndo ? popDocHistory(path, current) : redoDocHistory(path, current);
-      if (next === null) return; // 没有可用历史 → 不消费事件，交给编辑器原生撤销
+      // 当前光标一并交给历史栈：它会被存进"重做帧"，重做时就能回到编辑后的位置 ✓
+      const curFrom = editorHandleRef.current?.getCursorOffset?.() ?? -1;
+      const currentCaret = curFrom >= 0 ? { from: curFrom, to: curFrom } : undefined;
+      const snap = isUndo
+        ? popDocHistory(path, current, currentCaret)
+        : redoDocHistory(path, current, currentCaret);
+      if (snap === null) return; // 没有可用历史 → 不消费事件，交给编辑器原生撤销
+      const next = snap.content;
       e.preventDefault();
       e.stopPropagation();
+      /**
+       * 恢复「编辑前的位置」：文档级快照是**整篇替换**，不会带回光标 ✗。
+       *
+       * 新旧内容的**公共前缀**就是最早那次改动发生的位置（打字 / 粘贴 / 删除都成立）——
+       * 撤销后把光标放回那里（= 编辑前光标所在处 ✓）；重做则放到改动区间的另一端。
+       * 偏移是 Markdown 坐标，交给编辑器换算成 PM 位置（IR）/ 行列（SV）✓。
+       */
+      const older = isUndo ? next : current;
+      const newer = isUndo ? current : next;
+      /**
+       * ⚠️ 必须先算**公共后缀**，再用它夹住公共前缀。
+       *
+       * 只算前缀会「穿过」粘贴内容开头与原文相同的字符（典型：在空行粘贴，插入内容的
+       * 首个换行与空行自身的换行相同）→ 偏移被推到下一行，光标就落到下一行 ✗。
+       * 两边同时算，「改动区间」就不会两端重叠，插入点才是真正的编辑位置 ✓。
+       */
+      let suffix = 0;
+      const maxSuffix = Math.min(older.length, newer.length);
+      while (
+        suffix < maxSuffix &&
+        older[older.length - 1 - suffix] === newer[newer.length - 1 - suffix]
+      ) {
+        suffix++;
+      }
+      let prefix = 0;
+      const maxPrefix = Math.min(older.length, newer.length) - suffix;
+      while (prefix < maxPrefix && older[prefix] === newer[prefix]) prefix++;
+      // 撤销：光标回到改动处（= 编辑前的位置）；重做：落到改动区间末尾
+      const caretOffset = isUndo ? prefix : newer.length - suffix;
+      // 替换期间禁止编辑器写光标缓存：否则替换后的临时光标会覆盖「编辑前的位置」✗
+      editorHandleRef.current?.suppressCaretCache(true);
       setContent(next);
       setModified(true);
+      // 内容经 React 落定后再放光标（编辑器此时已是替换后的文档）
+      requestAnimationFrame(() => {
+        const h = editorHandleRef.current;
+        if (!h) {
+          return;
+        }
+        // ① 首选：快照帧**自带**的光标（结构性正确，不依赖任何内容匹配 ✓）
+        if (snap.caret && h.setCaretAtPmPosition(snap.caret)) {
+
+          h.suppressCaretCache(false);
+          return;
+        }
+        // ② 退回：按内容还原当时记录的光标（老帧没有 caret 字段时）
+        const ok = h.setCaretForMarkdown(next);
+
+        if (!ok) h.setCaretAtMarkdownOffset(caretOffset);
+        h.suppressCaretCache(false);
+      });
     };
     window.addEventListener("keydown", onKeyDown, true); // 捕获阶段：早于编辑器
     return () => window.removeEventListener("keydown", onKeyDown, true);
@@ -4404,6 +4479,14 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
               className="editor-edge-grab left"
               title={t("app.toolbar.collapseSidebar")}
               onMouseDown={startSidebarPull("left")}
+            />
+          )}
+          {/* 右栏的镜像热区：与左栏对称，让「编辑器一侧」也贴着边界就能拖动/收起 */}
+          {rightSidebarOpen && (
+            <div
+              className="editor-edge-grab right"
+              title={t("app.toolbar.collapseSidebar")}
+              onMouseDown={startSidebarPull("right")}
             />
           )}
           {/* 侧栏收起后，在编辑器边缘按下并往外拉 = 拉出来（跟手）；轻按一下 = 展开到记忆宽度 */}

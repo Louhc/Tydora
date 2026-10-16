@@ -33,6 +33,8 @@
       "codeLineHeightDesc": "代码块内文字的行间距。",
       "typewriterMode": "打字机模式",
       "typewriterModeDesc": "始终将光标所在行保持在视口中央。",
+      "hideScrollbars": "隐藏滚动条",
+      "hideScrollbarsDesc": "隐藏所有滚动条（滚轮 / 触控板 / 键盘滚动不受影响）。默认开启。",
       "showLineNumbers": "显示行号",
       "showLineNumbersDesc": "在 IR 模式下编辑器右侧显示行号。",
       "codeBlockToolbarStyle": "代码块工具栏",

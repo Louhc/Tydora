@@ -51,7 +51,9 @@ import {
 import i18n from "../i18n";
 import { TextColor } from "./extensions/text-color";
 import { TydoraHighlight } from "./extensions/highlight-ext";
+import { CaretHistory, caretBeforeChangeKey } from "./extensions/caret-history";
 import { TemplateError, TemplateErrorExpand } from "./extensions/template-error";
+
 import { HeadingHighlight } from "./extensions/heading-highlight";
 import { CodeBlockToolbar } from "./extensions/code-block-toolbar";
 import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
@@ -61,7 +63,7 @@ import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFl
 import { deleteCurrentLine, executeCommand } from "./extensions/custom-commands";
 import { normalizePathKey } from "../utils/fileName";
 import { Math as MathExtension } from "./extensions/math";
-import { installImageWordMarkRule } from "./extensions/markdown-setup";
+import { installImageWordMarkRule, installEmptyParagraphRule } from "./extensions/markdown-setup";
 import { saveImageToLocal, loadImageSettings, resolveRelativePath, dirName, ImageSaveCancelledError, IMAGE_SETTINGS_KEY, readImageAsBlobUrl } from "../services";
 import { loadFileViewPosition, saveFileViewPosition, clearFileViewPosition, type FileViewPosition } from "../services/editorViewPosition";
 import { LinkIndexService } from "../wikilink";
@@ -334,14 +336,24 @@ function pmPosForMarkdownLine(
   if (!Number.isFinite(line) || line < 1) return null;
   // Markdown 原文为空（拿不到行结构）时交给调用方兜底，别把光标扔到文首
   if (!markdown) return null;
-  const lines = String(markdown).split("\n");
+  const map = buildPositionMap(editor);
+  if (map.markers.length === 0) return null;
+  /**
+   * ⚠️ 行号 → 偏移必须在**映射表自己那份 markdown**（`map.markdown`，编辑器重新序列化的结果）
+   * 上计算，不能直接用调用方传进来的 `markdown`（那通常是**磁盘原文**）。
+   *
+   * 实测：整篇用旧形态文字颜色的文件（`<span data-color="#e8590c" style="color: rgb(…);">文字</span>`，
+   * 44 处）会被编辑器序列化成短得多的 `{{Color|orange|文字}}` —— 到第 39 行时两套空间的
+   * 字符偏移已相差几百个字符 ✗。混用就会「搜索能搜到、跳转跳错地方」。
+   * 行结构（第几行）两者一致（这些 HTML 都是行内的，不改变行数），所以只需换偏移空间 ✓。
+   */
+  const source = map.markdown || markdown;
+  const lines = String(source).split("\n");
   if (lines.length === 0) return null;
   // 越界时夹到末行：文件刚被外部改动导致行号过期时，跳到末尾比什么都不做更有用
   const target = Math.min(Math.floor(line), lines.length);
   let offset = 0;
   for (let i = 0; i < target - 1; i++) offset += lines[i].length + 1;
-  const map = buildPositionMap(editor);
-  if (map.markers.length === 0) return null;
   return mdOffsetToPmPos(map, offset);
 }
 
@@ -901,6 +913,22 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       vimEnabled,
     ].join("|");
 
+    /**
+     * 「某份 Markdown 内容 → 当时的光标位置」缓存。
+     *
+     * 为什么需要：App 的文档级撤销（utils/doc-history.ts）是**整篇替换**，光标要由我们恢复；
+     * 而**空行在 Markdown 里不占字符**（空段落序列化成 `\n\n`，零字符）✗ —— 用 Markdown 偏移
+     * 无法表达「停在空行上」。所以按内容字符串缓存 PM 坐标：撤销回到同一份内容时直接还原 ✓。
+     */
+    const caretByMarkdownRef = useRef(new Map<string, { from: number; to: number }>());
+    /**
+     * 整篇替换（App 的文档级撤销/重做）期间为 true：这期间的 onUpdate / onSelectionUpdate
+     * **不能写光标缓存** —— 否则替换后那个临时光标会覆盖掉「编辑前的位置」，
+     * 于是"按内容恢复光标"命中了却被污染的位置（实测就是这个：152 那条被改写成 26 ✗）。
+     */
+    const suppressCaretCacheRef = useRef(false);
+    const currentMarkdownRef = useRef("");
+
     const editor = useEditor({
       extensions: [
         // 无选区时 Ctrl+C / Ctrl+X = 复制 / 剪切整行（见 extensions/copy-line.ts）
@@ -1037,6 +1065,44 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         }),
         // 单独添加扩展，禁用内置快捷键，paragraph 添加 textAlign 属性
         Paragraph.extend({
+          /**
+           * 空段落的 Markdown 表示。
+           *
+           * 背景：空段落在标准 Markdown 里**无法表示**（空白行只是段落间隔），
+           * tiptap-markdown 默认会把空段落**直接丢掉** ✗ —— 后果有两个：
+           *   1. 用户文档里的空行**存盘后丢失**（数据问题 ✓）；
+           *   2. 撤销回到"空行还在的那份内容"时光标无处可落（手感问题 ✓）。
+           *
+           * 做法：空段落**多写一个空行**（`p1\n\n\n\np3`），解析侧配套规则
+           *（见 extensions/markdown-setup.ts 的空段落规则）把它还原成空段落 ✓。
+           */
+          addStorage() {
+            return {
+              markdown: {
+                serialize(state: any, node: any) {
+                  if (!node.textContent.trim()) {
+                    /**
+                     * 空段落：先照常收块，再**显式**多写一个空行。
+                     *
+                     * ⚠️ 不能指望 `closeBlock` 多加换行：块已闭合时它是空操作（实测空段落
+                     * 因此被整段吞掉 ✗）。必须自己写出那两个换行 ✓。
+                     */
+                    state.renderInline(node);
+                    state.closeBlock(node);
+                    state.write("\n\n");
+                    return;
+                  }
+                  state.renderInline(node);
+                  state.closeBlock(node);
+                },
+                parse: {
+                  setup(markdownit: any) {
+                    installEmptyParagraphRule(markdownit);
+                  },
+                },
+              },
+            };
+          },
           addAttributes() {
             return {
               textAlign: {
@@ -1774,6 +1840,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         // 无法解析的模板 → 错误块（默认报错、光标靠近展开源码），见 extensions/template-error.ts
         TemplateError,
         TemplateErrorExpand,
+
+        CaretHistory,
         // 文字颜色（渲染成 <span style="color: …">，见 extensions/text-color.ts）
         TextColor,
         Typography,
@@ -1820,6 +1888,19 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       content: value || "",
       onUpdate: ({ editor: ed, transaction }) => {
         const md = getMarkdownSafe(ed);
+        // 记录「当前内容 → 此刻光标」：撤销回到这份内容时用它精确还原 ✓
+        if (md != null && !suppressCaretCacheRef.current) {
+          currentMarkdownRef.current = md;
+
+          caretByMarkdownRef.current.set(md, {
+            from: ed.state.selection.from,
+            to: ed.state.selection.to,
+          });
+          if (caretByMarkdownRef.current.size > 40) {
+            const oldest = caretByMarkdownRef.current.keys().next().value;
+            if (oldest !== undefined) caretByMarkdownRef.current.delete(oldest);
+          }
+        }
 
         /**
          * 注音 / 链接字面量的展开、收起都是**程序化**改写（节点 ↔ 字面量），
@@ -1854,7 +1935,27 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           });
         }
       },
-      onSelectionUpdate: ({ editor: ed }) => {
+      onSelectionUpdate: ({ editor: ed, transaction }) => {
+        // 同一份内容里的光标移动也要记进缓存：这样「编辑前那一刻的光标」才是最新的 ✓
+        /**
+         * ⚠️ key 必须与**这次事务后的内容**对应。
+         *
+         * 内容变化时 `currentMarkdownRef` 可能还指向**旧**内容 —— 直接用它就会写成
+         * 「旧内容 × 新光标」的错误配对（实测：粘贴后的光标被记到粘贴前的内容上 ✗）。
+         * 但也不能因此**跳过**内容变化：**打字本身就是内容变化**，跳过会让那份内容的光标
+         * 永远停在"刚被创建时"的位置（实测：打完 `啊四方达` 后撤销，取到的是行首 32 ✗）。
+         *
+         * 正确做法：变化时以**编辑器当前内容**为准取 key ✓；未变化时沿用已知的那份 ✓。
+         */
+        if (!suppressCaretCacheRef.current) {
+          const mdNow = transaction?.docChanged ? getMarkdownSafe(ed) : currentMarkdownRef.current;
+          if (mdNow) {
+            caretByMarkdownRef.current.set(mdNow, {
+              from: ed.state.selection.from,
+              to: ed.state.selection.to,
+            });
+          }
+        }
         // 选区收起时关掉「划选弹出的格式菜单」。
         // 只关这一类（placement === "above"）：右键菜单没这个标记，不能被误关 ——
         // 右键本身会改变选区，若在这里无条件关闭，右键菜单会立刻消失。
@@ -2824,6 +2925,112 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       getCursorOffset: () => {
         if (!editor) return -1;
         return editor.state.selection.from;
+      },
+      /**
+       * 撤销/重做后按**内容字符串**还原光标（优先用它 ✓）。
+       *
+       * 比 Markdown 偏移精确：空行/空段落在 Markdown 里不占字符，偏移法会落到相邻行 ✗；
+       * 这里直接还原当时记录的 PM 坐标 ✓。返回 false 表示没有该内容的记录（调用方退回偏移法）。
+       */
+      /**
+       * 最近一次内容变化**之前**的光标 —— App 立快照帧时取它，存进帧里 ✓。
+       * 撤销时直接还原帧自带的光标，不做"按内容反查"的匹配（实测那条路会被
+       * 两套内容空间差 1 字符、以及"旧内容 × 新光标"的错误配对坑掉 ✗）。
+       */
+      getCaretBeforeLastChange: () => {
+        if (mode === "sv" || !isEditorAlive(editor)) return null;
+        return caretBeforeChangeKey.getState(editor.state) ?? null;
+      },
+      /** 直接按 PM 坐标恢复光标（快照帧自带的光标；返回 false 表示不可用） */
+      setCaretAtPmPosition: (pos: { from: number; to: number }) => {
+        if (mode === "sv" || !isEditorAlive(editor)) return false;
+        try {
+          const size = editor.state.doc.content.size;
+          const from = Math.max(1, Math.min(pos.from, size));
+          const to = Math.max(from, Math.min(pos.to, size));
+          editor.chain().focus().setTextSelection({ from, to }).run();
+          return true;
+        } catch {
+          return false;
+        }
+      },
+
+      /** 文档级撤销/重做期间开关「禁止写光标缓存」（见 suppressCaretCacheRef 的说明） */
+      suppressCaretCache: (on: boolean) => {
+        suppressCaretCacheRef.current = on;
+      },
+
+      setCaretForMarkdown: (md: string) => {
+        if (mode === "sv") return false;
+        if (!isEditorAlive(editor)) return false;
+        /**
+         * 宽容查找：App 传进来的内容来自**缓冲区**，而这里缓存的是**编辑器序列化**结果 ——
+         * 两者常在末尾换行 / CRLF 上差一点（实测会让精确 key 永远不相等 ✗），
+         * 所以再退两级（去尾空白、统一换行）✓。
+         */
+        const cache = caretByMarkdownRef.current;
+        const norm = (s: string) => s.replace(/\r\n/g, "\n").trim();
+        let hit =
+          cache.get(md) ??
+          cache.get(md.trimEnd()) ??
+          cache.get(md.replace(/\r\n/g, "\n")) ??
+          cache.get(md.replace(/\r\n/g, "\n").trimEnd()) ??
+          null;
+        /**
+         * 模糊兜底：缓存的是**编辑器序列化**结果，App 撤销栈里是**缓冲区内容** ——
+         * 实测两者会差 1 个字符（文件从磁盘加载后没再序列化过，空白/分隔符上差一点）。
+         * 差 ≤2 字符且**首尾各 40 字符一致**时按同一状态处理 ✓（安全：首尾一致说明就是同一份文档）。
+         */
+        if (!hit) {
+          const a = norm(md);
+          for (const [k, v] of cache) {
+            const b = norm(k);
+            if (Math.abs(a.length - b.length) > 2) continue;
+            if (a.slice(0, 40) !== b.slice(0, 40)) continue;
+            if (a.slice(-40) !== b.slice(-40)) continue;
+            hit = v;
+            break;
+          }
+        }
+
+        if (!hit) return false;
+        try {
+          editor.chain().focus().setTextSelection({ from: hit.from, to: hit.to }).run();
+          return true;
+        } catch {
+          return false;
+        }
+      },
+
+      /**
+       * 把光标落到指定 **Markdown 偏移**。
+       *
+       * 用途：App 的文档级撤销（整篇快照替换，见 utils/doc-history.ts）不会带回光标；
+       * 撤销后用「新旧内容的公共前缀」= 最早改动处 = 编辑前的位置，调这里恢复 ✓。
+       * IR 走位置映射表（与搜索同一套）；SV 换算成行列交给 CodeMirror。
+       */
+      setCaretAtMarkdownOffset: (mdOffset: number) => {
+        const off = Number.isFinite(mdOffset) ? Math.max(0, Math.floor(mdOffset)) : 0;
+        if (mode === "sv") {
+          const val = sourceEditorRef.current?.getValue() ?? "";
+          const clamped = Math.min(off, val.length);
+          const line = val.slice(0, clamped).split("\n").length;
+          const ch = clamped - (val.lastIndexOf("\n", clamped - 1) + 1);
+          // CodeMirror 侧的光标 API 不在统一 handle 类型里：用可选调用，拿不到就只滚动
+          (sourceEditorRef.current as any)?.setCursor?.(line, ch);
+          sourceEditorRef.current?.scrollToLine(line);
+          return;
+        }
+        if (!isEditorAlive(editor)) return;
+        const map = buildPositionMap(editor);
+        const md = map.markdown ?? "";
+        const pos = mdOffsetToPmPos(map, Math.min(off, md.length));
+        if (pos === null) return;
+        try {
+          editor.chain().focus().setTextSelection(pos).run();
+        } catch {
+          /* editor 已销毁时忽略 */
+        }
       },
       isSourceMode: () => mode === "sv",
       // 返回当前渲染内容的克隆（用于导出）。源码模式下视图被销毁，返回 null。

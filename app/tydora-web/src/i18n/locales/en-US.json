@@ -33,6 +33,8 @@
       "codeLineHeightDesc": "Line height inside code blocks.",
       "typewriterMode": "Typewriter Mode",
       "typewriterModeDesc": "Always keep the current line centered in the viewport.",
+      "hideScrollbars": "Hide scrollbars",
+      "hideScrollbarsDesc": "Hide all scrollbars (wheel / trackpad / keyboard scrolling still work). On by default.",
       "showLineNumbers": "Show Line Numbers",
       "showLineNumbersDesc": "Display line numbers on the right side in IR mode.",
       "codeBlockToolbarStyle": "Code Block Toolbar",

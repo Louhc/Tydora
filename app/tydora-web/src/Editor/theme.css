@@ -434,6 +434,19 @@ html.platform-macos .tiptap-editor .tiptap {
   line-height: 1.6;
 }
 
+/**
+ * 带注音的行：行号下移一个注音高度。
+ *
+ * 为什么需要：注音是 `.md-ruby::after` **绝对定位**画在基线上方 0.5em 处的，
+ * 不参与布局 —— 所以块的"顶部那一格"实际被注音占着。行号挂在块顶（`top: 0`）时，
+ * 看起来就落在注音那一行、与它标注的本体错开一格。
+ *
+ * 用 `:has()` 只对**含注音的块**下移，普通行的行号一个像素都不动 ✓。
+ * 数值取 0.5rem ≈ 注音字号（本体字号的一半）；要微调只改这一个值。
+ */
+.tiptap-editor .tiptap> :where(p, h1, h2, h3, h4, h5, h6, blockquote, li):has(.md-ruby)::before {
+  top: 0.5rem;
+}
 /* 隐藏 IR 模式行号 */
 .hide-ir-line-numbers .tiptap> :where(p, h1, h2, h3, h4, h5, h6, blockquote, pre, hr, .tableWrapper, .code-block-toolbar-wrapper, [data-type="frontmatter"])::before,
 .hide-ir-line-numbers .tiptap li::before {

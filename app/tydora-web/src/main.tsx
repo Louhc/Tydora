@@ -16,13 +16,16 @@ bootStamp("i18n_imported_init_done");
 import "./themes.css";
 import "./global.css";
 import { applyMenuDensityFromStorage } from "./utils/menuDensity";
+import { applyHideScrollbarsFromStorage } from "./utils/hideScrollbars";
 import { setupUiScale } from "./utils/uiScale";
 
 // 尽早应用菜单密度与界面缩放，保证各独立窗口（设置/白板/图谱等）启动即生效
 applyMenuDensityFromStorage();
+applyHideScrollbarsFromStorage();
 setupUiScale();
 window.addEventListener("storage", (e) => {
   if (e.key === "zmd-general-settings") applyMenuDensityFromStorage();
+  if (e.key === "zmd-general-settings") applyHideScrollbarsFromStorage();
 });
 
 // macOS Overlay 标题栏：给布局留出红绿灯空间，并隐藏自定义红黄绿按钮

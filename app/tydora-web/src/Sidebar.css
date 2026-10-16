@@ -39,7 +39,10 @@
      App.tsx 里 sidebarOpen 变化后会补一次 resize（过渡结束后）。 */
   transition: width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
               border-right-width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
-              border-left-width 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+              border-left-width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+              /* 边界高亮（悬停/拖动）渐入渐出：边框色 + 覆盖层 opacity 一起淡 */
+              border-right-color 0.16s ease,
+              border-left-color 0.16s ease;
 }
 
 .sidebar.collapsed {
@@ -101,6 +104,14 @@
   top: 0;
   bottom: 0;
   left: 50%;
+  /**
+   * ⚠️ 宽度要落成**整数设备像素**，否则悬停线会（在毛玻璃合成带里）半边抗锯齿。
+   *
+   * 实测：150% 缩放下，2px CSS = 3 设备像素，而线中心正好在整数设备像素上 ✓
+   * → 3 像素居中会跨半像素 ✗ → 顶上那一段（`.sidebar-header`，含 backdrop-filter
+   * 页签条 → 独立合成层）被抗锯齿成"细一档"，下面没有毛玻璃则正常 ✓。
+   * 取成偶数设备像素即可让边缘落在整数上 ✓；下面各档括号内即设备像素数。
+   */
   width: 2px;
   transform: translateX(-50%);
   background: transparent;
@@ -108,20 +119,98 @@
   pointer-events: none;
 }
 
+/* 悬停提示线：按缩放比取"偶数设备像素"，边缘落在整数像素上 → 全高粗细一致 ✓ */
+@media (resolution: 1.25dppx) {
+  .sidebar-resize-handle::after { width: 1.6px; } /* 2 设备像素 */
+}
+
+@media (resolution: 1.5dppx) {
+  .sidebar-resize-handle::after { width: 1.3333px; } /* 2 设备像素（本机） */
+}
+
+@media (resolution: 2dppx) {
+  .sidebar-resize-handle::after { width: 1px; } /* 2 设备像素 */
+}
+
 /* 提示线只画在右栏手柄上（贴侧栏左边缘 = 边界）。
    左栏不用它：左栏的边界只保留 .sidebar 自身那条线，
    悬停/拖动时染成主题色并向右加宽 1px（见下面的边界高亮规则），避免两条线并排。 */
-.sidebar.sidebar-right .sidebar-resize-handle:hover::after,
-.sidebar.sidebar-right.resizing .sidebar-resize-handle::after {
-  background: var(--accent, #4a90e2);
-}
 
-/* 左栏边界：一条线，悬停「编辑器侧热区」/ 悬停手柄 / 拖动中 → 主题色 + 向右加宽 1px */
+
+/* 左栏边界：一条线，悬停「编辑器侧热区」/ 悬停手柄 / 拖动中 → 主题色 + 加宽 1 设备像素 */
 .main-container:has(.editor-edge-grab.left:hover) .sidebar:not(.sidebar-right),
 .sidebar:not(.sidebar-right):has(.sidebar-resize-handle:hover),
 .sidebar:not(.sidebar-right).resizing {
   border-right-color: var(--accent, #4a90e2);
-  box-shadow: 1px 0 0 var(--accent, #4a90e2);
+  /**
+   * ⚠️ 这里**不要**用 `box-shadow: 1px 0 0 var(--accent)` 来"加宽 1px"。
+   *
+   * 实测：同一个元素的 `border-right` 会被 Chromium 吸附成 0.666667px（150% 缩放 = 恰好
+   * 1 设备像素 ✓），而 **box-shadow 不参与设备像素吸附** ✗ → 它是 1.5 设备像素并带抗锯齿。
+   * 于是下面 = 边框 + 阴影 ≈ 2px 清晰，而顶部 `.sidebar-header` 那段含毛玻璃页签条
+   *（backdrop-filter → 独立合成层）时阴影被啃掉更多 → **"上面一小段比较细"** ✓。
+   *
+   * 改成紧贴边缘的**内侧覆盖层**，宽度按缩放比取 1 设备像素（见下面的 dppx 分档）✓。
+   */
+  box-shadow: none;
+}
+
+/**
+ * 边界高亮的"那条线"：**常驻 + 只切 opacity**，这样才能渐入渐出 ✓
+ *（若靠 content:"" 临时出现，就只能是硬切 ✗）。
+ *
+ * 左栏贴右边（right: 0），右栏贴左边（left: 0）；宽度按缩放比取 1 设备像素 ✓。
+ */
+.sidebar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 1px;
+  background: var(--accent, #4a90e2);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+.sidebar.sidebar-right::after {
+  right: auto;
+  left: 0;
+}
+
+/* 左栏：悬停编辑器侧热区 / 悬停手柄 / 拖动中 → 淡入 */
+.main-container:has(.editor-edge-grab.left:hover) .sidebar:not(.sidebar-right)::after,
+.sidebar:not(.sidebar-right):has(.sidebar-resize-handle:hover)::after,
+.sidebar:not(.sidebar-right).resizing::after {
+  opacity: 1;
+}
+
+/* 右栏：悬停手柄 / 拖动中 → 淡入（右栏没有 editor-edge-grab 镜像热区） */
+.sidebar.sidebar-right:has(.sidebar-resize-handle:hover)::after,
+.sidebar.sidebar-right.resizing::after {
+  opacity: 1;
+}
+
+/* 右栏：悬停「编辑器一侧的镜像热区」也淡入（与左栏 .editor-edge-grab.left 对称） */
+.main-container:has(.editor-edge-grab.right:hover) .sidebar.sidebar-right {
+  border-left-color: var(--accent, #4a90e2);
+}
+
+.main-container:has(.editor-edge-grab.right:hover) .sidebar.sidebar-right::after {
+  opacity: 1;
+}
+
+@media (resolution: 1.25dppx) {
+  .sidebar::after { width: 0.8px; }
+}
+
+@media (resolution: 1.5dppx) {
+  .sidebar::after { width: 0.6667px; }
+}
+
+@media (resolution: 2dppx) {
+  .sidebar::after { width: 0.5px; }
 }
 
 /* 「推回去」的临界反馈：宽度已压到最小宽度以下（松手即收起），内容淡出提示。

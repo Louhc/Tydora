@@ -234,6 +234,26 @@
   right: var(--scrollbar-size, 6px);
 }
 
+/* 右栏展开态的镜像热区（与 .editor-edge-grab.left 对称） */
+.editor-edge-grab.right {
+  right: 0;
+}
+
+/**
+ * 滚动条隐藏时：右侧「探出条」与它的提示线都贴到窗口右边缘。
+ *
+ * 原来 `right: var(--scrollbar-size, 6px)` 的内缩就是为了**避开编辑器滚动条** ✗ ——
+ * 滚动条一隐藏（默认隐藏），那 6px 就白空着：线画在窗口边缘、可点/可悬停的条却在里面
+ * 6px，表现就是"紧贴右边缘那一小段不生效" ✓。
+ */
+html[data-hide-scrollbars="1"] .editor-edge-reveal.right {
+  right: 0;
+}
+
+html[data-hide-scrollbars="1"] .editor-edge-reveal.right::after {
+  right: 0;
+}
+
 
 /* 侧栏折叠时：为顶部滑出栏预留空间，避免遮挡 Frontmatter 等首元素 */
 .editor-container.sidebar-collapsed .editor-panel {
@@ -2437,3 +2457,21 @@ html.ctrl-held .editor-file-name.editable:hover {
   padding: 9px 4px;
 }
 
+
+/* ── 隐藏滚动条（默认开启，可在「设置 → 外观」里关掉）───────────────────────
+   只隐藏**视觉上的滚动条**：滚动能力完全保留（滚轮 / 触控板 / 键盘 / 拖动内容）。
+   用属性选择器而不是变量，避免影响依赖 --scrollbar-size 做偏移的布局 ✓。 */
+html[data-hide-scrollbars="1"] * {
+  scrollbar-width: none; /* 标准属性（Firefox / 新版 Chromium） */
+}
+
+html[data-hide-scrollbars="1"] ::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+}
+
+html[data-hide-scrollbars="1"] ::-webkit-scrollbar-thumb,
+html[data-hide-scrollbars="1"] ::-webkit-scrollbar-track,
+html[data-hide-scrollbars="1"] ::-webkit-scrollbar-corner {
+  background: transparent !important;
+}

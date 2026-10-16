@@ -27,6 +27,19 @@
 export interface DocSnapshot {
   content: string;
   at: number;
+  /**
+   * 该帧内容**当时**的光标位置（PM 坐标）。
+   *
+   * App 的撤销是整篇替换，编辑器自己带不回光标；把光标随帧存下来，
+   * 撤销哪一帧就还原哪一帧的光标 —— 不做任何"按内容反查"的匹配 ✓。
+   */
+  caret?: { from: number; to: number };
+}
+
+/** 光标位置（PM 坐标） */
+export interface CaretPos {
+  from: number;
+  to: number;
 }
 
 /** 每份文档最多保留的快照数 */
@@ -57,7 +70,7 @@ export function initDocHistory(key: string, content: string): void {
  * 内容变化时调用（节流）。
  * 若距上一次立帧超过合并窗口，就把**变更前的状态**压入栈，并更新当前状态。
  */
-export function pushDocHistory(key: string, content: string): void {
+export function pushDocHistory(key: string, content: string, caret?: CaretPos): void {
   if (!key) return;
   const prev = committed.get(key);
   if (prev === undefined) {
@@ -73,7 +86,8 @@ export function pushDocHistory(key: string, content: string): void {
     committed.set(key, content);
     return;
   }
-  pushFrame(key, prev);
+  // 压入的是"变更前的内容"，配"变更前的光标" ✓
+  pushFrame(key, prev, false, caret);
   committed.set(key, content);
   lastPushAt.set(key, now);
 }
@@ -82,14 +96,14 @@ export function pushDocHistory(key: string, content: string): void {
  * 强制立帧（结构性操作：切换模式、切换分屏、应用命令等）。
  * 保证"操作前的状态"一定在栈里，即使它落在合并窗口内。
  */
-export function flushDocHistory(key: string, content: string): void {
+export function flushDocHistory(key: string, content: string, caret?: CaretPos): void {
   if (!key) return;
   const prev = committed.get(key);
   if (prev === undefined) {
     initDocHistory(key, content);
     return;
   }
-  if (prev !== content) pushFrame(key, prev);
+  if (prev !== content) pushFrame(key, prev, false, caret);
   committed.set(key, content);
   lastPushAt.set(key, Date.now());
 }
@@ -99,7 +113,11 @@ export function flushDocHistory(key: string, content: string): void {
  * 返回 null 表示没有更多历史。弹出后会把**当前内容**作为新的基线继续记录，
  * 这样连续按 Ctrl+Z 可以一路往前走。
  */
-export function popDocHistory(key: string, currentContent: string): string | null {
+export function popDocHistory(
+  key: string,
+  currentContent: string,
+  currentCaret?: CaretPos,
+): DocSnapshot | null {
   const stack = stacks.get(key);
   if (!stack || stack.length === 0) return null;
   /**
@@ -112,17 +130,22 @@ export function popDocHistory(key: string, currentContent: string): string | nul
     stack.push(snap); // 没找到可用帧，放回去
     return null;
   }
-  // 当前内容进入重做栈（redo 用）
-  pushRedo(key, currentContent);
+  // 当前内容进入重做栈（redo 用）：它带的是"撤销前那一刻的光标"，
+  // 于是重做时正好还原到编辑后的位置 ✓
+  pushRedo(key, currentContent, currentCaret);
   committed.set(key, snap.content);
   lastPushAt.set(key, Date.now());
-  return snap.content;
+  return snap;
 }
 
 /**
  * 重做：返回"更晚"的那个状态。返回 null 表示没有可重做内容。
  */
-export function redoDocHistory(key: string, currentContent: string): string | null {
+export function redoDocHistory(
+  key: string,
+  currentContent: string,
+  currentCaret?: CaretPos,
+): DocSnapshot | null {
   const stack = redos.get(key);
   if (!stack || stack.length === 0) return null;
   let snap = stack.pop()!;
@@ -132,10 +155,10 @@ export function redoDocHistory(key: string, currentContent: string): string | nu
     return null;
   }
   // 当前内容回到撤销栈，保证可以再撤销（keepRedo：不要清空重做链）
-  pushFrame(key, currentContent, true);
+  pushFrame(key, currentContent, true, currentCaret);
   committed.set(key, snap.content);
   lastPushAt.set(key, Date.now());
-  return snap.content;
+  return snap;
 }
 
 /** 当前可撤销的帧数（调试/测试用） */
@@ -151,9 +174,9 @@ export function clearDocHistory(key: string): void {
   lastPushAt.delete(key);
 }
 
-function pushFrame(key: string, content: string, keepRedo = false): void {
+function pushFrame(key: string, content: string, keepRedo = false, caret?: CaretPos): void {
   const stack = stacks.get(key) ?? [];
-  stack.push({ content, at: Date.now() });
+  stack.push({ content, at: Date.now(), caret });
   while (stack.length > MAX_PER_KEY) stack.shift();
   stacks.set(key, stack);
   /**
@@ -163,9 +186,9 @@ function pushFrame(key: string, content: string, keepRedo = false): void {
   if (!keepRedo) redos.delete(key);
 }
 
-function pushRedo(key: string, content: string): void {
+function pushRedo(key: string, content: string, caret?: CaretPos): void {
   const stack = redos.get(key) ?? [];
-  stack.push({ content, at: Date.now() });
+  stack.push({ content, at: Date.now(), caret });
   while (stack.length > MAX_PER_KEY) stack.shift();
   redos.set(key, stack);
 }

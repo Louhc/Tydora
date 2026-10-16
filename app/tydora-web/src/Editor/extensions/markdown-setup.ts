@@ -94,3 +94,30 @@ export function installImageWordMarkRule(md: any): void {
     });
   });
 }
+
+/**
+ * 空段落规则：`p1\n\n\n\np3` → 中间还原出一个**空段落**。
+ *
+ * 背景：空段落在标准 Markdown 里无法表示（空白行只是段落间隔），tiptap-markdown 默认
+ * 会把空段落整段丢掉 ✗ —— 于是"用户文档里的空行存盘后丢失"、"撤销回空行时光标无处可落"。
+ * 序列化侧由 Paragraph 的 addStorage 写成**多一个空行**（见 TipTapEditor 的 Paragraph.extend）。
+ *
+ * 做法与注音/数学那套一致：在 block 阶段之前改写**源码**，把多出来的空行换成一段空 HTML
+ * `<p></p>`，交给既有的 HTML 解析建成空段落 ✓。
+ *
+ * 映射关系（按换行数）：N 个连续换行 → floor((N-2)/2) 个空段落。
+ * 于是 N=4 → 1 个、N=7 → 2 个（序列化侧两个空段落写出来正好是 7 个换行 ✓），往返稳定 ✓。
+ */
+export function installEmptyParagraphRule(md: any): void {
+  if (!installMarkdownRuleOnce(md, "md_empty_paragraph")) return;
+  md.core.ruler.before("block", "md_empty_paragraph", (state: any) => {
+    const src: string = state.src ?? "";
+    if (!/\n{4,}/.test(src)) return false;
+    const guarded = src.replace(/\n{4,}/g, (run: string) => {
+      const empties = Math.max(1, Math.floor((run.length - 2) / 2));
+      return "\n\n" + "<p></p>\n\n".repeat(empties);
+    });
+    if (guarded !== src) state.src = guarded;
+    return false;
+  });
+}
