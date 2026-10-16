@@ -23,7 +23,6 @@ import { TableRow } from "@tiptap/extension-table-row";
 import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TaskListExt as TaskList, TaskItemExt as TaskItem } from "./extensions/task-list-input";
-import Highlight from "@tiptap/extension-highlight";
 import Typography from "@tiptap/extension-typography";
 import Heading from "@tiptap/extension-heading";
 import HardBreak from "@tiptap/extension-hard-break";
@@ -39,6 +38,7 @@ import { Mermaid } from "./extensions/mermaid";
 import { WikiLink } from "./extensions/wiki-link";
 import { Tag } from "./extensions/tag";
 import { Ruby, RUBY_TOGGLE_META } from "./extensions/ruby";
+import { LinkSource, LINK_TOGGLE_META, parseLinkSourceText } from "./extensions/link-source";
 import { SearchHighlight } from "./extensions/search-highlight";
 import {
   HIGHLIGHT_COLORS,
@@ -50,6 +50,8 @@ import {
 } from "./highlighter";
 import i18n from "../i18n";
 import { TextColor } from "./extensions/text-color";
+import { TydoraHighlight } from "./extensions/highlight-ext";
+import { TemplateError, TemplateErrorExpand } from "./extensions/template-error";
 import { HeadingHighlight } from "./extensions/heading-highlight";
 import { CodeBlockToolbar } from "./extensions/code-block-toolbar";
 import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
@@ -86,7 +88,6 @@ import { DOMParser as ProseMirrorDOMParser, Fragment, Slice } from "@tiptap/pm/m
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { ContextMenu } from "./ContextMenu";
 import { LinkDialog } from "./LinkDialog";
-import { findLinkRangeAt } from "./link-source";
 import { MathDialog } from "./MathDialog";
 import type { ThemeName } from "../themes";
 import type { ImageSettings } from "../services";
@@ -844,7 +845,6 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       }, []);
     const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number; placement?: "above" } | null>(null);
     const [tableToolbar, setTableToolbar] = useState<{ table: HTMLElement } | null>(null);
-    const linkEditRef = useRef<{ from: number; to: number } | null>(null);
     const [linkDialog, setLinkDialog] = useState<{ defaultText: string } | null>(null);
     const [mathDialog, setMathDialog] = useState<{ latex: string; block: boolean; pos: number | null } | null>(null);
     const mathDialogRef = useRef(mathDialog);
@@ -871,7 +871,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       const storage = (ed.storage as Record<string, any> | null | undefined)?.markdown;
       if (!storage || typeof storage.getMarkdown !== "function") return null;
       try {
-        return storage.getMarkdown() as string;
+        const md = storage.getMarkdown() as string;
+        return md;
       } catch {
         return null;
       }
@@ -1768,32 +1769,11 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         TaskItem.configure({
           nested: true,
         }),
-        // 高亮标记（==text==）同样去掉 (?:^|\s) 前缀限制，支持行中即时渲染；
-        // multicolor 打开多色高亮（荧光笔）。
-        Highlight.extend({
-          addInputRules() {
-            return [
-              markInputRule({ find: /(==(?!\s+==)((?:[^=]+))==(?!\s+==))$/, type: this.type }),
-            ];
-          },
-          // 去掉默认 renderHTML 里的 `color: inherit`：荧光笔底色是浅色，
-          // 前景统一交给 theme.css 的深墨色（否则深色主题下会变成浅字浅底，
-          // 而行内 style 优先级高于样式表，改不动）。
-          addAttributes() {
-            const parent = (this.parent?.() ?? {}) as Record<string, any>;
-            if (!parent.color) return parent;
-            return {
-              ...parent,
-              color: {
-                ...parent.color,
-                renderHTML: (attributes: Record<string, any>) =>
-                  attributes.color
-                    ? { "data-color": attributes.color, style: `background-color: ${attributes.color}` }
-                    : {},
-              },
-            };
-          },
-        }).configure({ multicolor: true }),
+        // 高亮标记（==text==）+ 荧光笔多色；模板序列化见 extensions/highlight-ext.ts
+        TydoraHighlight,
+        // 无法解析的模板 → 错误块（默认报错、光标靠近展开源码），见 extensions/template-error.ts
+        TemplateError,
+        TemplateErrorExpand,
         // 文字颜色（渲染成 <span style="color: …">，见 extensions/text-color.ts）
         TextColor,
         Typography,
@@ -1825,6 +1805,9 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         Tag,
         // 平假名注音：{{Ruby|漢字|かんじ}}（见 extensions/ruby.ts）
         Ruby,
+        // 链接字面量 [文字](地址) 的编辑态节点：与注音同一套「光标贴近就展开」
+        // （见 extensions/link-source.ts）
+        LinkSource,
         SearchHighlight,
         HeadingHighlight,
         CodeBlockToolbar,
@@ -1839,17 +1822,19 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         const md = getMarkdownSafe(ed);
 
         /**
-         * 注音的展开 / 收起是**程序化**改写（节点 ↔ 字面量文本），序列化出的 Markdown
-         * 与改写前完全一样，不能当成用户编辑 —— 否则 App 那边「编辑即清搜索高亮」
-         * 会把刚跳过去的高亮清掉（实测：搜索跳行 → 命中处自动展开 → 高亮消失）。
-         * 只跳过 onChange，字数统计照常走。
+         * 注音 / 链接字面量的展开、收起都是**程序化**改写（节点 ↔ 字面量），
+         * 序列化出的 Markdown 与改写前完全一样，不能当成用户编辑 —— 否则 App 那边
+         * 「编辑即清搜索高亮」会把刚跳过去的高亮清掉（实测：搜索跳行 → 命中处自动展开
+         * → 高亮消失）。只跳过 onChange，字数统计照常走。
          */
-        const rubyToggle = !!transaction?.getMeta?.(RUBY_TOGGLE_META);
+        const literalToggle =
+          !!transaction?.getMeta?.(RUBY_TOGGLE_META) ||
+          !!transaction?.getMeta?.(LINK_TOGGLE_META);
         const wasInternal = isInternalRef.current;
         if (wasInternal) {
           isInternalRef.current = false;
         }
-        if (!wasInternal && !rubyToggle && !mountingRef.current && md != null) {
+        if (!wasInternal && !literalToggle && !mountingRef.current && md != null) {
           onChangeRef.current(md);
         }
 
@@ -2368,37 +2353,11 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       editor?.commands.focus();
     }, [editor]);
 
-    // 将编辑中的链接源码恢复为渲染后的链接
-    const restoreLinkEdit = useCallback(() => {
-      const range = linkEditRef.current;
-      if (!range || !isEditorAlive(editor)) return;
-
-      const { from, to } = range;
-      const doc = editor.state.doc;
-      const actualTo = Math.min(to, doc.content.size);
-      if (actualTo <= from) {
-        linkEditRef.current = null;
-        return;
-      }
-
-      const text = doc.textBetween(from, actualTo);
-      const m = text.match(/^\[([^\]]*)\]\(([^)]*)\)$/);
-      if (m) {
-        const [, linkText, linkUrl] = m;
-        editor
-          .chain()
-          .command(({ tr }) => {
-            tr.delete(from, actualTo);
-            const linkMark = editor.schema.marks.link.create({ href: linkUrl });
-            tr.insertText(linkText, from);
-            tr.addMark(from, from + linkText.length, linkMark);
-            return true;
-          })
-          .run();
-      }
-
-      linkEditRef.current = null;
-    }, [editor]);
+    /**
+     * 链接的「编辑态 ↔ 渲染态」已由 LinkSource 扩展自动处理
+     *（光标贴近链接两端展开成 `[文字](地址)`，离开即解析回链接），
+     * 不再需要手动 restoreLinkEdit / linkEditRef 那一套。
+     */
 
     // 同步文件路径到 editor.storage，供图片 node view 解析相对路径
     useEffect(() => {
@@ -2437,9 +2396,18 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
 
         const target = e.target as HTMLElement;
         const anchor = target.closest("a");
-        if (!anchor) return;
-
-        const href = anchor.getAttribute("href");
+        /**
+         * 地址来源有两种：
+         *   - 渲染态：`<a href>` 直接给；
+         *   - **展开态**（`[文字](地址)` 字面量，`<span data-link-source>`）：
+         *     没有 `<a>`，从字面量文本里解析出来 —— 这样展开后 Ctrl/Cmd+点击
+         *     依然能访问链接（与注音/链接的"节点 ↔ 字面量"模型一致）。
+         */
+        let href: string | null = anchor ? anchor.getAttribute("href") : null;
+        if (!href || href === "#") {
+          const literalEl = target.closest("[data-link-source]") as HTMLElement | null;
+          href = literalEl ? parseLinkSourceText(literalEl.textContent ?? "")?.href ?? null : null;
+        }
         if (!href || href === "#") return;
 
         e.preventDefault();
@@ -2489,146 +2457,30 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       return () => container.removeEventListener("click", handleClick, true);
     }, [editor, mode]); // mode 变化时重新绑定，确保 DOM 重建后事件监听器有效
 
-    // 点击链接时在 IR 模式下显示 markdown 源码并可编辑
+    /**
+     * 点击链接：**只阻止默认行为**（Tauri webview 会尝试在应用内导航）。
+     *
+     * 编辑态不再靠点击进入 —— 光标贴到链接两端时，LinkSource 扩展会自动把链接
+     * 展开成 `[文字](地址)` 供编辑，光标离开即解析回链接（与注音同一套逻辑）。
+     * 打开链接是 Ctrl/Cmd + 单击（上方那个 effect），改地址是 Ctrl+K 对话框。
+     */
     useEffect(() => {
       const container = containerRef.current;
       if (!container || !editor) return;
 
-      // 将链接元素替换为 markdown 源码文本
-      const convertLinkToSource = (anchor: HTMLAnchorElement) => {
-        if (!editor) return;
-
-        let pos: number;
-        const posView = getEditorView(editor);
-        if (!posView) return;
-        try {
-          pos = posView.posAtDOM(anchor, 0);
-        } catch {
-          return;
-        }
-
-        const { doc } = editor.state;
-
-        // 在点击位置查找包含 pos 的带 link mark 的文本节点
-        // （不要在这里内联 nodesBetween + return false —— 它无法提前终止遍历，
-        //  多链接时会不断覆盖结果、最终命中最后一个链接，详见 link-source.ts）
-        const linkRange = findLinkRangeAt(doc, pos);
-
-        if (!linkRange) return;
-
-        const from = linkRange.from;
-        const to = linkRange.to;
-        const linkHref = linkRange.href;
-
-        const text = doc.textBetween(from, to);
-        const md = `[${text}](${linkHref})`;
-
-        editor
-          .chain()
-          .focus()
-          .command(({ tr }) => {
-            tr.delete(from, to);
-            tr.insertText(md, from);
-            return true;
-          })
-          .setTextSelection(from + md.length)
-          .run();
-
-        linkEditRef.current = { from, to: from + md.length };
-      };
-
       const handleClick = (e: MouseEvent) => {
-        if (e.ctrlKey || e.metaKey) return;
-
-        const target = e.target as HTMLElement;
-        const anchor = target.closest("a") as HTMLAnchorElement | null;
-
-        // 点击在链接外部 → 恢复正在编辑的链接
-        if (!anchor) {
-          if (linkEditRef.current) {
-            // 检查点击是否在编辑区域内（允许用户在源码文本中移动光标）
-            const coordsView = getEditorView(editor);
-            if (coordsView) {
-              try {
-                const posInfo = coordsView.posAtCoords({ left: e.clientX, top: e.clientY });
-                if (posInfo) {
-                  const { from, to } = linkEditRef.current;
-                  if (posInfo.pos >= from && posInfo.pos < to) {
-                    return; // 点击在编辑区域内，不恢复
-                  }
-                }
-              } catch {
-                /* 视图未就绪时忽略，回退到恢复 */
-              }
-            }
-            restoreLinkEdit();
-          }
-          return;
-        }
-
-        // 跳过 wiki-link 和空链接
+        const anchor = (e.target as HTMLElement | null)?.closest?.("a") as HTMLAnchorElement | null;
+        if (!anchor) return;
         if (anchor.classList.contains("wiki-link")) return;
         const href = anchor.getAttribute("href");
         if (!href || href === "#") return;
-
         e.preventDefault();
         e.stopPropagation();
-
-        /**
-         * 打开方式分工（避免"单击就把链接变成转义字面量"）：
-         *   - 单击：**什么都不做**，只阻止默认行为（Tauri webview 会尝试在应用内导航），
-         *     光标照常落在链接文字上 —— Link 是 mark，文字本身可直接编辑；
-         *   - Ctrl / Cmd + 单击：用系统浏览器打开；
-         *   - Alt + 单击：转成源码字面量编辑（原行为）。
-         *
-         * 为什么单击不再转换：转出来的 `[文本](url)` 是**纯文本无 mark**，序列化时
-         * getMarkdown() 必须把方括号转义成 `\[文本\](url)`（否则会被重新解析成链接），
-         * 显示难看，且自动保存可能把这个转义版本写进磁盘（CLAUDE.md 记录的已知隐患）。
-         * 需要改链接地址请用 Ctrl+K（超链接对话框）。
-         */
-        if (e.ctrlKey || e.metaKey) {
-          void invoke("open_url", { url: href });
-          return;
-        }
-        if (!e.altKey) return; // 单击：交给 ProseMirror 正常放置光标
-
-        // Alt + 单击：进入源码编辑（下面这段是原行为，含"先恢复上一个正在编辑的链接"）
-        if (linkEditRef.current) {
-          restoreLinkEdit();
-          // 恢复后 DOM 可能已更新，用坐标重新定位链接元素
-          setTimeout(() => {
-            const el = document.elementFromPoint(e.clientX, e.clientY);
-            const a = el?.closest("a") as HTMLAnchorElement | null;
-            if (a && !a.classList.contains("wiki-link")) {
-              const h = a.getAttribute("href");
-              if (h && h !== "#") convertLinkToSource(a);
-            }
-          }, 0);
-          return;
-        }
-
-        convertLinkToSource(anchor);
       };
 
       container.addEventListener("click", handleClick);
       return () => container.removeEventListener("click", handleClick);
-    }, [editor, restoreLinkEdit, mode]); // mode 变化时重新绑定，确保 DOM 重建后事件监听器有效
-
-    // Escape 键恢复正在编辑的链接
-    useEffect(() => {
-      if (!editor) return;
-
-      const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === "Escape" && linkEditRef.current) {
-          restoreLinkEdit();
-          editor.commands.focus();
-          e.preventDefault();
-        }
-      };
-
-      window.addEventListener("keydown", handleKeyDown);
-      return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [editor, restoreLinkEdit]);
+    }, [editor, mode]); // mode 变化时重新绑定，确保 DOM 重建后事件监听器有效
 
     // 快捷键在 handleDOMEvents.keydown 里处理（见上方 commandMap）；「删除行」是唯一例外，
     // 单独挂窗口级按键，原因是这里的两个坑：

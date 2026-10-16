@@ -1,4 +1,15 @@
 import { Mark, mergeAttributes, getStyleProperty } from "@tiptap/core";
+import {
+  collectMarkRunText,
+  colorTemplateHtml,
+  decodeColorParam,
+  encodeColorParam,
+  installTemplateRuleOnce,
+  colorHtmlTags,
+  registerTemplateRenderer,
+  splitFirstParam,
+  templateUnsafeReason,
+} from "../markdown-templates";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -80,6 +91,52 @@ export const TextColor = Mark.create({
         () =>
         ({ commands }) =>
           commands.unsetMark(this.name),
+    };
+  },
+
+  /**
+   * Markdown 序列化 / 解析（tiptap-markdown 的扩展点，见 Editor/markdown-templates.ts）。
+   *
+   * - **写入**：`{{Color|red|文字}}`，与 `{{Ruby|…}}` 同一套约定；命中调色板写 id、
+   *   否则写原样 CSS 值。内容里含 `|` / `}}` 这类无法无歧义表达的字符时**退回内联 HTML**
+   *   （HTML 能吃下任意文本，而且原有的 parseHTML 照旧认它）。
+   * - **读取**：由 markdown-it 规则把 `{{Color|…}}` 重写成同样的
+   *   `<span data-color="…">`，所以这里的 parseHTML 一行都不用改；
+   *   旧文件里的内联 HTML 也照旧解析（向后兼容）。
+   *
+   * 自嵌套（`{{Color|…|{{Color|…|x}}}}`）不需要特殊代码：ProseMirror 的 mark 同类型唯一，
+   * 解析时天然"最内层胜"；写入时按 run 各自包链，不会产生自嵌套。
+   */
+  addStorage() {
+    return {
+      markdown: {
+        serialize: {
+          open(_state: any, mark: any, parent: any, index: number) {
+            const run = collectMarkRunText(parent, index, mark, 1);
+            const color = mark.attrs.color ? encodeColorParam(mark.attrs.color, TEXT_COLORS) : "";
+            if (!color || templateUnsafeReason(run)) return colorHtmlTags(color || null, TEXT_COLORS)[0];
+            return `{{Color|${color}|`;
+          },
+          close(_state: any, mark: any, parent: any, index: number) {
+            const run = collectMarkRunText(parent, index, mark, -1);
+            const color = mark.attrs.color ? encodeColorParam(mark.attrs.color, TEXT_COLORS) : "";
+            if (!color || templateUnsafeReason(run)) return colorHtmlTags(color || null, TEXT_COLORS)[1];
+            return "}}";
+          },
+        },
+        parse: {
+          setup(markdownit: any) {
+            registerTemplateRenderer("Color", (_match, inner) => {
+              // 注意：`inner` 是"参数 + 内容"的整体（如 `red|文字`），必须切掉参数那一段再包 HTML
+              const { param, content } = splitFirstParam(inner);
+              const color = decodeColorParam(param, TEXT_COLORS);
+              if (!color) return null; // 颜色不合法 → 原样留作文本（不吞内容）
+              return colorTemplateHtml(color, content);
+            });
+            installTemplateRuleOnce(markdownit);
+          },
+        },
+      },
     };
   },
 });

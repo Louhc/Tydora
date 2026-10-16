@@ -38,7 +38,9 @@ export const mermaidTheme = CMView.theme({
   "&": { backgroundColor: "var(--bg-secondary, #f8f9fa)", color: "var(--text-primary, #333)", fontSize: "13px", borderRadius: "0 0 8px 8px" },
   ".cm-content": { caretColor: "var(--text-primary, #333)", padding: "16px 16px", fontFamily: "var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace)", minHeight: "80px" },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--text-primary, #333)" },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": { backgroundColor: "rgba(0, 122, 255, 0.3)" },
+  // 选中底色：选择器必须不弱于 CodeMirror baseTheme 的 4 个类，否则会走它
+  // 浅色默认 `#d7d4f0`（深色主题下"选中区发白、看不清"，详见 CodeMirrorEditor.tsx）
+  "&.cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, & .cm-selectionBackground, & .cm-content ::selection": { backgroundColor: "rgba(var(--accent-rgb, 137, 180, 250), 0.3)" },
   ".cm-gutters": { backgroundColor: "var(--bg-secondary, #f5f5f5)", color: "var(--text-secondary, #999)", border: "none", borderRight: "1px solid var(--border, #e0e0e0)" },
   ".cm-activeLine": { backgroundColor: "var(--bg-hover, rgba(0,0,0,0.03))" },
   ".cm-activeLineGutter": { backgroundColor: "var(--bg-hover, rgba(0,0,0,0.05))", color: "var(--text-primary, #333)" },

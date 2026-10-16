@@ -584,10 +584,19 @@
   font-style: italic;
 }
 
-/* 链接 - 与 IR 模式一致 */
+/* 链接 - 与 IR 模式一致（颜色跟随主题强调色，hover 下划线由短长满） */
 .canvas-text-editor a {
-  color: var(--text-link, #0969da);
+  color: var(--text-link, var(--accent, #0969da));
   text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1px;
+  transition: background-size 0.22s ease;
+}
+
+.canvas-text-editor a:hover {
+  background-size: 100% 1px;
 }
 
 .canvas-text-editor a:hover {
@@ -626,6 +635,8 @@
   border-radius: 2px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  /* 底色恒为浅黄（--bg-highlight 从未定义）→ 前景固定深墨色，避免深色主题下浅字浅底 */
+  color: var(--highlight-ink, #26282c);
 }
 
 /* 删除线 */
@@ -836,10 +847,19 @@
   font-style: italic;
 }
 
-/* 链接 - 与 IR 模式一致 */
+/* 链接 - 与 IR 模式一致（颜色跟随主题强调色，hover 下划线由短长满） */
 .canvas-note-editor a {
-  color: var(--text-link, #0969da);
+  color: var(--text-link, var(--accent, #0969da));
   text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1px;
+  transition: background-size 0.22s ease;
+}
+
+.canvas-note-editor a:hover {
+  background-size: 100% 1px;
 }
 
 .canvas-note-editor a:hover {
@@ -878,6 +898,8 @@
   border-radius: 2px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  /* 底色恒为浅黄（--bg-highlight 从未定义）→ 前景固定深墨色，避免深色主题下浅字浅底 */
+  color: var(--highlight-ink, #26282c);
 }
 
 /* 删除线 */

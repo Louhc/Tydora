@@ -1,6 +1,7 @@
 // src/Editor/extensions/tag.ts
 
 import { Node, mergeAttributes, InputRule } from "@tiptap/core";
+import { applyOutsideHtmlTags } from "./html-tag-guard";
 import { installMarkdownRuleOnce } from "./markdown-setup";
 
 /** 标签字符转义 */
@@ -202,14 +203,14 @@ export const Tag = Node.create({
                 if (token.type === "inline" && token.content) {
                   // 捕获组 1: 前缀（空白或行首^），必须保留！
                   // 否则多个连续标签会因为缺少空格分隔而解析失败
-                  token.content = token.content.replace(
+                  token.content = applyOutsideHtmlTags(token.content, (__tagText) => __tagText.replace(
                     /(^|\s)(?<!\w)#([^\s#\]\)\}，,。！？；;：:"'`、/\\]+(?:\/[^\s#\]\)\}，,。！？；;：:"'`、/\\]+)*)(?!\w)/g,
                     (_m: string, prefix: string, tag: string) => {
                       if (/^\d+$/.test(tag)) return _m; // 纯数字不转换
                       // 关键：必须保留 prefix（空格/行首），否则多个标签会黏在一起
                       return `${prefix}<span data-tag="${encodeTag(tag)}">#${tag}</span>`;
                     }
-                  );
+                  ));
                 }
               });
             });

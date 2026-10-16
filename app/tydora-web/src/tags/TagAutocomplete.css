@@ -6,7 +6,7 @@
   max-width: 320px;
   max-height: 240px;
   overflow-y: auto;
-  background: var(--bg-elevated, #ffffff);
+  background: var(--bg-elevated, var(--bg-surface, #ffffff));
   border: 1px solid var(--border, #e5e7eb);
   border-radius: 8px;
   box-shadow:
@@ -39,8 +39,8 @@
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-tertiary, #9ca3af);
-  border-bottom: 1px solid var(--border-subtle, #f3f4f6);
-  background: var(--bg-subtle, #fafafa);
+  border-bottom: 1px solid var(--border-subtle, var(--border, #f3f4f6));
+  background: var(--bg-subtle, var(--bg-secondary, #fafafa));
   border-radius: 8px 8px 0 0;
   position: sticky;
   top: 0;
@@ -105,7 +105,7 @@
 .tag-autocomplete-item-count {
   font-size: 11px;
   color: var(--text-tertiary, #9ca3af);
-  background: var(--bg-subtle, #f3f4f6);
+  background: var(--bg-subtle, var(--bg-secondary, #f3f4f6));
   padding: 2px 7px;
   border-radius: 999px;
   flex-shrink: 0;

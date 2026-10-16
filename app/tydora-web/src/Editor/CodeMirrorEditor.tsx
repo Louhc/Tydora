@@ -2,7 +2,8 @@ import { useRef, useEffect, forwardRef, useImperativeHandle, useMemo, useCallbac
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, Decoration, ViewPlugin, placeholder, ViewUpdate, drawSelection } from "@codemirror/view";
 import { EditorState, Compartment, RangeSetBuilder } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { markdown } from "@codemirror/lang-markdown";
+import { tydoraMarkdownLanguage, rubyShorthandTag } from "./markdown-language";
 import { javascript } from "@codemirror/lang-javascript";
 import { python } from "@codemirror/lang-python";
 import { html } from "@codemirror/lang-html";
@@ -15,7 +16,7 @@ import { java } from "@codemirror/lang-java";
 import { cpp } from "@codemirror/lang-cpp";
 import { syntaxHighlighting, bracketMatching, foldGutter, indentOnInput, HighlightStyle } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { highlightSelectionMatches } from "@codemirror/search";
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { useVim, createVimExtension, useLeader, LeaderMenu, executeCodeMirrorAction } from "../vim";
@@ -37,7 +38,7 @@ function isMarkdownFile(filePath: string | null | undefined): boolean {
 
 // 根据文件扩展名获取 CodeMirror 语言扩展
 function getLanguageExtension(filePath: string | null | undefined) {
-  if (!filePath) return markdown({ base: markdownLanguage });
+  if (!filePath) return markdown({ base: tydoraMarkdownLanguage });
 
   const ext = filePath.split(".").pop()?.toLowerCase() || "";
   switch (ext) {
@@ -88,7 +89,7 @@ function getLanguageExtension(filePath: string | null | undefined) {
     case "yaml":
       return yaml();
     default:
-      return markdown({ base: markdownLanguage });
+      return markdown({ base: tydoraMarkdownLanguage });
   }
 }
 
@@ -114,26 +115,29 @@ const markdownTheme = EditorView.theme({
   ".cm-cursor, .cm-dropCursor": {
     borderLeftColor: "var(--text-primary, #333)",
   },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
-    backgroundColor: "rgba(0, 122, 255, 0.3)",
+  /**
+   * 选中底色。
+   *
+   * ⚠️ 选择器必须**不弱于 CodeMirror baseTheme**。它内置的是
+   * `&light.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`
+   *（`&light` 会解析成一个生成的类，合计 4 个类）。这里原来只有 3 个类
+   *（`&.cm-focused .cm-selectionBackground`）→ **被它压过**，于是走浅色默认
+   * `#d7d4f0`：深色主题下就是「选中区一片白、和文字亮度相近、根本看不清」。
+   *
+   * 现在前面多带 `.cm-editor`（共 5 个类，稳赢），颜色取主题强调色的半透明版，
+   * 未聚焦态与原生选区（Vim 模式下 drawSelection 不启用，走的是原生选区）一并覆盖。
+   */
+  "&.cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, & .cm-selectionBackground, & .cm-content ::selection": {
+    backgroundColor: "rgba(var(--accent-rgb, 137, 180, 250), 0.3)",
   },
-  ".cm-panels": {
-    backgroundColor: "var(--bg-secondary, #f5f5f5)",
-    color: "var(--text-primary, #333)",
-  },
-  ".cm-panels.cm-panels-top": {
-    borderBottom: "1px solid var(--border, #e0e0e0)",
-  },
-  ".cm-panels.cm-panels-bottom": {
-    borderTop: "1px solid var(--border, #e0e0e0)",
-  },
-  ".cm-searchMatch": {
-    backgroundColor: "var(--bg-search-highlight, #fff3b0)",
-    outline: "1px solid var(--border, #d0d0d0)",
-  },
-  ".cm-searchMatch.cm-searchMatch-selected": {
-    backgroundColor: "var(--bg-search-active, #ffeb3b)",
-  },
+  /**
+   * 这里只保留「选中词高亮」（highlightSelectionMatches 画的
+   * `.cm-selectionMatch`）—— 源码模式下的搜索高亮靠它。
+   *
+   * CodeMirror 自带搜索面板已不再挂载（见下方 keymap 里不挂 searchKeymap 的说明），
+   * 因此 `.cm-panels*` 与 `.cm-searchMatch*` 这些只服务于那个横条的样式一并删除，
+   * 不留死样式。
+   */
   ".cm-activeLine": {
     backgroundColor: "var(--bg-hover, rgba(0, 0, 0, 0.03))",
   },
@@ -186,7 +190,9 @@ const markdownTheme = EditorView.theme({
   },
   ".cm-tooltip-autocomplete": {
     "& > ul > li[aria-selected]": {
-      backgroundColor: "var(--bg-active, #e3f2fd)",
+      // `--bg-active` 同样从未定义；回退链里带上已定义的 --bg-hover，
+      // 免得深色主题下选中行是浅蓝底 + 浅色字（看不清）
+      backgroundColor: "var(--bg-active, var(--bg-hover, #e3f2fd))",
       color: "var(--text-primary, #333)",
     },
   },
@@ -195,17 +201,28 @@ const markdownTheme = EditorView.theme({
 // Markdown 语法高亮（使用 CSS 变量引用，浏览器自动响应变化）
 const markdownHighlighting = syntaxHighlighting(
   HighlightStyle.define([
-    { tag: tags.heading1, color: "var(--text-heading, #1a1a1a)", fontSize: "1.5em", fontWeight: "bold" },
-    { tag: tags.heading2, color: "var(--text-heading, #1a1a1a)", fontSize: "1.3em", fontWeight: "bold" },
-    { tag: tags.heading3, color: "var(--text-heading, #1a1a1a)", fontSize: "1.1em", fontWeight: "bold" },
-    { tag: tags.heading4, color: "var(--text-heading, #1a1a1a)", fontSize: "1em", fontWeight: "bold" },
-    { tag: tags.heading5, color: "var(--text-heading, #1a1a1a)", fontSize: "0.9em", fontWeight: "bold" },
-    { tag: tags.heading6, color: "var(--text-heading, #1a1a1a)", fontSize: "0.85em", fontWeight: "bold" },
-    { tag: tags.emphasis, fontStyle: "italic", color: "var(--text-emphasis, #666)" },
+    /**
+     * 标题：**只改字号/字重，不改颜色**，与 IR 模式保持一致
+     *（theme.css 的 `.tiptap-editor h1..h6` 只设 font-size / font-weight，
+     *  颜色继承正文）。
+     *
+     * 原来写的是 `var(--text-heading, #1a1a1a)`，而 `--text-heading` **从未被任何
+     * 主题定义** → 一直取近黑的 `#1a1a1a`，深色主题下标题几乎看不见
+     *（"# 标题"只剩开头的 # 是红的）。这里回退值改成 `inherit`：
+     * 默认继承正文色（与 IR 一致），主题若定义了 `--text-heading` 仍可单独调。
+     */
+    { tag: tags.heading1, color: "var(--text-heading, inherit)", fontSize: "1.5em", fontWeight: "bold" },
+    { tag: tags.heading2, color: "var(--text-heading, inherit)", fontSize: "1.3em", fontWeight: "bold" },
+    { tag: tags.heading3, color: "var(--text-heading, inherit)", fontSize: "1.1em", fontWeight: "bold" },
+    { tag: tags.heading4, color: "var(--text-heading, inherit)", fontSize: "1em", fontWeight: "bold" },
+    { tag: tags.heading5, color: "var(--text-heading, inherit)", fontSize: "0.9em", fontWeight: "bold" },
+    { tag: tags.heading6, color: "var(--text-heading, inherit)", fontSize: "0.85em", fontWeight: "bold" },
+    // 强调：同上，`--text-emphasis` 也从未定义（原回退 #666 在深色下偏暗）→ 默认继承正文色
+    { tag: tags.emphasis, fontStyle: "italic", color: "var(--text-emphasis, inherit)" },
     { tag: tags.strong, fontWeight: "bold", color: "var(--text-strong, #333)" },
     { tag: tags.strikethrough, textDecoration: "line-through", color: "var(--text-secondary, #999)" },
-    { tag: tags.link, color: "var(--text-link, #0969da)" },
-    { tag: tags.url, color: "var(--text-url, #0969da)", textDecoration: "underline" },
+    { tag: tags.link, color: "var(--text-link, var(--accent, #0969da))" },
+    { tag: tags.url, color: "var(--text-url, var(--accent, #0969da))", textDecoration: "underline" },
     { tag: tags.string, color: "var(--hljs-string, #0a3069)" },
     { tag: tags.keyword, color: "var(--hljs-keyword, #cf222e)" },
     { tag: tags.atom, color: "var(--hljs-built_in, #0550ae)" },
@@ -216,6 +233,9 @@ const markdownHighlighting = syntaxHighlighting(
     { tag: tags.processingInstruction, color: "var(--hljs-keyword, #cf222e)" },
     { tag: tags.special(tags.string), color: "var(--hljs-string, #0a3069)" },
     { tag: tags.contentSeparator, color: "var(--text-secondary, #999)" },
+    // Tydora 的注音简写 {{Ruby|本体|读音}}：专用 tag（见 markdown-language.ts）。
+    // 颜色可用 --text-ruby 单独调，默认跟随代码配色的字符串色。
+    { tag: rubyShorthandTag, color: "var(--text-ruby, var(--hljs-string, #a31515))" },
     { tag: tags.meta, color: "var(--hljs-comment, #6e7781)" },
   ])
 );
@@ -1050,7 +1070,14 @@ const CodeMirrorEditor = forwardRef<CodeMirrorEditorHandle, CodeMirrorEditorProp
             },
             ...defaultKeymap,
             ...historyKeymap,
-            ...searchKeymap,
+            /**
+             * 这里刻意**不**挂 `searchKeymap`。
+             *
+             * 它会把 Ctrl+F / F3 等绑到 CodeMirror 自带的搜索面板（那个
+             * Find/Replace + match case/regexp/by word 的横条）上。Tydora 的查找替换
+             * 由 App 自己的查找框统一负责（窗口级快捷键 → FindReplaceDialog，
+             * 源码模式下同样作用于 CodeMirror 的原文），两套并存只会互相打架。
+             */
             ...completionKeymap,
             ...closeBracketsKeymap,
             indentWithTab,

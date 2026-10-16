@@ -152,10 +152,6 @@
   z-index: 2;
 }
 
-.source-textarea::selection {
-  background: rgba(0, 122, 255, 0.3);
-}
-
 /* 行样式 */
 .source-line {
   display: flex;
@@ -1642,15 +1638,43 @@ html.platform-macos .tiptap-editor .tiptap {
   }
 }
 
-/* 链接 */
-.tiptap-editor a {
-  color: var(--text-link, #0969da);
+/* 链接
+ *
+ * 颜色：`--text-link` 从未被任何主题定义过，所以过去一直取回退值 `#0969da`
+ *（GitHub 中蓝）—— 深色主题下对比度不足、看不清。这里回退到主题的强调色
+ * `--accent`（每个主题都是为自己的背景选的，wiki-link 也一直在用它），
+ * 同时保留 `--text-link` 作为以后单独微调的钩子。
+ *
+ * 下划线：静止不画，hover 时用 background-size 从左向右长满整条。
+ * 用 `currentColor` 让下划线跟随链接色，不必写死颜色。
+ *
+ * ⚠️ 展开后的字面量 `[文字](地址)`（`[data-link-source]`）与渲染态**共用同一份
+ * 声明**（见下面的并列选择器），这样"展开前后的样式一致"是结构上成立的，
+ * 不会因为改了其中一处而漂移。
+ */
+.tiptap-editor a,
+.tiptap-editor [data-link-source] {
+  color: var(--text-link, var(--accent, #0969da));
   text-decoration: none;
   cursor: pointer;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1px;
+  transition: background-size 0.22s ease;
 }
 
-.tiptap-editor a:hover {
-  text-decoration: underline;
+.tiptap-editor a:hover,
+.tiptap-editor [data-link-source]:hover {
+  background-size: 100% 1px;
+}
+
+/* 字面量额外的一点"编辑态"提示：淡底 + 圆角 + 内边距。
+ * 用 background-color（与上面的 background-image 下划线共存，互不影响）。 */
+.tiptap-editor [data-link-source] {
+  background-color: rgba(var(--accent-rgb, 137, 180, 250), 0.12);
+  border-radius: 3px;
+  padding: 0 2px;
 }
 
 /* Frontmatter / metadata 块
@@ -1720,6 +1744,15 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   color: inherit !important;
 }
 
+/* IR 编辑器内的选中底色。
+ *
+ * 以前没写这条，靠浏览器原生高亮 —— 而项目从未设置 `color-scheme`，
+ * 深色主题下浏览器给的仍是浅色（接近白）的底，与浅色文字亮度相近、看不清。
+ * 这里用主题强调色的半透明版本，与 SV 模式的选中色保持一致。 */
+.tiptap-editor ::selection {
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.3);
+}
+
 /* 水平线 */
 /* Markdown 分隔线（`---` 渲染出的 <hr>）：圆头粗虚线 + 两端渐隐。
    - 形状：SVG mask（stroke-linecap: round → 每一段都是圆头），颜色由 background-color 给，
@@ -1772,13 +1805,15 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   font-weight: 500;
   line-height: 1;
   /**
-   * 正文色 + 提亮：
-   * - 颜色用 --text-primary（与正文同色，主题安全）；
+   * 正文色 + 提亮，且**跟随本体文字的颜色**：
+   * - `color: inherit` / `currentColor` 而不是写死 `--text-primary` ——
+   *   这样本体被 `{{Color|…}}` 着色时，注音会变成同一个颜色（用户要的效果）；
+   *   而没有被着色时，继承到的仍然是正文色，外观与以前一致；
    * - "提亮"不用 opacity/filter —— 那在浅色主题下反而会变淡（深色文字提亮=变灰）。
    *   改用两招：字重 500 + 同色极细描边，小字号下视觉更实、更清楚。
    */
-  color: var(--text-primary, #333);
-  -webkit-text-stroke: 0.2px var(--text-primary, #333);
+  color: inherit;
+  -webkit-text-stroke: 0.2px currentColor;
   white-space: nowrap;
   pointer-events: none; /* 不参与命中测试，选区边界只落在 base 文本上 */
 }
@@ -1884,7 +1919,11 @@ html.platform-macos .tiptap-editor .frontmatter-node {
 
 /* 搜索高亮 */
 .tiptap-editor .search-highlight {
-  background: var(--bg-search-highlight, #fff3b0);
+  /* `--bg-search-highlight` 从未被任何主题定义 → 底色恒为浅黄。
+     因此**必须**配一个深色墨色，否则深色主题下是浅字浅底、命中内容读不出来。
+     与 `.tiptap-editor mark`（荧光笔）用同一套约定：--bg-highlight + --highlight-ink。 */
+  background: var(--bg-search-highlight, var(--bg-highlight, #fff3b0));
+  color: var(--highlight-ink, #26282c);
 }
 
 /* 当前命中：比普通命中更醒目（查找框保持焦点时原生选区会被清空，靠它给出反馈） */
@@ -2021,6 +2060,10 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   border-radius: 2px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+  /* `--bg-highlight` 从未被定义 → 底色恒为浅黄，所以前景必须固定深墨色，
+     否则深色主题下 `==高亮==` 的文字是浅色、落在浅黄底上读不出来。
+     与下面 mark[data-color] 用同一条约定。 */
+  color: var(--highlight-ink, #26282c);
 }
 
 /* 多色高亮（荧光笔）：颜色由行内 style 的 background-color 提供
@@ -3290,4 +3333,51 @@ html:not([data-code-block-toolbar="classic"]) .code-block-content {
   border-radius: 6px;
   padding: 10px 14px;
   margin: 1em 0;
+}
+
+/**
+ * 「未匹配的模板定界符」警示（见 extensions/template-warning.ts）。
+ *
+ * 只给写坏了的模板片段上色：说明这段写法当前**表达不了**（Ruby 里放模板、花括号不配平…），
+ * 文档内容不受影响 —— 改对写法后警示自动消失。
+ */
+/**
+ * 「模板无法解析」错误块（见 extensions/template-error.ts）。
+ *
+ * 两态**只切 CSS**，文档内容一个字符都不变：
+ *  - 默认：把源码文本藏起来（font-size: 0），用 ::before 显示报错文案 ✓；
+ *  - 装饰加上 .is-expanded（光标贴住两端）→ 恢复源码字号、隐藏文案 ✓，
+ *    于是"光标靠近就展开成源文件"这个交互不需要改动文档 ✓。
+ */
+.tiptap-editor [data-template-error] {
+  font-size: 0; /* 藏源码文本 */
+  color: var(--warning-ink, #b42318);
+  background: rgba(180, 35, 24, 0.08);
+  border: 1px dashed rgba(180, 35, 24, 0.45);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-weight: 700;
+  cursor: text;
+}
+
+.tiptap-editor [data-template-error]::before {
+  content: attr(data-reason);
+  /* 报错要一眼看到：加大加粗（.is-expanded 展开源码时会整个隐藏 ✓） */
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.tiptap-editor [data-template-error].is-expanded {
+  font-size: inherit; /* 恢复源码 */
+  color: var(--text-primary, #333);
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.1);
+  border-color: rgba(var(--accent-rgb, 137, 180, 250), 0.5);
+  /* 不再改成等宽字体：展开态沿用正文字体，避免与周围文字不一致
+     （等宽只在"看不清竖线/花括号"时才值得，代价是视觉突兀 → 已去掉） */
+}
+
+.tiptap-editor [data-template-error].is-expanded::before {
+  content: none;
 }

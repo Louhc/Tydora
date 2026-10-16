@@ -72,7 +72,7 @@ function expandRubyAt(view: any, pos: number): boolean {
   if (!base || !rt) return false;
   const literal = `{{Ruby|${base}|${rt}}}`;
   const wasBefore = view.state.selection.from <= pos;
-  const tr = view.state.tr.replaceWith(pos, pos + node.nodeSize, view.state.schema.text(literal));
+  const tr = view.state.tr.replaceWith(pos, pos + node.nodeSize, view.state.schema.text(literal, node.marks ?? []));
   tr.setSelection(TextSelection.create(tr.doc, wasBefore ? pos : pos + literal.length));
   tr.setMeta(RUBY_TOGGLE_META, true);
   pendingLiteral = true;
@@ -97,7 +97,8 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
   const { state } = view;
   const sel = state.selection;
   const re = /\{\{Ruby\s*[|:]\s*([^|{}:]+?)\s*[|:]\s*([^|{}:]+?)\s*\}\}/g;
-  const hits: { from: number; to: number; base: string; rt: string }[] = [];
+  // marks 必须一并带走：字面量上的高亮/颜色等 mark 收起后要落到 ruby 节点上，否则丢失
+  const hits: { from: number; to: number; base: string; rt: string; marks: any[] }[] = [];
   let skipped = 0;
   state.doc.nodesBetween(
     range ? range.from : 0,
@@ -114,7 +115,7 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
           skipped++;
           continue;
         }
-        hits.push({ from, to, base: m[1].trim(), rt: m[2].trim() });
+        hits.push({ from, to, base: m[1].trim(), rt: m[2].trim(), marks: node.marks ?? [] });
       }
     },
   );
@@ -134,7 +135,8 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
     const h = hits[i];
     const rubyType = state.schema.nodes.ruby;
     if (!rubyType) continue;
-    tr.replaceWith(h.from, h.to, rubyType.create({ base: h.base, rt: h.rt }));
+    // 第三个参数：把字面量上的 marks 带到 ruby 节点上（高亮/文字颜色等，切换模式后不再丢）
+    tr.replaceWith(h.from, h.to, rubyType.create({ base: h.base, rt: h.rt }, null, h.marks));
   }
   if (tr.docChanged) {
     suppressAutoExpandOnce = true; // 收起是我们自己造成的，那一次不参与判断
@@ -394,11 +396,20 @@ export const Ruby = Node.create({
       // 输入阶段不涉及表格切分（那只在解析 Markdown 时发生），所以竖线写法在这里没问题。
       new InputRule({
         find: /\{\{Ruby\s*[|:]\s*([^|{}:]+?)\s*[|:]\s*([^|{}:]+?)\}\}$/,
-        handler: ({ range, match, commands }) => {
+        handler: ({ range, match, commands, state }) => {
           const base = match[1]?.trim();
           const rt = match[2]?.trim();
           if (!base || !rt) return;
-          commands.insertContentAt(range, { type: "ruby", attrs: { base, rt } });
+          /**
+           * 关键：把**被替换字面量上的 marks 一并交给 ruby 节点**。
+           *
+           * 否则「给已高亮的文字创建注音」会丢掉高亮 —— 高亮是 mark，ruby 是节点，
+           * 新建节点时不带 marks 就等于把高亮删了。带上之后序列化结果正是
+           * `{{Hilite|yellow|{{Ruby|漢字|かんじ}}}}`（Hilite 在外、Ruby 在内）。
+           */
+          const pos = Math.min(range.from + 1, state.doc.content.size);
+          const marks = state.doc.resolve(pos).marks().map((m: any) => ({ type: m.type.name, attrs: m.attrs }));
+          commands.insertContentAt(range, { type: "ruby", attrs: { base, rt }, ...(marks.length ? { marks } : {}) });
         },
       }),
     ];

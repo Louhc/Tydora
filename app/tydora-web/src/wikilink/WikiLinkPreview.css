@@ -253,9 +253,9 @@
   margin: 0.5em 0;
 }
 
-/* 链接 - 与 IR 模式一致 */
+/* 链接 - 与 IR 模式一致（颜色跟随主题强调色） */
 .wiki-link-preview-content a {
-  color: var(--text-link, #0969da);
+  color: var(--text-link, var(--accent, #0969da));
   text-decoration: none;
   cursor: pointer;
 }
@@ -303,7 +303,7 @@
   color: var(--text-secondary);
 }
 
-/* 高亮 - 与 IR 模式一致 */
+/* 高亮 - 与 IR 模式一致（底色恒为浅黄：--bg-highlight 从未定义 → 前景固定深墨色） */
 .wiki-link-preview-content mark {
   background-image: linear-gradient(var(--bg-highlight, #fff3b0), var(--bg-highlight, #fff3b0));
   background-size: 100% calc(100% - 0.35em);
@@ -311,6 +311,7 @@
   background-repeat: no-repeat;
   padding: 0.12em 0.2em;
   border-radius: 2px;
+  color: var(--highlight-ink, #26282c);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
