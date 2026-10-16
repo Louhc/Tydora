@@ -3,7 +3,7 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import { EditorState, Compartment, RangeSetBuilder } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { tydoraMarkdownLanguage, rubyShorthandTag } from "./markdown-language";
+import { tydoraMarkdownLanguage, rubyShorthandTag, templateErrorShorthandTag } from "./markdown-language";
 import { javascript } from "@codemirror/lang-javascript";
 import { python } from "@codemirror/lang-python";
 import { html } from "@codemirror/lang-html";
@@ -235,7 +235,8 @@ const markdownHighlighting = syntaxHighlighting(
     { tag: tags.contentSeparator, color: "var(--text-secondary, #999)" },
     // Tydora 的注音简写 {{Ruby|本体|读音}}：专用 tag（见 markdown-language.ts）。
     // 颜色可用 --text-ruby 单独调，默认跟随代码配色的字符串色。
-    { tag: rubyShorthandTag, color: "var(--text-ruby, var(--hljs-string, #a31515))" },
+    { tag: templateErrorShorthandTag, color: "var(--warning-ink, #b42318)", textDecoration: "underline wavy" },
+            { tag: rubyShorthandTag, color: "var(--text-ruby, var(--hljs-string, #a31515))" },
     { tag: tags.meta, color: "var(--hljs-comment, #6e7781)" },
   ])
 );

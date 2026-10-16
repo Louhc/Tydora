@@ -50,6 +50,63 @@ const rubyShorthand = {
   ],
 };
 
+/**
+ * 「解析不了的模板」专用 tag（与 IR 的错误块对应，见 extensions/template-error.ts）。
+ *
+ * 覆盖的是 ruby 本体/读音里再塞模板这类写法 —— IR 里会渲染成错误块，
+ * 这里给源码里的同一段染警示色，改对了颜色自动消失 ✓。纯语法着色，不动文本 ✓。
+ */
+export const templateErrorShorthandTag = Tag.define();
+
+/**
+ * 「`{{Ruby|` 之后**还没遇到任何花括号就先碰到嵌套 `{{`**」→ 本体里塞了模板。
+ *
+ * ⚠️ 不能用懒匹配 `[^\n]*?\{\{`：那样会**跳过 Ruby 自己的 `}}`**，把同一行后面
+ * 另一个合法模板当成"嵌套"而误报（实测：`…{{Ruby|屎狗|shigou}}}}` 后面的
+ * `{{Hilite|green|…}}` 就被当成了嵌套 ✗）。
+ * 用 `[^{}\n]*` 保证中间不能出现任何花括号，命中即"紧随其后的第一个括号是 `{{`" ✓。
+ */
+const TEMPLATE_ERROR_HEAD_RE = /^\{\{Ruby\s*[|:][^{}\n]*\{\{/;
+
+/**
+ * 高亮范围：从 `{{Ruby|` 起按**配平**扫到与它配对的 `}}`（扫不到就标到行尾）。
+ * 只用于着色，不改文本 ✓。
+ */
+function templateErrorExtent(text: string, pos: number): number {
+  let depth = 0;
+  for (let i = pos; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\n") return i; // 单行内
+    if (ch === "{" && text[i + 1] === "{") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === "}" && text[i + 1] === "}") {
+      depth--;
+      i++;
+      if (depth === 0) return i + 1;
+      continue;
+    }
+  }
+  return text.length;
+}
+
+const templateErrorShorthand = {
+  defineNodes: [{ name: "TemplateErrorShorthand", style: templateErrorShorthandTag }],
+  parseInline: [
+    {
+      name: "TemplateErrorShorthand",
+      parse(cx: any, next: number, pos: number) {
+        if (next !== 123 /* '{' */) return -1;
+        const text = cx.slice(pos, cx.end);
+        if (!TEMPLATE_ERROR_HEAD_RE.test(text)) return -1;
+        const end = templateErrorExtent(text, 0);
+        return cx.addElement(cx.elt("TemplateErrorShorthand", pos, pos + end));
+      },
+    },
+  ],
+};
 /** 表格折叠：`markdownLanguage` 里也带了这条，自己配置时要一并补上 */
 const tableFold = {
   props: [
@@ -62,7 +119,14 @@ const tableFold = {
 /** Tydora 的 Markdown 语言：GFM + 上下标 + `{{Ruby|…}}` 高亮，**不含 Emoji 短代码** */
 export const tydoraMarkdownLanguage = new Language(
   commonmarkLanguage.data,
-  markdownParser.configure([GFM, Subscript, Superscript, rubyShorthand, tableFold]),
+  markdownParser.configure([
+    GFM,
+    Subscript,
+    Superscript,
+    templateErrorShorthand, // 必须在 rubyShorthand 之前：先命中者胜
+    rubyShorthand,
+    tableFold,
+  ]),
   [],
   "markdown",
 );
