@@ -165,6 +165,55 @@ export function deleteCurrentLine(editor: Editor): void {
   }
 }
 
+/**
+ * 把一段剪贴板 HTML 插入编辑器（**右键粘贴与 Ctrl+V 共用** ✓）。
+ *
+ * 为什么单独抽出来：Ctrl+V 的 `paste` 事件里**带着完整 HTML**（日志实测 297 字符 ✓），
+ * 所以不必绕远路去 Rust 读剪贴板 ✓ —— 直接用这里 ✓，两条路径行为完全一致 ✓。
+ *
+ * 规则：
+ * - 单块且是**段落** → 只插行内内容（不拆段 ✓）；
+ * - 单块但是**标题/代码块/引用** → 整块插入（保住块格式 ✓）；
+ * - 多块 → 整块插入（段落全保留 ✓）；
+ * - 首尾的空块按"光标是否在空行上"决定裁/留 ✓（详见函数内注释 ✓）。
+ */
+export function insertClipboardHtml(editor: Editor, html: string): boolean {
+  try {
+    const schema = editor.schema;
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    const parsedDoc = PMDOMParser.fromSchema(schema).parse(parsed.body);
+
+    const blocks: any[] = [];
+    parsedDoc.forEach((child) => blocks.push(child.toJSON()));
+    const hadBreak = blocks.length >= 2;
+    const isEmptyBlock = (b: any) =>
+      (b.type === "paragraph" || b.type === "heading") && (!b.content || b.content.length === 0);
+
+    // 首部空块：光标在**非空行**时裁掉（块插入本身会换行 ✓）；光标在**空行**上时保留（那就是用户要的空行 ✓）
+    const $from = editor.state.selection.$from;
+    const atEmptyBlock = !$from.parent.inlineContent || $from.parent.content.size === 0;
+    if (!atEmptyBlock) {
+      while (blocks.length > 1 && isEmptyBlock(blocks[0])) blocks.shift();
+    }
+    while (blocks.length > 1 && isEmptyBlock(blocks[blocks.length - 1])) blocks.pop();
+
+    const firstBlock = parsedDoc.firstChild;
+    const inlineOnly = !hadBreak && firstBlock != null && firstBlock.type.name === "paragraph";
+    if (inlineOnly) {
+      const inlineJson = firstBlock.content.toJSON();
+      if (inlineJson && inlineJson.length > 0) {
+        editor.chain().focus().insertContent(inlineJson as any).run();
+      }
+    } else {
+      editor.chain().focus().insertContent(blocks as any).run();
+    }
+    return true;
+  } catch (err) {
+    console.warn("[paste] 插入剪贴板 HTML 失败:", err);
+    return false;
+  }
+}
+
 export function executeCommand(name: string, editor: Editor | null) {
   /**
    * 只判 `!editor` 不够：编辑器**已销毁**时实例对象仍在，但内部 view/state 已释放，
@@ -494,37 +543,8 @@ export function executeCommand(name: string, editor: Editor | null) {
         try {
           const html = await invoke<string | null>("read_clipboard_html");
           if (html) {
-            const view = editor.view;
-            /**
-             * ⚠️ 不要用 `view.pasteHTML` / `parseSlice`。
-             *
-             * 实测（harness）：把剪贴板里那段**完全正确**的
-             * `<p><span class="md-ruby" data-rt="あさゆう">朝夕</span></p>` 交给
-             * `pasteHTML()` 或 `parseSlice()`，得到的都是**纯文本** `朝夕` ✗（读音丢失 ✗）；
-             * 同一段 HTML 走 `PMDOMParser.parse()` 却能正确解析出 ruby 节点 ✓。
-             *
-             * 所以改成：**先 parse 出文档，再把第一块的行内内容 insertContent 进来**。
-             * 注音会作为 ruby 节点插入 ✓ —— 若光标恰好贴着它，注音的"就近自动展开"
-             * 会先显示源码 `{{Ruby|…}}`，光标移开后自动收起成注音 ✓（既有设计 ✓）。
-             */
-            const parsed = new DOMParser().parseFromString(html, "text/html");
-            const parsedDoc = PMDOMParser.fromSchema(view.state.schema).parse(parsed.body);
-            /**
-             * ⚠️ 单块与多块要区别处理 ✗。
-             *
-             * 以前只取 `parsedDoc.firstChild` 的行内内容 ✓ —— 于是**多行/多段**粘贴时
-             * 只剩第一段（实测：复制多行，粘进来只剩一行 ✗）。
-             * 现在：单块 → 只插行内内容（不拆开你当前所在的段落 ✓）；
-             * 多块 → 整篇插入（段落全保留 ✓）。
-             */
-            if (parsedDoc.childCount === 1) {
-              const inlineJson = parsedDoc.firstChild?.content.toJSON();
-              if (inlineJson && inlineJson.length > 0) {
-                editor.chain().focus().insertContent(inlineJson as any).run();
-              }
-            } else {
-              editor.chain().focus().insertContent(parsedDoc.toJSON() as any).run();
-            }
+            // 插入逻辑与 Ctrl+V 共用 ✓（见 insertClipboardHtml 的说明）
+            insertClipboardHtml(editor, html);
             inserted = true;
           }
         } catch (err) {

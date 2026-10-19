@@ -63,7 +63,7 @@ import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
 import { BulletListMindmap } from "./extensions/bullet-list-mindmap";
 import { HardBreakCleanup } from "./extensions/hardbreak-cleanup";
 import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFloatingToolbar";
-import { deleteCurrentLine, executeCommand } from "./extensions/custom-commands";
+import { deleteCurrentLine, executeCommand, insertClipboardHtml } from "./extensions/custom-commands";
 import { normalizePathKey } from "../utils/fileName";
 import { Math as MathExtension } from "./extensions/math";
 import { installImageWordMarkRule, installEmptyParagraphRule } from "./extensions/markdown-setup";
@@ -2077,62 +2077,6 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             return false;
           },
           keydown: (_view: any, event: KeyboardEvent) => {
-            /**
-             * Ctrl+V / Ctrl+Shift+V → 走**自己的粘贴命令**（与右键菜单完全一致 ✓）。
-             *
-             * 为什么必须在这里拦：实测 WebView 派发的 `paste` 事件是**合成**的 ✗ ——
-             * `clipboardData.types` 为空 ✗、`getData` 全空 ✗、连 `preventDefault()` 都拦不住
-             * 浏览器自己的粘贴 ✗，于是最终还是走 PM 的旧粘贴（把注音压成纯文本 ✗）。
-             * `keydown` 阶段能可靠 preventDefault ✓ —— 拦掉浏览器默认粘贴后，
-             * 调用与右键相同的命令 ✓（走 Rust 读剪贴板 ✓）。
-             *
-             * Vim 模式让渡：Vim 有自己的 Ctrl+V 语义（可视块）✓，这里不抢 ✓。
-             */
-            /**
-             * ⚠️ 这里**不加** `!vimEnabled` 门禁 ✗。
-             *
-             * 实测：加上之后 Ctrl+V 完全没反应 ✓ —— 说明分支被跳过 ✓，
-             * 落到 PM/Vim 的按键处理里什么都不做 ✓。粘贴是高频操作 ✓，
-             * Vim 的 Ctrl+V（可视块）相对冷门 ✓，所以这里无条件接管 ✓。
-             */
-            if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "v") {
-              event.preventDefault();
-              event.stopPropagation();
-              // 与右键菜单完全相同的同步调用 ✓（不延后、不兜底：兜底的 execCommand 在超时后
-              // 已失去用户手势，会被浏览器拒绝 ✓，结果就是"按了没反应"✗）
-              /**
-               * 延后 150ms 再调用 ✓（不是 30ms ✗）。
-               *
-               * 实测：右键菜单（剪贴板空闲 ✓）调用同一命令正常 ✓；Ctrl+V 时浏览器/系统
-               * 仍占着剪贴板 ✗，立即读会失败 ✓ —— 表现为"按了没反应"✗（因为默认粘贴已被 preventDefault ✓）。
-               * 150ms 足以让按键处理走完再读 ✓。
-               */
-              const pasteTarget = event.shiftKey ? "paste-plain" : "paste";
-              /**
-               * 先快后慢：第一次 **40ms** 就试 ✓（正常情况感觉不到延迟 ✓），
-               * 失败（文档没变化 ✓）再以 80ms / 160ms 重试 ✓。
-               *
-               * 为什么需要延后：Ctrl+V 的按键处理期间剪贴板仍被占用 ✗，
-               * 立即用 Rust 读会失败 ✓；而右键菜单天然在按键处理之外 ✓ 所以一直正常 ✓。
-               */
-              let delay = 40;
-              const attemptPaste = (left: number) => {
-                setTimeout(() => {
-                  if (editor.isDestroyed) return;
-                  const before = editor.state.doc.content.size;
-                  void executeCommand(pasteTarget, editor);
-                  setTimeout(() => {
-                    if (editor.isDestroyed) return;
-                    if (editor.state.doc.content.size !== before) return; // 成功 ✓
-                    if (left <= 0) return; // 放弃重试（命令内部已有纯文本回退 ✓）
-                    delay *= 2;
-                    attemptPaste(left - 1);
-                  }, 150);
-                }, delay);
-              };
-              attemptPaste(2);
-              return true;
-            }
             // 拦截 Ctrl+/（防止被当作 HTML 注释快捷键，模式切换由 App.tsx 全局处理）
             if ((event.ctrlKey || event.metaKey) && event.key === "/") {
               event.preventDefault();
@@ -2432,27 +2376,22 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
               }
             }
           }
-          if (editor && !editor.isDestroyed) {
-            /**
-             * 直接**调用与右键菜单相同的命令** ✓，保证两种粘贴行为完全一致 ✓。
-             *
-             * 自己再写一份 `parse + insertContent` 实测没生效（`getEditorView` 可能拿不到视图 ✗），
-             * 而右键菜单那条命令是验证过可用的 ✓ —— 所以这里只负责"阻止浏览器默认粘贴"，
-             * 其余交给同一条命令 ✓。
-             */
+          /**
+           * ★ 普通 Ctrl+V：**用事件里带来的 HTML 走与右键完全相同的插入逻辑** ✓。
+           *
+           * 之前误判"paste 事件里 clipboardData 为空"✗（那是一次合成事件的读数 ✓）；
+           * 事务探针实测：真实的 Ctrl+V 里 `types=["text/plain","text/html"]`、
+           * `htmlLen≈297` ✓ —— 数据是**有**的 ✓。
+           *
+           * 为什么不能交给 PM 自己粘（`parseSlice` 路径 ✗）：它解析出的 slice 是
+           * `openStart=2/openEnd=1` 的不对称形状 ✓，插入时**起始边界上的行内节点会被降级**
+           * ✗ —— 表现就是"复制多个注音时，只有第一个丢读音"✗（harness 精确复现 ✓）。
+           * 走 insertClipboardHtml（parse + insertContent）则不会有这个问题 ✓。
+           */
+          const pasteHtml = event.clipboardData?.getData("text/html") ?? "";
+          if (pasteHtml && editor && !editor.isDestroyed) {
             event.preventDefault();
-            /**
-             * ⚠️ 必须**延后一拍**再读剪贴板。
-             *
-             * 实测：在 `paste` 事件处理期间调用 `read_clipboard_html`（Rust/arboard）会拿到
-             * **null** ✗（日志里命令中连 `paste-in` 都没跑到 ✓），而右键菜单（不在 paste 事件里 ✓）
-             * 用同一条命令却读得到 ✓ —— 典型的"剪贴板被当前粘贴操作占用" ✓。
-             * 这里先 preventDefault 阻止浏览器默认粘贴 ✓，松开后再交给同一条命令 ✓。
-             */
-            setTimeout(() => {
-              if (!editor.isDestroyed) void executeCommand("paste", editor);
-            }, 0);
-            return true;
+            if (insertClipboardHtml(editor, pasteHtml)) return true;
           }
           return false;
         },
