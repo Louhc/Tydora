@@ -4516,7 +4516,21 @@ export default function Sidebar({
 
       {visibleTabs.length >= 1 && (
         <div className="sidebar-header" data-tauri-drag-region="deep">
-          <div className="sidebar-tabs-wrapper" data-tauri-drag-region="false">
+          <div
+            className="sidebar-tabs-wrapper"
+            data-tauri-drag-region="false"
+            style={
+              {
+                /**
+                 * 共享指示块的位置/宽度：页签等宽（flex:1），所以纯 CSS 就能算出来
+                 * （见 Sidebar.css 的 .sidebar-tab-indicator）✓ —— 切换页签时指示块滑动过去 ✓。
+                 */
+                "--sidebar-tab-count": visibleTabs.length,
+                "--sidebar-tab-index": Math.max(0, visibleTabs.indexOf(activeTab)),
+              } as React.CSSProperties
+            }
+          >
+            <span className="sidebar-tab-indicator" aria-hidden="true" />
             {visibleTabs.map((tab) => (
               <button
                 key={tab}

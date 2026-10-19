@@ -919,6 +919,8 @@ html:not(.platform-macos) .sidebar-header {
 
 .sidebar-tab {
   position: relative;
+  /* 盖在共享指示块之上（指示块 z-index: 0）✓ */
+  z-index: 1;
   flex: 1;
   display: flex;
   align-items: center;
@@ -964,7 +966,8 @@ html:not(.platform-macos) .sidebar-header {
 }
 
 .sidebar-tab.active {
-  color: var(--text-primary);
+  /* 图标一起上强调色：图标用 stroke="currentColor"，所以只要改 color ✓ */
+  color: var(--accent, #0969da);
   /* 选中 Tab = 控件不透明度 + delta（默认更实一些） */
   --sidebar-tab-active-opacity: max(
     0,
@@ -978,17 +981,45 @@ html:not(.platform-macos) .sidebar-header {
    * 更实了但颜色变黑（深色主题下 bg-primary 接近纯黑）。color-mix 同时满足两点。
    * 百分比仍乘 --sidebar-tab-active-opacity：把"侧栏 chrome 不透明度"调低时会自动变淡。
    */
+}
+
+/**
+ * 选中指示块（**整组共用一个**，不是每个按钮各画一块）。
+ *
+ * 为什么这么做：每个按钮各画选中态时，切换只能"这边消失、那边出现" ✗；
+ * 共享一个元素就能让它**滑动**过去 ✓（用户要求）。页签等宽（flex:1），
+ * 所以位置与宽度纯 CSS 可算：宽度 = (内容宽 - 两侧内边距) / 页面数，位移 = 自身宽度 × 索引 ✓。
+ *
+ * 定位基准是 wrapper 的 padding box，所以 top/bottom/left 都要减去 wrapper 的 3px 内边距 ✓。
+ */
+.sidebar-tab-indicator {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / var(--sidebar-tab-count, 1));
+  transform: translateX(calc(100% * var(--sidebar-tab-index, 0)));
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 11px;
+  /* 填充与"侧栏 chrome 不透明度"设置联动（同原来的选中底色 ✓）*/
   background: color-mix(in srgb,
-      var(--accent, #0969da) calc(20% * var(--sidebar-tab-active-opacity, 1)),
+      var(--accent, #0969da) calc(20% * max(0, calc(var(--sidebar-chrome-opacity, 1) + 0.18))),
       var(--bg-primary, #1e1e1e));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, calc(0.2 * var(--sidebar-tab-active-opacity))),
-    inset 0 -1px 0 rgba(0, 0, 0, calc(0.05 * var(--sidebar-tab-active-opacity))),
-    0 1px 4px rgba(0, 0, 0, calc(0.06 * var(--sidebar-tab-active-opacity)));
-  /* 选中框用主题强调色，但压得很淡：暖色主题（琥珀/橙）在深色底上，0.25 就显得扎眼。
-     0.10 只留一圈若隐若现的暗示。想更淡继续调小；完全不要就写 border: none。
-     该值仍乘 --sidebar-tab-active-opacity，跟随"侧栏 chrome 不透明度"设置。 */
-  border: 0.5px solid rgba(var(--accent-rgb, 137, 180, 250), calc(0.10 * var(--sidebar-tab-active-opacity)));
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* 指示块下方那一小段强调色横条（跟着块一起滑动 ✓）；文字不要：顶部页签是纯图标 ✓ */
+.sidebar-tab-indicator::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent, #0969da);
+  transform: translateX(-50%);
 }
 
 /* 拖拽中的源 tab：淡出，表示"拿起来了" */
