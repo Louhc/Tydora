@@ -509,25 +509,22 @@ export function executeCommand(name: string, editor: Editor | null) {
              */
             const parsed = new DOMParser().parseFromString(html, "text/html");
             const parsedDoc = PMDOMParser.fromSchema(view.state.schema).parse(parsed.body);
-            const first = parsedDoc.firstChild;
-            const inlineJson = first ? first.content.toJSON() : null;
-            if (inlineJson && inlineJson.length > 0) {
-              editor.chain().focus().insertContent(inlineJson as any).run();
-            }
-            setTimeout(() => {
-              try {
-                const v2 = editor.view;
-                const all: string[] = [];
-                v2.state.doc.nodesBetween(0, v2.state.doc.content.size, (node: any) => {
-                  if (node.type.name === "ruby") {
-                    all.push(`rt=${JSON.stringify(node.attrs?.rt)} base=${JSON.stringify(node.textContent)}`);
-                  }
-                  return true;
-                });
-              } catch {
-                /* ignore */
+            /**
+             * ⚠️ 单块与多块要区别处理 ✗。
+             *
+             * 以前只取 `parsedDoc.firstChild` 的行内内容 ✓ —— 于是**多行/多段**粘贴时
+             * 只剩第一段（实测：复制多行，粘进来只剩一行 ✗）。
+             * 现在：单块 → 只插行内内容（不拆开你当前所在的段落 ✓）；
+             * 多块 → 整篇插入（段落全保留 ✓）。
+             */
+            if (parsedDoc.childCount === 1) {
+              const inlineJson = parsedDoc.firstChild?.content.toJSON();
+              if (inlineJson && inlineJson.length > 0) {
+                editor.chain().focus().insertContent(inlineJson as any).run();
               }
-            }, 300);
+            } else {
+              editor.chain().focus().insertContent(parsedDoc.toJSON() as any).run();
+            }
             inserted = true;
           }
         } catch (err) {

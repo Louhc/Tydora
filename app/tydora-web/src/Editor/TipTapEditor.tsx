@@ -2088,35 +2088,49 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
              *
              * Vim 模式让渡：Vim 有自己的 Ctrl+V 语义（可视块）✓，这里不抢 ✓。
              */
-            if (
-              !vimEnabled &&
-              (event.ctrlKey || event.metaKey) &&
-              !event.altKey &&
-              event.key.toLowerCase() === "v"
-            ) {
+            /**
+             * ⚠️ 这里**不加** `!vimEnabled` 门禁 ✗。
+             *
+             * 实测：加上之后 Ctrl+V 完全没反应 ✓ —— 说明分支被跳过 ✓，
+             * 落到 PM/Vim 的按键处理里什么都不做 ✓。粘贴是高频操作 ✓，
+             * Vim 的 Ctrl+V（可视块）相对冷门 ✓，所以这里无条件接管 ✓。
+             */
+            if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "v") {
               event.preventDefault();
               event.stopPropagation();
+              // 与右键菜单完全相同的同步调用 ✓（不延后、不兜底：兜底的 execCommand 在超时后
+              // 已失去用户手势，会被浏览器拒绝 ✓，结果就是"按了没反应"✗）
               /**
-               * ⚠️ 延后一拍再读剪贴板 ✓，并且**必须带兜底** ✗：
-               * 若自己的粘贴命令没有产生任何变化（例如 Rust 侧读不到剪贴板 ✓），
-               * 就退回浏览器自己的粘贴 ✓（宁可只粘到纯文本 ✓，也不能"什么都粘不出来" ✗）。
+               * 延后 150ms 再调用 ✓（不是 30ms ✗）。
+               *
+               * 实测：右键菜单（剪贴板空闲 ✓）调用同一命令正常 ✓；Ctrl+V 时浏览器/系统
+               * 仍占着剪贴板 ✗，立即读会失败 ✓ —— 表现为"按了没反应"✗（因为默认粘贴已被 preventDefault ✓）。
+               * 150ms 足以让按键处理走完再读 ✓。
                */
-              const beforeSize = editor.state.doc.content.size;
-              const plainPaste = event.shiftKey;
-              setTimeout(() => {
-                if (editor.isDestroyed) return;
-                if (plainPaste) void executeCommand("paste-plain", editor);
-                else void executeCommand("paste", editor);
+              const pasteTarget = event.shiftKey ? "paste-plain" : "paste";
+              /**
+               * 先快后慢：第一次 **40ms** 就试 ✓（正常情况感觉不到延迟 ✓），
+               * 失败（文档没变化 ✓）再以 80ms / 160ms 重试 ✓。
+               *
+               * 为什么需要延后：Ctrl+V 的按键处理期间剪贴板仍被占用 ✗，
+               * 立即用 Rust 读会失败 ✓；而右键菜单天然在按键处理之外 ✓ 所以一直正常 ✓。
+               */
+              let delay = 40;
+              const attemptPaste = (left: number) => {
                 setTimeout(() => {
-                  try {
+                  if (editor.isDestroyed) return;
+                  const before = editor.state.doc.content.size;
+                  void executeCommand(pasteTarget, editor);
+                  setTimeout(() => {
                     if (editor.isDestroyed) return;
-                    if (editor.state.doc.content.size === beforeSize) document.execCommand("paste");
-                  } catch {
-                    /* ignore */
-                  }
-                }, 250);
-              }, 30);
-              return true;
+                    if (editor.state.doc.content.size !== before) return; // 成功 ✓
+                    if (left <= 0) return; // 放弃重试（命令内部已有纯文本回退 ✓）
+                    delay *= 2;
+                    attemptPaste(left - 1);
+                  }, 150);
+                }, delay);
+              };
+              attemptPaste(2);
               return true;
             }
             // 拦截 Ctrl+/（防止被当作 HTML 注释快捷键，模式切换由 App.tsx 全局处理）
