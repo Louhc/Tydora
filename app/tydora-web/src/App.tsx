@@ -2548,7 +2548,8 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
            * 「setContent 落定」的那次 effect，与内容更新同帧完成，中途不渲染中间位置；
            * 目标文件已经打开时则立即跳。
            */
-          editorHandleRef.current?.scrollToLine(line, path);
+          // 带上关键词：跳到行后把光标落到命中处（只跳行首会看着"没到位" ✗）
+        editorHandleRef.current?.scrollToLine(line, path, query ?? undefined);
         }
       }
 

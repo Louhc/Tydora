@@ -5,6 +5,7 @@ import type { EditorView } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 import Paragraph from "@tiptap/extension-paragraph";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { DOMSerializer } from "@tiptap/pm/model";
 import Placeholder from "@tiptap/extension-placeholder";
 import Bold from "@tiptap/extension-bold";
 import Italic from "@tiptap/extension-italic";
@@ -52,6 +53,8 @@ import i18n from "../i18n";
 import { TextColor } from "./extensions/text-color";
 import { TydoraHighlight } from "./extensions/highlight-ext";
 import { CaretHistory, caretBeforeChangeKey } from "./extensions/caret-history";
+import { RubyMeasure } from "./ruby-measure";
+
 import { TemplateError, TemplateErrorExpand } from "./extensions/template-error";
 
 import { HeadingHighlight } from "./extensions/heading-highlight";
@@ -400,10 +403,37 @@ function applyLineJumpToView(
   markdown: string,
   line: number,
   container: HTMLElement | null,
+  query?: string,
 ): void {
   if (!isEditorAlive(editor)) return;
-  const pos = pmPosForMarkdownLineWithFallback(editor, markdown, line);
+  let pos = pmPosForMarkdownLineWithFallback(editor, markdown, line);
   if (pos === null) return;
+  /**
+   * 命中精定位：侧栏搜索给的是"行号 + 关键词"。只跳到行首的话，命中在行中间时
+   * 光标看着"没到位" ✗（实测：1.md 的「透」在第 49 行第 14 列）。
+   * 这里在**位置映射表自己那份 Markdown**（与行号换算同一套坐标）里，于**本行范围内**
+   * 找关键词，把光标移到命中处 ✓；找不到就保持行首 ✓。
+   */
+  if (query) {
+    try {
+      const map = buildPositionMap(editor);
+      const md = map.markdown ?? "";
+      if (md) {
+        const lines = md.split("\n");
+        const idx = Math.max(0, Math.min(Math.floor(line) - 1, lines.length - 1));
+        let off = 0;
+        for (let i = 0; i < idx; i++) off += lines[i].length + 1;
+        const lineLen = lines[idx]?.length ?? 0;
+        const at = md.indexOf(query, off);
+        if (at >= 0 && at < off + lineLen) {
+          const hit = mdOffsetToPmPos(map, at);
+          if (hit !== null) pos = hit;
+        }
+      }
+    } catch {
+      /* 精定位失败就保持行首，不影响跳转本身 */
+    }
+  }
   try {
     editor.chain().focus().setTextSelection(pos).run();
   } catch {
@@ -833,7 +863,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
      * **不能**在拿到请求时立刻执行：那一刻（App 的 state 还没提交）编辑器里还是
      * 上一份文档，跳了就是跳到旧文件上。所以用 path 判断是否要换文件。
      */
-    const pendingLineJumpRef = useRef<{ line: number; path: string } | null>(null);
+    const pendingLineJumpRef = useRef<{ line: number; path: string; query?: string } | null>(null);
     // SV 侧：源码偏移 + ratio/scrollRatio → SV → IR 时恢复
     const sourceViewStateRef = useRef<{ anchor: number; head: number; ratio: number; scrollRatio: number }>({
       anchor: 0, head: 0, ratio: 0, scrollRatio: 0,
@@ -1082,13 +1112,13 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
                 serialize(state: any, node: any) {
                   if (!node.textContent.trim()) {
                     /**
-                     * 空段落：先照常收块，再**显式**多写一个空行。
+                     * 空段落 = **一个空行**（两个换行）✓。
                      *
-                     * ⚠️ 不能指望 `closeBlock` 多加换行：块已闭合时它是空操作（实测空段落
-                     * 因此被整段吞掉 ✗）。必须自己写出那两个换行 ✓。
+                     * ⚠️ 这里**不要**调 `closeBlock`：它会再多写一个换行 ✗ → M 个空段落写出
+                     * 3M+1 个换行 ✗，而解析侧按 floor((N−2)/2) 还原 ✓ → 两边不一致 →
+                     * 每次"保存→重开"空段落就被放大 ✗（实测把一段空行堆成了 1420 个换行 ✓）。
+                     * 只写两个换行时：M 个空段落 = 2M+2 个换行 ✓，与解析侧**严格互逆** ✓。
                      */
-                    state.renderInline(node);
-                    state.closeBlock(node);
                     state.write("\n\n");
                     return;
                   }
@@ -1842,6 +1872,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         TemplateErrorExpand,
 
         CaretHistory,
+        RubyMeasure,
         // 文字颜色（渲染成 <span style="color: …">，见 extensions/text-color.ts）
         TextColor,
         Typography,
@@ -1989,6 +2020,33 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       },
       editorProps: {
         handleDOMEvents: {
+          /**
+           * 接管复制：自己写剪贴板的 **text/html** 与 **text/plain**。
+           *
+           * 为什么必须接管：实测剪贴板里的 HTML **没有声明字符集** ✗ ——
+           * `<html><body><span class="md-ruby" data-rt="銇傘仌銈嗐亞">鏈濆</span>`
+           *（原本是「あさゆう」/「朝夕」✓）。Windows 粘贴时按系统 ANSI 代码页（GBK ✓）解读，
+           * 于是**读音与文字全变乱码** ✗ → 粘回 Tydora 时注音就"没了" ✓。
+           * 这里用 ProseMirror 的 DOMSerializer 序列化选区，最前面声明 `<meta charset="utf-8">` ✓，
+           * 两个通道都由我们自己写 ✓（纯文本只留本体 ✓）。
+           */
+          copy: (view: EditorView, event: ClipboardEvent) => {
+            try {
+              const data = event.clipboardData;
+              if (!data) return false;
+              const { state } = view;
+              const slice = state.selection.content();
+              const holder = document.createElement("div");
+              const serializer = DOMSerializer.fromSchema(state.schema);
+              holder.appendChild(serializer.serializeFragment(slice.content));
+              data.setData("text/html", `<meta charset="utf-8">${holder.innerHTML}`);
+              data.setData("text/plain", slice.content.textBetween(0, slice.content.size, "\n", "\n"));
+              event.preventDefault();
+              return true;
+            } catch {
+              return false;
+            }
+          },
           // 记录左键按下时是否已有跨块选区，供 mouseup / selectionUpdate 强制清幽灵高亮
           mousedown: (_view: EditorView, event: MouseEvent) => {
             if (!isPlatformMacos() || event.button !== 0 || event.shiftKey) {
@@ -2019,6 +2077,48 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             return false;
           },
           keydown: (_view: any, event: KeyboardEvent) => {
+            /**
+             * Ctrl+V / Ctrl+Shift+V → 走**自己的粘贴命令**（与右键菜单完全一致 ✓）。
+             *
+             * 为什么必须在这里拦：实测 WebView 派发的 `paste` 事件是**合成**的 ✗ ——
+             * `clipboardData.types` 为空 ✗、`getData` 全空 ✗、连 `preventDefault()` 都拦不住
+             * 浏览器自己的粘贴 ✗，于是最终还是走 PM 的旧粘贴（把注音压成纯文本 ✗）。
+             * `keydown` 阶段能可靠 preventDefault ✓ —— 拦掉浏览器默认粘贴后，
+             * 调用与右键相同的命令 ✓（走 Rust 读剪贴板 ✓）。
+             *
+             * Vim 模式让渡：Vim 有自己的 Ctrl+V 语义（可视块）✓，这里不抢 ✓。
+             */
+            if (
+              !vimEnabled &&
+              (event.ctrlKey || event.metaKey) &&
+              !event.altKey &&
+              event.key.toLowerCase() === "v"
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              /**
+               * ⚠️ 延后一拍再读剪贴板 ✓，并且**必须带兜底** ✗：
+               * 若自己的粘贴命令没有产生任何变化（例如 Rust 侧读不到剪贴板 ✓），
+               * 就退回浏览器自己的粘贴 ✓（宁可只粘到纯文本 ✓，也不能"什么都粘不出来" ✗）。
+               */
+              const beforeSize = editor.state.doc.content.size;
+              const plainPaste = event.shiftKey;
+              setTimeout(() => {
+                if (editor.isDestroyed) return;
+                if (plainPaste) void executeCommand("paste-plain", editor);
+                else void executeCommand("paste", editor);
+                setTimeout(() => {
+                  try {
+                    if (editor.isDestroyed) return;
+                    if (editor.state.doc.content.size === beforeSize) document.execCommand("paste");
+                  } catch {
+                    /* ignore */
+                  }
+                }, 250);
+              }, 30);
+              return true;
+              return true;
+            }
             // 拦截 Ctrl+/（防止被当作 HTML 注释快捷键，模式切换由 App.tsx 全局处理）
             if ((event.ctrlKey || event.metaKey) && event.key === "/") {
               event.preventDefault();
@@ -2283,6 +2383,29 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             return true;
           }
           const items = event.clipboardData?.items;
+          /**
+           * ⚠️ 普通 Ctrl+V 也要走**与右键粘贴相同**的路径。
+           *
+           * 原因：PM 自己的粘贴（`pasteHTML` / `parseSlice`）实测会把注音压成纯文本 ✗
+           *（harness 对照：同一段 HTML 用 `parse` 能得到 ruby 节点 ✓，用 `parseSlice`
+           * 只能得到纯文本 ✗）。右键粘贴已在 custom-commands 里改成 `parse + insertContent` ✓，
+           * 这里保持一致 ✓，两种粘贴方式行为完全相同 ✓。
+           *
+           * 单块 → 只插行内内容（不拆段 ✓）；多块 → 整篇插入（保持段落 ✓）。
+           */
+          /**
+           * ⚠️ 不能依赖 `event.clipboardData`。
+           *
+           * 实测（日志）：Ctrl+V 的 paste 事件里 `clipboardData.types` 是**空数组** ✗、
+           * `getData("text/html")` 与 `getData("text/plain")` 都返回空串 ✗ ——
+           * 于是"用事件里的 HTML 自己插入"这条路永远进不去 ✓，只能退回 PM 的旧粘贴 ✗
+           *（而 PM 的旧粘贴会把注音压成纯文本 ✗）。右键粘贴之所以是好的 ✓，是因为它走
+           * Rust 的 `read_clipboard_html`（不依赖事件里的剪贴板 ✓）。
+           *
+           * 所以这里让 Ctrl+V **也走同一条命令** ✓：先阻止浏览器默认粘贴 ✓，
+           * 其余交给 `executeCommand("paste")` ✓（与右键完全一致 ✓）。
+           */
+          // 注：这里**不**读 event.clipboardData（实测为空 ✗，见上方说明）
           if (!items) return false;
 
           for (const item of items) {
@@ -2294,6 +2417,28 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
                 return true;
               }
             }
+          }
+          if (editor && !editor.isDestroyed) {
+            /**
+             * 直接**调用与右键菜单相同的命令** ✓，保证两种粘贴行为完全一致 ✓。
+             *
+             * 自己再写一份 `parse + insertContent` 实测没生效（`getEditorView` 可能拿不到视图 ✗），
+             * 而右键菜单那条命令是验证过可用的 ✓ —— 所以这里只负责"阻止浏览器默认粘贴"，
+             * 其余交给同一条命令 ✓。
+             */
+            event.preventDefault();
+            /**
+             * ⚠️ 必须**延后一拍**再读剪贴板。
+             *
+             * 实测：在 `paste` 事件处理期间调用 `read_clipboard_html`（Rust/arboard）会拿到
+             * **null** ✗（日志里命令中连 `paste-in` 都没跑到 ✓），而右键菜单（不在 paste 事件里 ✓）
+             * 用同一条命令却读得到 ✓ —— 典型的"剪贴板被当前粘贴操作占用" ✓。
+             * 这里先 preventDefault 阻止浏览器默认粘贴 ✓，松开后再交给同一条命令 ✓。
+             */
+            setTimeout(() => {
+              if (!editor.isDestroyed) void executeCommand("paste", editor);
+            }, 0);
+            return true;
           }
           return false;
         },
@@ -2312,6 +2457,17 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           }
           return false;
         },
+        /**
+         * 接管复制：自己写剪贴板的 **text/html** 与 **text/plain**。
+         *
+         * 为什么必须接管：实测剪贴板里的 HTML **没有声明字符集** ✗ ——
+         * `<html><body><span class="md-ruby" data-rt="銇傘仌銈嗐亞">鏈濆</span>`
+         * （原本是「あさゆう」/「朝夕」✓）。Windows 粘贴时按系统 ANSI 代码页（GBK ✓）
+         * 去解读，于是**读音与文字全变乱码** ✗ → 粘回 Tydora 时注音就"没了" ✓。
+         * 这里用 ProseMirror 的 DOMSerializer 序列化选区，并在最前面声明
+         * `<meta charset="utf-8">` ✓，两个通道都由我们自己写 ✓（纯文本只留本体 ✓）。
+         */
+        /** 纯文本通道只要**本体文字**（用户明确要求：不要把 `{{Ruby|…}}` 写进纯文本 ✓） */
         clipboardTextSerializer: (content: any) => {
           return content.content.textBetween(0, content.content.size, '\n', '\n');
         },
@@ -2908,7 +3064,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
        *     同帧落位（见 pendingLineJumpRef 的说明）。这里**不能**先跳：此刻
        *     编辑器里还是上一份文档。
        */
-      scrollToLine: (line: number, path?: string) => {
+      /**
+       * 跳到指定行并定位命中。
+       * `query` 可选：带上它时会把光标落到**该行内第一个命中**（侧栏搜索用 ✓）；
+       * 不带就落在行首（目录/大纲等场景 ✓）。
+       */
+      scrollToLine: (line: number, path?: string, query?: string) => {
         // 源码模式同理：搜索结果跳行也要走 CodeMirror，不然在 SV 下点了没反应
         if (mode === "sv") {
           sourceEditorRef.current?.scrollToLine(line);
@@ -2917,10 +3078,10 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         if (!isEditorAlive(editor)) return;
         const target = path ?? currentFilePath ?? "";
         if (normalizePathKey(target) !== normalizePathKey(currentFilePath ?? "")) {
-          pendingLineJumpRef.current = { line, path: target };
+          pendingLineJumpRef.current = { line, path: target, query };
           return;
         }
-        applyLineJumpToView(editor, value, line, containerRef.current);
+        applyLineJumpToView(editor, value, line, containerRef.current, query);
       },
       getCursorOffset: () => {
         if (!editor) return -1;
@@ -3410,7 +3571,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
               restoredPathRef.current = currentFilePath ?? null;
               pendingRestorePathRef.current = null;
               pendingRestoreSnapshotRef.current = null;
-              applyLineJumpToView(editor, value, jump.line, containerRef.current);
+              applyLineJumpToView(editor, value, jump.line, containerRef.current, jump.query);
             }
           }
           // 位置的恢复不在这里做：见下面「打开文件时恢复上次位置」那个 effect。

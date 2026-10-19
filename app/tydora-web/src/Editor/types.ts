@@ -21,7 +21,7 @@ export interface EditorHandle {
    * `path` 为目标文件路径：需要换文件时编辑器会把跳转排到内容装载后同帧执行，
    * 避免先渲染一次中间位置（顶部 / 上次光标）造成可见的两次跳动。
    */
-  scrollToLine: (line: number, path?: string) => void;
+  scrollToLine: (line: number, path?: string, query?: string) => void;
   getCursorOffset: () => number;
   /** 把光标落到指定 Markdown 偏移（文档级撤销后恢复「编辑前的位置」用） */
   setCaretAtMarkdownOffset(mdOffset: number): void;

@@ -33,7 +33,8 @@ export function openRubyEditor({ editor, getPos, anchor }: OpenOptions): void {
   closeRubyEditor();
 
   const node = editor.state.doc.nodeAt(getPos() ?? -1);
-  const base = (node?.attrs.base ?? "") as string;
+  // 本体是节点的**文本内容**（方案 A：ruby 节点自带 content），不再存在 attrs.base ✓
+  const base = (node?.textContent ?? "") as string;
   const rt = (node?.attrs.rt ?? "") as string;
 
   const panel = document.createElement("div");

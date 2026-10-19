@@ -22,6 +22,34 @@
 //     再由 parseHTML 还原成节点（否则打开已有文件不显示注音）。
 
 import { InputRule, Node } from "@tiptap/core";
+import { Fragment } from "@tiptap/pm/model";
+/**
+ * 估算一段文字的显示宽度（单位：em，按**本体字号**）。
+ *
+ * 为什么需要估算：注音的读音是 `::after` 绝对定位画上去的，**不参与布局** —— 读音比本体长时
+ * 会向两侧溢出，压到相邻注音。CSS 拿不到文字宽度，只能在渲染时按字符类别估一个值，
+ * 交给样式去"向两侧让出 (读音宽 − 本体宽) / 2"。
+ *
+ * 字符宽度约定：全角（CJK / 假名 / 全角标点）≈ 1em；半角（拉丁字母、数字、半角标点、
+ * 空格）≈ 0.5em。`scale` 用于小字号：读音是 0.5em 字号，所以传 0.5 ✓。
+ *
+ * ⚠️ 早期版本把"每个字符都按 1em 算本体、0.5em 算读音"，只对 CJK 成立；英文读音的实际宽度
+ * 只有假设值的一半 → 留白被高估一倍，本体左右多出大片空白（用户实测反馈 ✗）。
+ */
+const WIDE_CHAR_RE =
+  /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/;
+
+/**
+ * 估算宽度（仅作**实测前**的兜底默认值）。
+ *
+ * 真正的宽度由 Editor/ruby-measure.ts 在渲染后用 Range / canvas **实测**覆盖 —— 非等宽字体下
+ * 按字符估算必然不准（i 与 W 差几倍），这里只保证"实测还没跑的那一帧"不会完全没有留白 ✓。
+ */
+function rubyWidthEm(text: string, scale: number): string {
+  let width = 0;
+  for (const ch of text) width += WIDE_CHAR_RE.test(ch) ? 1 : 0.5;
+  return (width * scale).toFixed(2);
+}
 import { Plugin, TextSelection } from "prosemirror-state";
 import {
   installMarkdownRuleOnce,
@@ -56,6 +84,14 @@ function adjacentRuby(view: any): number | null {
   const { selection } = view.state;
   if (!selection.empty) return null;
   const $from = selection.$from;
+  /**
+   * ⚠️ 方案 A 之后注音**有文本内容** —— 光标常常直接落在它**内部**
+   *（$from.parent 就是 ruby 节点 ✓，此时既没有 nodeBefore 也没有 nodeAfter ✗）。
+   * 不单独处理这一种，点击/把光标移进注音就再也不会展开（实测回归 ✓）。
+   */
+  for (let d = $from.depth; d > 0; d--) {
+    if ($from.node(d).type.name === "ruby") return $from.before(d);
+  }
   const before = $from.nodeBefore;
   if (before && before.type.name === "ruby") return selection.from - before.nodeSize;
   const after = $from.nodeAfter;
@@ -65,22 +101,67 @@ function adjacentRuby(view: any): number | null {
 
 /** 展开：注音节点 → 源码字面量 `{{Ruby|本体|读音}}`，光标保持原本所在的那一侧 */
 function expandRubyAt(view: any, pos: number): boolean {
-  const node = view.state.doc.nodeAt(pos);
+  /**
+   * ⚠️ pos 通常来自 `view.posAtDOM(el, 0)`，而注音是 `contenteditable="false"` 的行内
+   * **原子叶子**：这个调用可能返回"节点**之后**"的位置（off-by-one ✓ 实测会让单击
+   * 完全没反应 ✗，因为 nodeAt(pos) 拿到的是后面的文本 ✗）。
+   * 所以在 pos / pos-1 / pos+1 三个候选里找真正的 ruby ✓，找到后统一用 `at`。
+   */
+  let at = pos;
+  let node = view.state.doc.nodeAt(at);
+  if (!node || node.type.name !== "ruby") {
+    for (const cand of [pos - 1, pos + 1]) {
+      if (cand < 0) continue;
+      const n = view.state.doc.nodeAt(cand);
+      if (n && n.type.name === "ruby") {
+        at = cand;
+        node = n;
+        break;
+      }
+    }
+  }
+
   if (!node || node.type.name !== "ruby") return false;
-  const base = (node.attrs.base ?? "").trim();
+  const base = (node.textContent ?? "").trim();
   const rt = (node.attrs.rt ?? "").trim();
   if (!base || !rt) return false;
   const literal = `{{Ruby|${base}|${rt}}}`;
-  const wasBefore = view.state.selection.from <= pos;
-  const tr = view.state.tr.replaceWith(pos, pos + node.nodeSize, view.state.schema.text(literal, node.marks ?? []));
-  tr.setSelection(TextSelection.create(tr.doc, wasBefore ? pos : pos + literal.length));
+  /**
+   * ⚠️ 不能只用 `selection.from <= at` 判断"在左边还是右边"。
+   *
+   * 注音现在**有文本内容**（方案 A），所以点在**左边界**时光标会落在它**内部**
+   *（`from === at + 1` ✗，比 `at` 大一）—— 用旧判断就成了"在右边" ✗ →
+   * 展开后光标跑到**右边界**（用户实测 ✓）。
+   * 改成：落在起点、或落在注音**前半** → 展开后放**前面** ✓；后半 → 放后面 ✓
+   *（与"按点击落在左半/右半决定"的原始设计一致 ✓）。
+   */
+  const nodeEnd = at + node.nodeSize;
+  const selFrom = view.state.selection.from;
+  const wasBefore = selFrom <= at || (selFrom < nodeEnd && selFrom - at <= node.nodeSize / 2);
+  /**
+   * ⚠️ 只把**合法 Mark 实例**带过去。
+   *
+   * 实测报错：`mark.type.spec.toDOM is not a function` ✗ —— 说明 `node.marks` 里混进了
+   * 不是真正 Mark 的东西（例如从输入规则/粘贴路径带回来的裸 `{type, attrs}` 对象）。
+   * 这里过滤掉非法项（并记日志），既保住高亮/颜色，也不会因为一条脏数据整条路径崩掉 ✓。
+   */
+  const rawMarks: any[] = (node.marks ?? []) as any[];
+  const safeMarks = rawMarks.filter(
+    (m: any) => m && typeof m === "object" && typeof m.type?.create === "function" && typeof m.type?.spec?.toDOM === "function",
+  );
+  if (safeMarks.length !== rawMarks.length) {
+  }
+  const tr = view.state.tr.replaceWith(at, at + node.nodeSize, view.state.schema.text(literal, safeMarks));
+  tr.setSelection(TextSelection.create(tr.doc, wasBefore ? at : at + literal.length));
   tr.setMeta(RUBY_TOGGLE_META, true);
   pendingLiteral = true;
   sawLiteralExpand = true; // 记住"本会话展开过"，此后收起不再依赖 pendingLiteral
   suppressAutoExpandOnce = true; // 展开动作自身引起的那次更新不参与判断
   view.dispatch(tr);
+
   return true;
 }
+
 
 /**
  * 把不在"编辑范围"内的字面量渲染回节点。
@@ -119,6 +200,7 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
       }
     },
   );
+
   if (hits.length === 0) {
     /**
      * ⚠️ 只有**全文档扫描**（未给 range）才能改写"是否还有字面量"这个全局判断。
@@ -136,7 +218,15 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
     const rubyType = state.schema.nodes.ruby;
     if (!rubyType) continue;
     // 第三个参数：把字面量上的 marks 带到 ruby 节点上（高亮/文字颜色等，切换模式后不再丢）
-    tr.replaceWith(h.from, h.to, rubyType.create({ base: h.base, rt: h.rt }, null, h.marks));
+    /**
+     * 本体是子文本 ✓；marks 作为**节点**的 marks（高亮/颜色等，切换模式后不再丢）✓。
+     *
+     * ⚠️ `NodeType.create(attrs, content, marks)` 只有**三个**参数 ✓ ——
+     * 多写一个参数不会报错，但会把 content 当成 null、把真正的 content 当成 marks ✗：
+     * 结果是"空注音 + marks 里混进一个 TextNode" ✓，渲染时报
+     * `mark.type.spec.toDOM is not a function` ✗（实测就是这么来的）。
+     */
+    tr.replaceWith(h.from, h.to, rubyType.create({ rt: h.rt }, [state.schema.text(h.base)], h.marks));
   }
   if (tr.docChanged) {
     suppressAutoExpandOnce = true; // 收起是我们自己造成的，那一次不参与判断
@@ -156,6 +246,16 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
 let pendingLiteral = false;
 /** 一次性抑制：由我们自己的展开/收起引起的那次更新不参与邻近判断 */
 let suppressAutoExpandOnce = false;
+/**
+ * 鼠标是否按下（左键）。
+ *
+ * 用途：**按住鼠标拖选时**不触发「光标邻近注音就展开」的自动逻辑 —— 否则从注音边界
+ * 按下开始拖选的瞬间，ruby 就被展开成字面量 ✗，拖选变成在选字面量（用户实测反馈）。
+ */
+let mouseDown = false;
+
+
+
 /** 自跟踪的组字状态（见 handleDOMEvents 的说明：不能只信 view.composing） */
 let composingHere = false;
 /**
@@ -174,6 +274,16 @@ export const Ruby = Node.create({
   inline: true,
   group: "inline",
   /**
+   * **本体文字是真正的子文本**（方案 A）。
+   *
+   * 以前本体放在 `attrs.base` 里、节点是**叶子**：ProseMirror 无法寻址"注音内部"的位置，
+   * 浏览器把选区端点放进去时会被丢弃 → PM 认为选区折叠 ✗ → 浏览器下一次 mousemove 又扩张
+   * → 每帧拉锯 = **选中区不停闪** ✗；松手时还容易被当成单击而**吞掉选区** ✗（均有日志实证）。
+   * 改成带文本内容后，PM 能正常寻址内部位置 → 拖选（含右→左）稳定 ✓。
+   * 读音仍在 `attrs.rt` 里，由 CSS 的 ::after 画在上方（见 theme.css）✓。
+   */
+  content: "text*",
+  /**
    * ⚠️ 不要设 atom: true。
    *
    * ProseMirror 里 `atom` 的语义是"连文本选区都不会包含它"（inline 图片那种行为）——
@@ -186,8 +296,8 @@ export const Ruby = Node.create({
 
 
   addAttributes() {
+    // 本体已经变成节点的**文本内容**（见 content），不再需要 base 属性 ✓
     return {
-      base: { default: null },
       rt: { default: null },
     };
   },
@@ -199,11 +309,12 @@ export const Ruby = Node.create({
         tag: "span.md-ruby",
         getAttrs: (element) => {
           const el = element as HTMLElement;
-          const base = (el.textContent ?? "").trim();
           const rt = (el.getAttribute("data-rt") ?? "").trim();
-          if (!base || !rt) return false;
-          return { base, rt };
+          if (!rt) return false;
+          // 本体就是元素里的文字 → 交给 ProseMirror 按子内容解析 ✓
+          return { rt };
         },
+
       },
       // 兼容：从别处粘贴的裸 HTML <ruby>…<rt>…</rt></ruby>
       {
@@ -211,11 +322,19 @@ export const Ruby = Node.create({
         getAttrs: (element) => {
           const el = element as HTMLElement;
           const rt = (el.querySelector("rt")?.textContent ?? "").trim();
+          if (!rt) return false;
+          return { rt };
+        },
+        /**
+         * 裸 `<ruby>base<rt>rt</rt></ruby>`：内容**不能**默认解析（会把 rt 也吃进本体 ✗）——
+         * 这里显式返回"去掉 rt/rp 之后的文字"作为节点的文本内容 ✓。
+         */
+        getContent: (node: any, schema: any) => {
+          const el = node as HTMLElement;
           const clone = el.cloneNode(true) as HTMLElement;
           clone.querySelectorAll("rt, rp").forEach((n) => n.remove());
           const base = (clone.textContent ?? "").trim();
-          if (!base || !rt) return false;
-          return { base, rt };
+          return Fragment.from(schema.text(base || " "));
         },
       },
     ];
@@ -238,15 +357,24 @@ export const Ruby = Node.create({
         class: "md-ruby",
         "data-rt": node.attrs.rt ?? "",
         /**
-         * 读音与本体各自的字符数，供 CSS 估算"读音是否比本体宽"。
+         * 读音与本体各自的**估算宽度**（em），供 CSS 决定"向两侧让出多少空间"。
          * 读音是绝对定位画上去的（不占布局），太长就会向两侧溢出压到相邻注音；
-         * CSS 测不出文字宽度，所以用内联 CSS 变量把长度交给样式（内联变量最可靠，
-         * 不依赖 attr() 的新语法）。
+         * CSS 测不出文字宽度，只能用估算（见 rubyWidthEm 的说明：按全角/半角分别算，
+         * 早期"每个字都按 1em"的写法会让英文读音的留白多出一倍 ✗）。
          */
-        style: `--ruby-rt-len:${(node.attrs.rt ?? "").length};--ruby-base-len:${(node.attrs.base ?? "").length}`,
-        contenteditable: "false",
+        style: `--ruby-rt-w:${rubyWidthEm(node.attrs.rt ?? "", 0.5)}em;--ruby-base-w:${rubyWidthEm(node.textContent ?? "", 1)}em`,
+        /**
+         * ⚠️ 暂不设 contenteditable="false"（实验）。
+         *
+         * 它是"原子叶子"的标准做法，能防旧的选区不稳定；但**拖选经过注音时** Chromium 会在
+         * 两种边界间反复吸附 → 选中区不停闪 ✗（实测：拖动期间我们这边零 dispatch ✓，
+         * 所以闪来自浏览器对该原子的选区处理 ✓）。
+         * 去掉后注音内部可能被光标进入，但 PM 把它当叶子节点，输入仍会被移出边界 ✓。
+         * 若出现别的问题，恢复这一行即可（备份在 %TEMP%）。
+         */
       },
-      node.attrs.base ?? "",
+      // 0 = 内容孔：本体文字作为节点的子内容渲染 ✓
+      0,
     ];
   },
 
@@ -261,11 +389,7 @@ export const Ruby = Node.create({
    * 只投影**本体**（base），不含读音（rt）：读音若也进入投影，会与 markdown 的
    * 位置映射（markdown-position-map）及序列化产生偏差，得不偿失。
    */
-  extendNodeSchema() {
-    return {
-      leafText: (node: any) => node.attrs.base ?? "",
-    };
-  },
+  // 本体已经是真实文本内容，textBetween / 查找天然可见 ✓ —— 不再需要 leafText 投影
 
   /**
    * 就地编辑：**点击**注音或光标**移动到它左右两侧**即展开成源码字面量，直接改本体与读音；
@@ -312,25 +436,70 @@ export const Ruby = Node.create({
             /**
              * 左键单击注音 → 展开。光标按点击落在左半/右半决定（左半 → 左端，右半 → 右端）。
              */
-            mousedown: (view, event) => {
+            /**
+             * 按下：**什么都不做**（不展开、不 preventDefault）——
+             * 只置"鼠标按下"标记，供 view.update 里暂停"邻近自动展开" ✓。
+             *
+             * 不 preventDefault 是必须的：否则浏览器建立不了选区，拖选 / Shift 扩展全废 ✗
+             *（注音的「整块选中」已由 CSS 的 user-select: all 保证 ✓）。
+             */
+            /**
+             * 按下只做两件事：清组字标志、标记"鼠标按住中"（供 view.update 暂停邻近自动展开 ✓）。
+             * **不展开**、也不 preventDefault（后者会让浏览器建不了选区，拖选/Shift 扩展全废 ✗）。
+             */
+            mousedown: (_view, event) => {
               const me = event as MouseEvent;
-              // 鼠标操作必然不在组字中：有的输入法提交后不发 compositionend，
-              // 靠这里（以及 keydown/blur）兜底解除组字标志，否则守卫会一直卡住。
               composingHere = false;
               if (me.button !== 0) return false;
-              const rubyEl = (me.target as HTMLElement | null)?.closest?.(
-                "span.md-ruby",
-              ) as HTMLElement | null;
-              if (!rubyEl) return false;
-              let pos: number;
-              try {
-                pos = view.posAtDOM(rubyEl, 0);
-              } catch {
-                return false;
-              }
-              if (!expandRubyAt(view, pos)) return false;
-              me.preventDefault();
-              return true;
+              mouseDown = true;
+              return false;
+            },            /**
+             * 松开鼠标：**按光标实际落点**决定是否展开（不看点了哪个元素 ✓）。
+             *
+             * 为什么这样判断：点读音（::after）或点空白时，事件目标可能是 <p>，靠 target
+             * 永远判断不准 ✗；而浏览器已经把光标放在了"用户想放的位置" ✓ —— 只要光标
+             * **贴着某个注音的边界**（或整块选中了某个注音），就把它展开成源码字面量 ✓。
+             *
+             * 拖选（选区是一段文本）不展开 ✓；用 rAF 等 PM 把选区更新完 ✓。
+             */
+            mouseup: (view) => {
+              mouseDown = false;
+              requestAnimationFrame(() => {
+                const v = view as any;
+                if (v.isDestroyed) return;
+                const sel = v.state.selection;
+                /**
+                 * ⚠️ 只在**折叠光标**（= 单击）时展开。
+                 *
+                 * 曾经把"选区恰好等于一个注音"也当成单击 ✗ —— 但用户从注音边界开始拖动、
+                 * 正好把它整块选中时，那个条件同样成立 ✗ → 拖选结果被替换成字面量，
+                 * 松开后**什么都没选中**（实测：最后一个 selectionchange 的 pm 是 82..82 ✗）。
+                 * 拖选一律不展开、也不收敛字面量（收起交给常规的 view.update ✓）。
+                 */
+                /**
+                 * ⚠️ 还要看 **DOM 选区**，不能只看 PM 的。
+                 *
+                 * PM 在"焦点落在注音 span 内部"时会**丢弃**浏览器给出的范围（叶子节点没有可寻址
+                 * 的内部位置 ✗），于是 PM 认为选区折叠（实测：PM 280..280 而 DOM collapsed=false ✗）。
+                 * 此时若按"折叠 = 单击"去展开，就会把用户刚拖出来的选中**吞掉** ✗。
+                 */
+                const domSel = window.getSelection();
+                const domRange = !!domSel && domSel.rangeCount > 0 && !domSel.isCollapsed;
+                if (!sel.empty || domRange) return;
+                const target = adjacentRuby(v);
+                if (target !== null) {
+                  expandRubyAt(v, target);
+                  return;
+                }
+                /**
+                 * 光标落点不在任何注音旁 → 说明用户点到了别处 ✓ ——
+                 * 此时必须**主动跑一次收起**：点击带来的那次 `view.update` 发生在
+                 * `mouseDown === true` 期间，被「拖选期间暂停判定」的守卫整体跳过了 ✗，
+                 * 于是"点别处离开注音"不会收起（实测：字面量留在原地 ✗）。
+                 */
+                convertLiterals(v);
+              });
+              return false;
             },
           },
         },
@@ -358,6 +527,11 @@ export const Ruby = Node.create({
              * 表现为"字符重复出现"（打一个「：」出现两个）。
              */
             if (composingHere) return;
+            /**
+             * 按住鼠标（拖选中）不做邻近自动展开：从注音边界按下开始拖选时，
+             * 光标最初恰好落在注音旁边，会自动展开成字面量 ✗ → 拖选就变成选字面量了。
+             */
+            if (mouseDown) return;
 
             const docChanged = !view.state.doc.eq(prevState.doc);
             const selChanged = !view.state.selection.eq(prevState.selection);
@@ -409,7 +583,12 @@ export const Ruby = Node.create({
            */
           const pos = Math.min(range.from + 1, state.doc.content.size);
           const marks = state.doc.resolve(pos).marks().map((m: any) => ({ type: m.type.name, attrs: m.attrs }));
-          commands.insertContentAt(range, { type: "ruby", attrs: { base, rt }, ...(marks.length ? { marks } : {}) });
+          commands.insertContentAt(range, {
+            type: "ruby",
+            attrs: { rt },
+            content: [{ type: "text", text: base }],
+            ...(marks.length ? { marks } : {}),
+          });
         },
       }),
     ];
@@ -419,7 +598,7 @@ export const Ruby = Node.create({
     return {
       markdown: {
         serialize(state: any, node: any) {
-          const base = node.attrs.base ?? "";
+          const base = node.textContent ?? "";
           const rt = node.attrs.rt ?? "";
           if (!base || !rt) return;
           // 写回竖线写法（你的首选写法，且表格内已由 md_ruby_pipe_guard 保护）。
@@ -480,7 +659,10 @@ export const Ruby = Node.create({
                     // 不要产出 <ruby>+<rt> 的嵌套结构，那样会让叶子节点里出现多个子元素，
                     // 导致 ProseMirror 的选区边界解析不稳定（拖选闪烁、无法以它为边界）。
                     // 两端的 U+E000 / U+E001 是"词边界"标记，见 markdown-setup.ts。
-                    return `${WORD_MARK_START}<span class="md-ruby" data-rt="${esc(rt)}">${esc(base)}</span>${WORD_MARK_END}`;
+                    // 与 renderHTML 保持同一套宽度变量，避免展开/收起时左右留白跳动 ✓
+    const widthStyle =
+      `--ruby-rt-w:${rubyWidthEm(rt, 0.5)}em;--ruby-base-w:${rubyWidthEm(base, 1)}em`;
+    return `${WORD_MARK_START}<span class="md-ruby" data-rt="${esc(rt)}" style="${widthStyle}">${esc(base)}</span>${WORD_MARK_END}`;
                   },
                 );
               });

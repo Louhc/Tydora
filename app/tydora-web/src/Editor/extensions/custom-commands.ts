@@ -495,16 +495,39 @@ export function executeCommand(name: string, editor: Editor | null) {
           const html = await invoke<string | null>("read_clipboard_html");
           if (html) {
             const view = editor.view;
-            const withPasteHtml = view as unknown as { pasteHTML?: (h: string) => void };
-            if (typeof withPasteHtml.pasteHTML === "function") {
-              withPasteHtml.pasteHTML(html);
-            } else {
-              const parsed = new DOMParser().parseFromString(html, "text/html");
-              const slice = PMDOMParser.fromSchema(view.state.schema).parseSlice(parsed.body, {
-                preserveWhitespace: true,
-              });
-              view.dispatch(view.state.tr.replaceSelection(slice));
+            /**
+             * ⚠️ 不要用 `view.pasteHTML` / `parseSlice`。
+             *
+             * 实测（harness）：把剪贴板里那段**完全正确**的
+             * `<p><span class="md-ruby" data-rt="あさゆう">朝夕</span></p>` 交给
+             * `pasteHTML()` 或 `parseSlice()`，得到的都是**纯文本** `朝夕` ✗（读音丢失 ✗）；
+             * 同一段 HTML 走 `PMDOMParser.parse()` 却能正确解析出 ruby 节点 ✓。
+             *
+             * 所以改成：**先 parse 出文档，再把第一块的行内内容 insertContent 进来**。
+             * 注音会作为 ruby 节点插入 ✓ —— 若光标恰好贴着它，注音的"就近自动展开"
+             * 会先显示源码 `{{Ruby|…}}`，光标移开后自动收起成注音 ✓（既有设计 ✓）。
+             */
+            const parsed = new DOMParser().parseFromString(html, "text/html");
+            const parsedDoc = PMDOMParser.fromSchema(view.state.schema).parse(parsed.body);
+            const first = parsedDoc.firstChild;
+            const inlineJson = first ? first.content.toJSON() : null;
+            if (inlineJson && inlineJson.length > 0) {
+              editor.chain().focus().insertContent(inlineJson as any).run();
             }
+            setTimeout(() => {
+              try {
+                const v2 = editor.view;
+                const all: string[] = [];
+                v2.state.doc.nodesBetween(0, v2.state.doc.content.size, (node: any) => {
+                  if (node.type.name === "ruby") {
+                    all.push(`rt=${JSON.stringify(node.attrs?.rt)} base=${JSON.stringify(node.textContent)}`);
+                  }
+                  return true;
+                });
+              } catch {
+                /* ignore */
+              }
+            }, 300);
             inserted = true;
           }
         } catch (err) {

@@ -1787,6 +1787,13 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   position: relative;
   cursor: pointer;
   border-radius: 3px;
+  /**
+   * ⚠️ 这里**不能**用 `user-select: all`：它会让浏览器在"文本范围"与"整块元素"两种选择单位
+   * 之间来回切换 ✗ —— 拖选经过注音时选中区会**不停闪烁**（用户实测）。
+   *
+   * 注音节点现在**自带文本内容**（方案 A ✓），ProseMirror 能正常寻址内部位置，
+   * 所以原生拖选已经稳定 ✓，不需要任何额外的选区修正或"拖动高亮"补丁 ✓。
+   */
   /* 不要外框：注音靠 ::after 的小字本身就是标识。
      （曾经在悬停时画虚线框，用户明确要求去掉。） */
 
@@ -1794,13 +1801,16 @@ html.platform-macos .tiptap-editor .frontmatter-node {
    * 读音比本体宽时，向两侧对称让出空间，避免相邻注音的小字互相压叠。
    *
    * 读音由 ::after 绝对定位绘制、不参与布局，所以长读音（如 昼食後/ちゅうしょくご）
-   * 会向两侧溢出压到邻居。CSS 测不出文字宽度，因此按字符数估算：
-   *   读音宽 ≈ 读音字数 × 0.5em（小字是 0.5em 字号）；本体宽 ≈ 本体字数 × 1em；
-   *   溢出量 = 两者之差，每边让一半。
+   * 会向两侧溢出压到邻居。CSS 测不出文字宽度，因此由 ruby.ts 按**全角/半角**分别估算
+   * 出两边的宽度（单位 em），这里只负责"取差值、每边让一半"。
+   *
+   * ⚠️ 早期写法是"每个字符都按 1em（本体）/ 0.5em（读音）"，只对 CJK 成立：
+   * 英文/数字/半角标点只有一半宽，于是**英文读音**的留白被高估一倍，本体左右多出大片空白 ✗。
    * max(0em, …) 保证"读音比本体短"时不留多余空隙。
    */
+  /* 两个变量由 ruby-measure.ts **实测**写入（px）：本体用 Range 量、读音用 canvas 按 ::after 字体量 ✓ */
   padding-inline: calc(
-    max(0em, var(--ruby-rt-len, 1) * 0.5em - var(--ruby-base-len, 1) * 1em) / 2
+    max(0px, var(--ruby-rt-w, 0px) - var(--ruby-base-w, 0px)) / 2
   );
 }
 
@@ -1826,9 +1836,29 @@ html.platform-macos .tiptap-editor .frontmatter-node {
    *   改用两招：字重 500 + 同色极细描边，小字号下视觉更实、更清楚。
    */
   color: inherit;
-  -webkit-text-stroke: 0.2px currentColor;
+  /**
+   * ⚠️ 去掉 `-webkit-text-stroke`（原为"小字提亮"用 0.2px 同色描边）。
+   *
+   * 实测：拖动选中经过注音时，选中区会**不停闪** ✗ —— 而 `selectionchange` 记录显示
+   * DOM 选区两端完全稳定 ✓（24 次事件值一模一样），说明是**渲染层**在重绘 ✗。
+   * 极细描边（0.2px）+ 伪元素绝对定位 + 选区内重绘，是 Chromium 已知的闪烁来源 ✓。
+   * 亮度观感改由字重 500 承担（差异很小）；若仍不够清楚，可改用颜色微调而不是描边 ✓。
+   */
   white-space: nowrap;
-  pointer-events: none; /* 不参与命中测试，选区边界只落在 base 文本上 */
+  /**
+   * 读音**参与命中测试**（原来是 none）。
+   *
+   * 原因：读音画在基线上方、且不参与命中测试时，点读音的**事件目标是背后的 <p>** ✗
+   *（实测日志：mousedown/click 的 target 都是 P，inRuby=false）→ "单击注音展开"永远不触发 ✗，
+   * 只能靠"光标邻近 → 延迟自动展开"凑效（实测延迟 3ms~1.4s，手感上就是没反应）。
+   *
+   * 伪元素被击中时，事件目标是它的**宿主元素** ✓ —— 也就是 `span.md-ruby` ✓，
+   * 于是 `closest(".md-ruby")`、`posAtDOM` 都能正常工作 ✓。
+   *
+   * 注音的"整块可选"已经由 CSS 的 `user-select: all` 保证 ✓，所以这里不再需要
+   * 靠 none 来稳定选区边界；若之后发现选区有闪烁，把这一行改回 none 即可（其它逻辑已兜底 ✓）。
+   */
+  pointer-events: auto;
 }
 
 /* 注音就地编辑浮层：挂在 document.body 上，所以这里不能嵌套在选择器里。
