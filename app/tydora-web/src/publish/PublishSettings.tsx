@@ -42,6 +42,7 @@ export default function PublishSettings() {
   const [configExists, setConfigExists] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [publishOpen, setPublishOpen] = useState(false);
   const [siteGenerated, setSiteGenerated] = useState(false);
   const [previewRunning, setPreviewRunning] = useState(false);
@@ -52,7 +53,9 @@ export default function PublishSettings() {
       const outDir = /^[A-Za-z]:/.test(config.out) || config.out.startsWith("/")
         ? config.out
         : `${vaultPath}/${config.out}`;
-      exists(outDir).then(setSiteGenerated);
+      // 加 catch ✓：exists() 在路径无权限/被占用时会 reject ✗，
+      // 不接住就是一条未处理的 Promise 异常（设置窗口里看着像"功能坏了"）
+      exists(outDir).then(setSiteGenerated).catch(() => setSiteGenerated(false));
     }
   }, [vaultPath, config]);
 
@@ -61,7 +64,7 @@ export default function PublishSettings() {
     setVaultPath(path);
     if (path) {
       loadPublishConfig(path).then(setConfig);
-      exists(`${path}/${CONFIG_FILE}`).then(setConfigExists);
+      exists(`${path}/${CONFIG_FILE}`).then(setConfigExists).catch(() => setConfigExists(false));
     }
   }, []);
 
@@ -77,17 +80,20 @@ export default function PublishSettings() {
   const handleSave = useCallback(async () => {
     if (!vaultPath || !config) return;
     setSaving(true);
+    setSaveError(null);
     try {
       await savePublishConfig(vaultPath, config);
       setConfigExists(true);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
+      // ⚠️ 以前只打日志 ✗ —— 用户点了「保存配置」看不到任何反馈，以为功能坏了 ✓。
+      setSaveError(`${t("settings.publish.saveFailed")} ${e instanceof Error ? e.message : String(e)}`);
       console.error(t("settings.publish.saveFailed"), e);
     } finally {
       setSaving(false);
     }
-  }, [vaultPath, config]);
+  }, [vaultPath, config, t]);
 
   const handlePreview = useCallback(async () => {
     if (!vaultPath || !config) return;
@@ -189,6 +195,13 @@ export default function PublishSettings() {
           </button>
           {!configExists && (
             <span className="settings-hint" style={{ marginLeft: 8 }}>{t("settings.publish.saveConfigFirst")}</span>
+          )}
+
+          {/* 保存失败时把原因显示出来 ✓（以前只有 console ✗） */}
+          {saveError && (
+            <span className="settings-hint" style={{ marginLeft: 8, color: "var(--danger, #e5484d)" }}>
+              {saveError}
+            </span>
           )}
         </div>
       </div>

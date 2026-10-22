@@ -1142,6 +1142,27 @@ async fn run_markdown_publish(
         args.push(build_mode.to_string());
     }
 
+    // ⚠️ 下面三项以前**没有传给 CLI** ✗ —— 设置页里的「站点描述」「页脚」填了却不生效 ✓。
+    // CLI 的参数名见 vendor/markdown-publish/tools/cli/resolve-config.mjs ✓。
+    if let Some(desc) = config_json.get("siteDescription").and_then(|v| v.as_str()) {
+        if !desc.is_empty() {
+            args.push("--site-description".to_string());
+            args.push(desc.to_string());
+        }
+    }
+    if let Some(footer) = config_json.get("siteFooter").and_then(|v| v.as_str()) {
+        if !footer.is_empty() {
+            args.push("--site-footer".to_string());
+            args.push(footer.to_string());
+        }
+    }
+    if let Some(home) = config_json.get("home").and_then(|v| v.as_str()) {
+        if !home.is_empty() {
+            args.push("--home".to_string());
+            args.push(home.to_string());
+        }
+    }
+
     // 定位 markdown-publish CLI。依次尝试以下来源：
     // 1. 应用资源目录中随安装包打包的 CLI（0.2.6 起已不再随包分发，保留仅为兼容）
     // 2. 项目 vendor / node_modules（开发环境：沿 cwd 向上找 package.json 定位仓库根）
@@ -1403,7 +1424,15 @@ async fn preview_site(dir: String, state: State<'_, PreviewServer>) -> Result<St
 
     // 在输出目录中创建服务器脚本，使用 __dirname 获取正确路径
     // 使用 .cjs 扩展名，因为 package.json 有 "type": "module"
-    let script_path = dir_path.join("__preview_server.cjs");
+    // ⚠️ 脚本写到**临时目录** ✓：以前写在输出目录里 ✗ —— 那个 __preview_server.cjs 会被下一次
+    // 发布原样拷进站点（发布产物里凭空多一个无用文件 ✗）。目录与端口改用环境变量传入 ✓。
+    let preview_port = {
+        // 让系统分配空闲端口 ✓（原来写死 3000 ✗，被占用时预览直接打不开、也没有任何提示）
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("无法分配预览端口: {}", e))?;
+        listener.local_addr().map(|a| a.port()).unwrap_or(3000)
+    };
+    let script_path = std::env::temp_dir().join(format!("tydora-preview-{}.cjs", preview_port));
 
     let server_script = r#"
 const http = require('http');
@@ -1411,8 +1440,8 @@ const fs = require('fs');
 const path = require('path');
 
 // 使用脚本所在目录作为服务器根目录
-const DIR = __dirname;
-const PORT = 3000;
+const DIR = process.env.TYDORA_PREVIEW_DIR;
+const PORT = Number(process.env.TYDORA_PREVIEW_PORT || 3000);
 
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -1429,11 +1458,14 @@ const MIME_TYPES = {
 };
 
 function findFile(urlPath) {
-    // 对于 /、/index.html、/index，优先查找 index/index.html
-    if (urlPath === '/' || urlPath === '/index.html' || urlPath === '/index') {
-        const indexDir = path.join(DIR, 'index', 'index.html');
-        if (fs.existsSync(indexDir) && fs.statSync(indexDir).isFile()) {
-            return indexDir;
+    // 对于 /、/index.html、/index：先找根目录的 index.html ✓
+    // （markdown-publish 的产物首页就是 <out>/index.html ✗ 以前只找 index/index.html，
+    //  导致点「预览网站」打开首页直接 404 ✗），再回退到 index/index.html。
+    if (urlPath === "/" || urlPath === "/index.html" || urlPath === "/index") {
+        for (const cand of [path.join(DIR, "index.html"), path.join(DIR, "index", "index.html")]) {
+            if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+                return cand;
+            }
         }
     }
 
@@ -1499,6 +1531,8 @@ server.listen(PORT, '127.0.0.1', () => {
 
     // 启动服务器并保存进程句柄
     let child = Command::new("node")
+        .env("TYDORA_PREVIEW_DIR", &dir)
+        .env("TYDORA_PREVIEW_PORT", preview_port.to_string())
         .arg(script_path.to_str().unwrap_or_default())
         .spawn()
         .map_err(|e| format!("启动服务器失败: {}", e))?;
@@ -1511,7 +1545,7 @@ server.listen(PORT, '127.0.0.1', () => {
     // 等待服务器启动
     std::thread::sleep(std::time::Duration::from_secs(1));
 
-    let url = "http://127.0.0.1:3000".to_string();
+    let url = format!("http://127.0.0.1:{}", preview_port);
 
     // 打开浏览器
     #[cfg(target_os = "windows")]

@@ -1534,6 +1534,13 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     });
   }, []);
 
+  // 窗口尺寸变化（拖窗口边缘 / 最大化 / 还原）也要钉住光标 ✓ —— 与侧栏开合同一套逻辑 ✓
+  useEffect(() => {
+    const onWindowResize = () => notifyResize();
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, [notifyResize]);
+
   // 折叠/展开是 260ms 的宽度过渡（见 Sidebar.css），动画中途量到的宽度不是最终值，
   // 所以过渡结束后再补一次 resize，避免编辑器宽度停在中间态。
   useEffect(() => {
@@ -4473,7 +4480,7 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         />
 
         {/* 编辑区域 */}
-        <main className={`editor-container${!sidebarOpen ? " sidebar-is-closed" : ""}${topbarAutoHide ? " sidebar-collapsed" : ""}${topbarPinned ? " topbar-pinned" : ""}`}>
+        <main className={`editor-container${!sidebarOpen ? " sidebar-is-closed" : ""}${topbarAutoHide ? " sidebar-collapsed" : ""}${topbarPinned ? " topbar-pinned" : ""}${xhsPreviewOpen ? " xhs-preview-open" : ""}`}>
           {/* 侧栏边界（编辑器一侧的补强热区）：与侧栏手柄拼成跨边界命中带。
               按下即进入统一拖动：拖 = 调宽，压过阈值松手 = 收起；只按一下 = 收起。 */}
           {sidebarOpen && (

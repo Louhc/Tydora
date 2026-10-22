@@ -2,6 +2,7 @@
 import { readFile } from "@tauri-apps/plugin-fs";
 import { invoke } from "@tauri-apps/api/core";
 import appIconUrl from "../assets/icon.png?inline";
+import { ensureExportTypographyStyle, materializeRubyReadings } from "./export-typography";
 
 /** 收集当前页面所有同源 <style> 的 CSS 文本（用于自包含 HTML 导出） */
 export function collectDocumentCSS(): string {
@@ -365,6 +366,15 @@ export function prepareExportElement(
     .querySelectorAll(".bullet-list-mindmap-heading, .bullet-list-mindmap-list-container")
     .forEach((el) => el.classList.remove("bullet-list-mindmap-heading", "bullet-list-mindmap-list-container"));
   // Wiki-Link / Tag 等节点视图通常渲染为纯文本 span，保留即可
+
+  /**
+   * 导出排版与读音处理 ✓（见 export-typography.ts）：
+   *  - 注入作用域为 `.tiptap-export-content` 的标题/链接/注音样式 —— 编辑器的同名规则
+   *    都挂在 `.tiptap-editor` 下，导出容器里没有这个祖先 ✗，不注入就全退回浏览器默认 ✗；
+   *  - 把注音读音从伪元素实体化成真实 span —— html-to-image（SVG foreignObject）不画伪元素 ✗。
+   */
+  ensureExportTypographyStyle();
+  materializeRubyReadings(raw);
 
   const container = document.createElement("div");
   container.className = "tiptap-export-container";

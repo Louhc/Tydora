@@ -2928,6 +2928,150 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     }, [mode, editor, value]);
 
     // 暴露 API
+  /**
+   * 光标相对滚动容器顶部的屏幕位置（px）✓，用于"宽度变化后让光标待在原处"。
+   *
+   * 为什么要提前记：侧栏收起/展开会立刻重排 ✓，等 `resize()` 被调用时布局已经变了 ✗，
+   * 那时再量只能得到新位置 ✗。所以在选区/滚动/事务时持续记录 ✓ ——
+   * 宽度一变，这里留着的一定是**变化前**的位置 ✓。
+   * 光标不在视口内时记 null ✓（这时"保持原地"没有意义 ✓）。
+   */
+  const caretScreenOffsetRef = useRef<number | null>(null);
+  /**
+   * 侧栏开合（260ms 宽度动画）期间的"钉住光标"状态 ✓。
+   *
+   * 宽度每一帧都在变 ✓ → 文字每帧重排 ✓ → 光标屏幕位置每帧都会漂 ✗。
+   * 所以动画期间**每帧**做一次最小校正 ✓，把光标按回动画开始前的屏幕偏移 ✓；
+   * 过了截止时间（或节点被移除）自动停 ✓。
+   */
+  const resizeAnchorRef = useRef<{
+    offset: number | null;
+    until: number;
+    raf: number | null;
+    caretTimer: number | null; // 关掉光标过渡的续期定时器
+  }>({
+    offset: null,
+    until: 0,
+    raf: null,
+    caretTimer: null,
+  });
+
+  // 卸载时取消"钉住光标"的 rAF 循环 ✓
+  useEffect(() => {
+    return () => {
+      const st = resizeAnchorRef.current;
+      if (st.raf != null) {
+        cancelAnimationFrame(st.raf);
+        st.raf = null;
+      }
+      if (st.caretTimer != null) {
+        window.clearTimeout(st.caretTimer);
+        st.caretTimer = null;
+        document.documentElement.removeAttribute("data-caret-no-anim");
+      }
+    };
+  }, []);
+  useEffect(() => {
+    if (!editor) return;
+    const scroller = containerRef.current?.querySelector(".tiptap-editor") as HTMLElement | null;
+    if (!scroller) return;
+    const update = () => {
+      const view = getEditorView(editor);
+      if (!view) return;
+      try {
+        const c = view.coordsAtPos(view.state.selection.head);
+        const rect = scroller.getBoundingClientRect();
+        const offset = c.top - rect.top;
+        caretScreenOffsetRef.current = offset >= 0 && offset <= rect.height ? offset : null;
+      } catch {
+        caretScreenOffsetRef.current = null;
+      }
+    };
+    update();
+    editor.on("selectionUpdate", update);
+    editor.on("transaction", update);
+    scroller.addEventListener("scroll", update, { passive: true });
+    return () => {
+      editor.off("selectionUpdate", update);
+      editor.off("transaction", update);
+      scroller.removeEventListener("scroll", update);
+    };
+  }, [editor]);
+
+  /**
+   * 把光标"按回"屏幕上 `offset` 处（相对滚动容器顶部的 px）✓。
+   * 只做「读一次 coordsAtPos + 可能写一次 scrollTop」✓，位移很小 ✓。
+   */
+  const pinCaretToOffset = useCallback(
+    (scroller: HTMLElement, offset: number) => {
+      const view = getEditorView(editor);
+      if (!view) return;
+      try {
+        const coords = view.coordsAtPos(view.state.selection.head);
+        const delta = coords.top - (scroller.getBoundingClientRect().top + offset);
+        if (Math.abs(delta) < 0.5) return; // 半个像素以内不动 ✓
+        const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        const clamped = Math.min(max, Math.max(0, scroller.scrollTop + delta));
+        if (Math.abs(clamped - scroller.scrollTop) >= 0.5) {
+          scroller.scrollTop = clamped;
+          // 立刻让自绘光标按新的滚动位置重算 ✓（否则它会晚一帧 → 拖动时抖动 ✗）
+          window.dispatchEvent(new Event("tydora:caret-sync"));
+        }
+      } catch {
+        /* 视图重建中：跳过这一帧 */
+      }
+    },
+    [editor],
+  );
+
+  /**
+   * 侧栏开合动画期间**逐帧钉住光标** ✓。
+   *
+   * 为什么用 `ResizeObserver` 而不是 rAF ✗：宽度动画每帧都会让内容重排 ✓，
+   * 而 `ResizeObserver` 的回调在「布局之后、绘制之前」触发 ✓ —— 在这里改 `scrollTop` ✗
+   * 会**在画出来之前**就生效 ✓，看不到"光标先往上再回来"那一帧 ✗（用户实测 ✓）。
+   * rAF 是绘制之后 ✗，只能下一帧才补 ✓，所以原来会闪一下 ✓。
+   */
+  useEffect(() => {
+    if (!editor) return;
+    const scroller = containerRef.current?.querySelector(".tiptap-editor") as HTMLElement | null;
+    const content = scroller?.querySelector(".tiptap") as HTMLElement | null;
+    if (!scroller || !content) return;
+    let lastWidth = content.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const width = content.getBoundingClientRect().width;
+      const widthChanged = Math.abs(width - lastWidth) >= 0.5;
+      lastWidth = width;
+      // 只看**宽度**变化 ✓：打字导致的高度变化不该被"钉住光标"干预 ✗
+      if (!widthChanged) return;
+
+      /**
+       * 宽度正在连续变化（拖分隔条 / 拖窗口 / 侧栏开合动画）✓ →
+       * **在编辑器内部**续期"钉住光标"窗口 ✓，不再依赖外部 `resize()` 是否逐帧被调用 ✗
+       * （拖动侧栏时 `sidebarWidth` 的 state 未必每帧更新 → 之前根本没被钉住 ✗）。
+       */
+      const state = resizeAnchorRef.current;
+      if (state.offset == null || Date.now() > state.until) {
+        state.offset = caretScreenOffsetRef.current; // 只在窗口重新开始时取一次锚点 ✓
+      }
+      state.until = Date.now() + 200; // 每帧续期 ✓；宽度不再变后自然过期 ✓
+
+      // 同步关掉自绘光标的 70ms 过渡 ✓（否则会追帧 → "先上后回"✗）
+      document.documentElement.setAttribute("data-caret-no-anim", "");
+      if (state.caretTimer != null) window.clearTimeout(state.caretTimer);
+      state.caretTimer = window.setTimeout(() => {
+        state.caretTimer = null;
+        document.documentElement.removeAttribute("data-caret-no-anim");
+      }, 240);
+
+      if (state.offset != null) pinCaretToOffset(scroller, state.offset);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+
+    // 组件卸载 / 编辑器重建时断开 ✓
+  }, [editor, pinCaretToOffset]);
+
     useImperativeHandle(ref, () => ({
       getValue: () => {
         if (!editor) return "";
@@ -2979,14 +3123,59 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       resize: () => {
         if (!isEditorAlive(editor)) return;
         const scrollContainer = containerRef.current?.querySelector('.tiptap-editor') as HTMLElement | null;
-        const savedScrollTop = scrollContainer?.scrollTop ?? 0;
-        editor.commands.focus();
-        // 恢复滚动位置，避免 focus() 导致跳到底部
-        if (scrollContainer) {
-          requestAnimationFrame(() => {
-            scrollContainer.scrollTop = savedScrollTop;
-          });
+        if (!scrollContainer) return;
+        /**
+         * 侧栏开合 → 编辑器宽度在 260ms 内连续变化 ✗ → 文字每帧重排 ✗ → 光标会不停漂 ✓。
+         *
+         * 做法：记住**动画开始前**光标的屏幕偏移 ✓（`caretScreenOffsetRef` 由选区/滚动事件持续刷新 ✓，
+         * 此刻留着的还是变化前那一帧的值 ✓），然后在动画期间**每帧**把它按回原位 ✓：
+         * 每帧只做「读一次 coordsAtPos + 写一次 scrollTop」✓，位移很小 ✓，不会看到跳动 ✓。
+         */
+        const hadFocus =
+          !!document.activeElement && scrollContainer.contains(document.activeElement);
+        // 焦点本来就在正文里才 focus ✓，且明确要求 PM 不要 scrollIntoView ✓
+        if (hadFocus) {
+          editor.commands.focus(undefined, { scrollIntoView: false });
         }
+
+        const state = resizeAnchorRef.current;
+        /**
+         * 动画期间 App 会调两次 resize()（下一次 rAF + 300ms 收尾 ✓）。
+         * 第二次**不能**重新取锚点 ✗ —— 那时光标已被我们按回原位 ✓，
+         * 而 `caretScreenOffsetRef` 可能被动画中途的滚动事件刷新过 ✗，
+         * 重取会把"已漂出去的位置"固化成新目标 ✗。所以只在没在跑时才取 ✓。
+         */
+        const running = state.raf != null && Date.now() < state.until;
+        if (!running || state.offset == null) {
+          state.offset = caretScreenOffsetRef.current;
+        }
+        state.until = Math.max(state.until, Date.now() + 520); // 覆盖 260ms 动画 + 收尾 ✓
+        /**
+         * 变形/重排窗口内关掉平滑光标的 70ms 过渡 ✓（否则它会追帧 → "先上后回"✗）。
+         * 定时器**可续期** ✓：拖动侧栏、连续 resize 会反复调用本函数 ✓，
+         * 每次都把清除时间往后推 ✓ —— 否则一次长拖动会在 620ms 时被提前解除 ✗。
+         */
+        document.documentElement.setAttribute("data-caret-no-anim", "");
+        if (state.caretTimer != null) window.clearTimeout(state.caretTimer);
+        state.caretTimer = window.setTimeout(() => {
+          state.caretTimer = null;
+          document.documentElement.removeAttribute("data-caret-no-anim");
+        }, 620); // 略大于上面的 520ms 窗口 ✓
+
+        if (state.offset == null) {
+          const max = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+          scrollContainer.scrollTop = Math.min(max, Math.max(0, scrollContainer.scrollTop));
+          return;
+        }
+
+        const step = () => {
+          state.raf = null;
+          if (!scrollContainer.isConnected || !isEditorAlive(editor) || Date.now() > state.until) return;
+          // 主路径是上面的 ResizeObserver（绘制前校正 ✓）；这里只是兜底 ✓
+          if (state.offset != null) pinCaretToOffset(scrollContainer, state.offset);
+          state.raf = requestAnimationFrame(step);
+        };
+        if (state.raf == null) state.raf = requestAnimationFrame(step);
       },
       highlightSearch: (query: string) => {
         /**

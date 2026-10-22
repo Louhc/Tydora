@@ -512,6 +512,28 @@ export function XhsPreviewPanel({
             </svg>
           )}
         </button>
+        {/* 关闭按钮：底部状态栏那个 20px 图标太隐蔽，全屏时还看不到 —— 标题栏必须有明确入口 ✓ */}
+        <button
+          className="xhs-header-close"
+          onClick={onClose}
+          title={t("xhs.close")}
+          aria-label={t("xhs.close")}
+        >
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M6 6l12 12" />
+            <path d="M18 6L6 18" />
+          </svg>
+        </button>
       </div>
 
       <div className="xhs-toolbar">

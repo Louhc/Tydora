@@ -2084,6 +2084,12 @@ html.ctrl-held .editor-file-name.editable:hover {
   z-index: 9999;
   padding: 4px;
   min-width: 140px;
+  /* 窗口较矮时不能让菜单溢出到屏幕外 ✗ —— 限高后菜单自身滚动 ✓
+     （顶栏 36px + 4px 间距，底部再留一点余量） */
+  max-height: calc(100vh - 56px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .editor-topbar-more-menu-item {
@@ -2168,8 +2174,11 @@ html.ctrl-held .editor-file-name.editable:hover {
 .editor-topbar-more-submenu {
   display: none;
   position: absolute;
-  top: 0;
-  right: 100%;
+  /* 在菜单**内部**向下展开 ✓：以前是 `right: 100%` 伸到菜单外面 ✗，
+     父级加了 overflow-y: auto 后会被裁掉 ✗（菜单需要滚动时必须这么做）。
+     绝对定位的子元素属于滚动容器的可滚动区域 ✓，所以它始终能滚到 ✓。 */
+  top: 100%;
+  right: 0;
   margin-right: 0;
   padding: 4px;
   padding-right: 8px;
@@ -2204,6 +2213,10 @@ html.ctrl-held .editor-file-name.editable:hover {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
   width: 420px;
   max-width: 90vw;
+  /* 窗口较矮时不能让弹框溢出到屏幕外 ✗ —— 限制高度后由 body 自己滚动 ✓ */
+  max-height: calc(100vh - 60px);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   animation: exportFormatPickerSlideIn 0.12s ease-out;
 }
@@ -2224,6 +2237,7 @@ html.ctrl-held .editor-file-name.editable:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-shrink: 0;
   padding: 16px 20px;
   font-size: 16px;
   font-weight: 600;
@@ -2252,6 +2266,11 @@ html.ctrl-held .editor-file-name.editable:hover {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   padding: 20px;
+  /* ⚠️ 必须 min-height: 0 ✓：否则 flex 子项不肯缩小 ✗ → 内容溢出、滚不动 ✓ */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .export-formatpicker-separator {
@@ -2307,15 +2326,8 @@ html.ctrl-held .editor-file-name.editable:hover {
   color: var(--text-secondary, #999);
 }
 
-/* 小红书图文入口：品牌红 accent 突出显示 */
-.export-formatpicker-option-xhs .export-formatpicker-option-icon {
-  background: rgba(255, 44, 66, 0.1);
-  color: #ff2c42;
-}
-
-.export-formatpicker-option-xhs:hover {
-  border-color: #ff2c42;
-}
+/* 小红书图文入口：**与其它格式一致** ✓（曾经写死品牌红 #ff2c42 突出显示 ✗，
+   用户明确要求统一成主题色 ✓；因此这里不再有任何专属样式） */
 
 /* ── 匿名统计同意弹窗 ── */
 .consent-dialog-overlay {
@@ -2474,4 +2486,20 @@ html[data-hide-scrollbars="1"] ::-webkit-scrollbar-thumb,
 html[data-hide-scrollbars="1"] ::-webkit-scrollbar-track,
 html[data-hide-scrollbars="1"] ::-webkit-scrollbar-corner {
   background: transparent !important;
+}
+
+/* ── 导出（小红书图文）预览面板打开时 ──────────────────────────────────
+   面板标题栏（全屏 / 关闭按钮）位于窗口顶部区域，而顶栏在"自动隐藏"模式下
+   只要鼠标进入顶部 54px 就会滑下，正好把它盖住 —— 全屏键因此点不到 ✗（用户实测）。
+   这里让顶栏在面板打开期间**常驻可见** ✓，并把面板整体下移一个顶栏高度 ✓，
+   两者互不遮挡；顶栏的窗口按钮也始终可用 ✓。 */
+.editor-container.xhs-preview-open .editor-topbar-trigger {
+  display: none;
+}
+.editor-container.sidebar-collapsed.xhs-preview-open .editor-topbar {
+  top: 0;
+}
+.editor-container.sidebar-collapsed.xhs-preview-open .xhs-panel:not(.fullscreen) {
+  /* 用 padding 而不是 margin ✓：面板高度仍是 100%，不会把底部挤出窗口 ✗ */
+  padding-top: 36px;
 }

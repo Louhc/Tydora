@@ -129,6 +129,10 @@ function parseInlines(node: Node, base: RunStyle = {}): (TextRun | ExternalHyper
 
     if (!(n instanceof HTMLElement)) return;
 
+    // 注音读音（导出时由 export-typography.ts 实体化的绝对定位 span）不并入正文 ✗，
+    // 否则 Word 里会变成"心構こころがま"这种重复 ✓（正文只保留本体）。
+    if (n.classList.contains("md-ruby-rt")) return;
+
     const tag = n.tagName.toLowerCase();
     const next: RunStyle = { ...style };
 

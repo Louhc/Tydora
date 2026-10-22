@@ -3,6 +3,10 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  /* 占满父容器高度并**允许收缩** ✓：否则卡片列表撑高面板，底部按钮被挤出窗口 ✗ */
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   min-width: 0;
   flex-shrink: 0;
   background: var(--bg-secondary);
@@ -70,6 +74,26 @@
   color: var(--accent);
   background: var(--bg-hover, rgba(0, 0, 0, 0.06));
 }
+
+/* 标题栏关闭按钮：始终可点，全屏时同样可用 ✓ */
+.xhs-header-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.xhs-header-close:hover {
+  color: var(--danger);
+  background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+}
 /* 关闭按钮；在状态栏中作为内联按钮使用 */
 .xhs-close {
   background: none;
@@ -96,6 +120,7 @@
 }
 
 .xhs-toolbar {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -178,6 +203,7 @@
 }
 
 .xhs-status {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -249,8 +275,12 @@
 
 .xhs-cards {
   flex: 1;
+  /* ⚠️ 必须显式写 min-height: 0 ✓：flex 子项默认 min-height: auto，
+     内容再高也不会缩小 ✗ → 面板被撑出窗口、卡片滚不动（用户实测 ✓） */
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   padding: 18px 28px 28px;
   display: flex;
   flex-direction: column;

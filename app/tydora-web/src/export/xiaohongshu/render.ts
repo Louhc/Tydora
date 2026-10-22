@@ -1,5 +1,6 @@
 // 小红书卡片渲染：复用导出 DOM 准备管线，构建卡片 DOM 并用 html-to-image 栅格化
 // 渲染引擎与参考项目（note-to-red）一致：SVG foreignObject 方案，文字与浏览器渲染 100% 一致
+
 import { toPng } from "html-to-image";
 import appIconUrl from "../../assets/icon.png?inline";
 import {
@@ -91,20 +92,56 @@ function ensureThemeStylesheet(): void {
 const CARD_CONTENT_CSS = `
 .xhs-card { position: relative; overflow: hidden; box-sizing: border-box; border: none; font-family: Optima-Regular, Optima, PingFangSC-light, PingFangTC-light, "PingFang SC", sans-serif; }
 .xhs-card .tiptap-export-content { color: var(--text-primary); }
-.xhs-card h1 { font-size: 1.8em; font-weight: 600; line-height: 1.18; margin: 0.9em 0 0.5em; color: var(--text-primary); }
-.xhs-card h2 { font-size: 1.5em; font-weight: 600; line-height: 1.5; margin: 0.9em 0 0.5em; letter-spacing: -0.01em; color: var(--text-primary); }
-.xhs-card h3 { font-size: 1.25em; font-weight: 600; line-height: 1.5; margin: 1.6em 0 0.4em; color: var(--text-primary); }
-.xhs-card h4 { font-size: 1.12em; font-weight: 600; line-height: 1.5; margin: 0.8em 0 0.4em; color: var(--text-primary); }
-.xhs-card h5 { font-size: 1em; font-weight: 600; margin: 0.7em 0 0.4em; color: var(--text-primary); }
-.xhs-card h6 { font-size: 0.9em; font-weight: 600; margin: 0.7em 0 0.4em; color: var(--text-primary); }
+/* 标题样式与编辑器（Editor/theme.css 的 .tiptap-editor h1–h6）**完全对齐** ✓ ——
+   用户明确要求"跟编辑器里一样"；这里只是把选择器换成 .xhs-card 作用域。 */
+.xhs-card h1, .xhs-card h2, .xhs-card h3, .xhs-card h4, .xhs-card h5, .xhs-card h6 {
+  padding-top: 0;
+  line-height: 1.25;
+  /* 用 rem 而不是 em：em 按元素**自身**字号算，H2 的 1.5em margin 会变成 36px，
+     比 H3 的同名间距大一截（与编辑器一致 ✓） */
+  margin: 1.5rem 0 0.5rem;
+}
+.xhs-card h1 { font-size: 2.2em; font-weight: 700; letter-spacing: -0.011em; margin-top: 0.6rem; padding-bottom: 0.35em; border-bottom: 1px solid var(--border); }
+.xhs-card h2 { font-size: 1.5em; font-weight: 700; letter-spacing: -0.006em; padding-bottom: 0.28em; background-image: linear-gradient(var(--accent), var(--accent)); background-repeat: no-repeat; background-position: left bottom; background-size: 2.5em 2px; }
+.xhs-card h3 { font-size: 1.25em; font-weight: 600; }
+.xhs-card h4 { font-size: 1.08em; font-weight: 600; }
+.xhs-card h5 { font-size: 0.95em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); }
+.xhs-card h6 { font-size: 0.88em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-secondary); opacity: 0.85; }
 .xhs-card p { margin: 0 0 1.1em; }
+/* 注音：读音已由 prepareExportElement 实体化成真实 span ✓（见 export/export-typography.ts），
+   样式（.tiptap-export-content .md-ruby-rt）也由那份共享样式统一提供 ✓ */
 .xhs-card strong, .xhs-card b { font-weight: 700; color: var(--text-strong, inherit); }
 .xhs-card img { display: block; max-width: 100%; height: auto; margin-left: auto; margin-right: auto; border-radius: 12px; }
 .xhs-card .image-node-view { display: block; text-align: center; margin-left: auto; margin-right: auto; }
 .xhs-card hr { border: none; border-top: 1px solid var(--border, #2c2c2e); margin: 26px 0; }
 .xhs-card .tiptap-mathematics-render .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .xhs-card .katex { font-size: 1.05em; }
-.xhs-card a.wiki-link { color: var(--accent, #0A84FF); text-decoration: none; border-bottom: 1px dashed var(--accent, #0A84FF); }
+/* 链接：与编辑器（Editor/theme.css 的 .tiptap-editor a）对齐 ✓
+   - 颜色取 --text-link（缺省回退 --accent，与编辑器同一套回退链 ✓）
+   - 下划线是 1px 的 currentColor 实线（不是 dashed ✗）
+   - 编辑器里下划线默认 0%、hover 才长满；卡片是静态图不会 hover，所以常驻显示 ✓ */
+.xhs-card a {
+  color: var(--text-link, var(--accent, #0969da));
+  text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 100% 1px;
+}
+/* Wiki 链接：与编辑器一致的"药丸底"（accent 15% 底 + 圆角 + 内边距），不用下划线 ✓ */
+.xhs-card .wiki-link {
+  color: var(--accent, #0A84FF);
+  text-decoration: none;
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.15);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+/* 指向不存在笔记的 wiki 链接：与编辑器一样淡出 ✓ */
+.xhs-card .wiki-link[data-exists="false"] {
+  color: var(--text-secondary, #999);
+  background: transparent;
+  opacity: 0.6;
+}
 .xhs-card .md-tag, .xhs-card span[data-tag] { color: var(--accent, #0A84FF); }
 .xhs-card .mermaid-node img { border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06); }
 .xhs-card .xhs-card-footer { display: flex; align-items: center; justify-content: space-between; font-family: Optima-Regular, Optima, PingFangSC-light, PingFangTC-light, "PingFang SC", sans-serif; }
@@ -443,6 +480,9 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
     container.style.background = "var(--bg-primary)";
     container.style.color = "var(--text-primary)";
 
+    // 注音读音的实体化统一在 prepareExportElement 里完成 ✓（见 export/export-typography.ts），
+    // 卡片只需共享那份 .tiptap-export-content 样式即可 ✓。
+
     await inlineImages(raw);
     // frontmatter 为元数据块，不进入正文卡片（与 docx 导出一致）
     container.querySelectorAll("[data-type='frontmatter']").forEach((el) => el.remove());
@@ -497,7 +537,6 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
 
     // 封面提取 h1（仅无分割线时作为独立封面卡片使用）
     const coverInfo = extractCoverInfo(contentEl, opts.title);
-
     // 分割线（--- / <hr>）是否存在。存在时严格按分割线分页
     const hasHr = contentEl.querySelectorAll("hr").length > 0;
 
@@ -518,6 +557,7 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
         breaks.unshift(bodyStartOffset);
       }
     }
+
     // 去除内容为空的段（如封面标题与首个分割线之间仅有空白），避免产生空白卡片
     for (let i = breaks.length - 2; i >= 0 && breaks.length > 2; i--) {
       if (!segmentHasBlock(contentEl, breaks[i], breaks[i + 1])) {

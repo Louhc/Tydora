@@ -170,6 +170,32 @@ export function useSmoothCaret(
     };
 
     /**
+     * **同步**重绘光标 ✓（事件 `tydora:caret-sync`）。
+     *
+     * 拖动侧栏 / 缩放窗口时，TipTapEditor 会逐帧修正 `scrollTop` ✓。
+     * 如果光标仍走 rAF（下一帧才重算 ✗），这一帧的光标就会跟着滚动抖一下 ✗ ——
+     * 在修正滚动之后立刻同步跑一次 update ✓，两者就能在同一帧对齐 ✓。
+     */
+    const onCaretSync = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      /**
+       * ⚠️ 必须包 try/catch ✓：这个事件由 TipTapEditor 的 ResizeObserver 派发 ✓，
+       * 组件正在卸载 / 视图还没挂载时会抛
+       * "The editor view is not available. Cannot access view.hasFocus"（用户实测 ✓）。
+       * 吞掉即可 —— 下一次 `schedule()` 会在视图就绪后补上 ✓。
+       */
+      try {
+        update();
+      } catch {
+        /* 视图未就绪：忽略这次同步 */
+      }
+    };
+    window.addEventListener("tydora:caret-sync", onCaretSync);
+
+    /**
      * ⚠️ 组字结束时必须**再调度一次** ✓。
      *
      * 上面 `view.composing` 守卫会在组字期间把光标藏起来 ✓；而 IME 按回车提交时，
@@ -230,6 +256,7 @@ export function useSmoothCaret(
       window.removeEventListener("focus", schedule);
       document.removeEventListener("visibilitychange", schedule);
       host.removeEventListener("compositionend", onCompositionEnd, true);
+      window.removeEventListener("tydora:caret-sync", onCaretSync);
       caret.remove();
     };
   }, [editor, hostRef, enabled]);
