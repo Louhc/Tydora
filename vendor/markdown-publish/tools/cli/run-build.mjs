@@ -98,7 +98,31 @@ export function runBuild(cfg, { cwd = process.cwd() } = {}) {
 
   runNode(BIN.tsx, ['tools/vault-parser/run.ts'], env); // → src/content
   runNode(BIN.ng, ['build', '--base-href', baseHref], env); // → dist/markdown-publish/browser
-  runNode(BIN.pagefind, ['--site', DIST_BROWSER], env); // search index
+  // ⚠️ Pagefind 在部分环境会以 PermissionDenied 崩掉 ✗（pagefind/src/output/mod.rs:422）。
+  // 本机实测：只有「仓库根」这一层可写 ✓，写到 `vendor/…` ✗、写到用户仓库目录 ✗ 全被系统拒绝，
+  // 而 **Node 写这些目录都正常** ✓（ng build / 后面的 cpSync 都没问题）。
+  // 所以：**依次尝试几个暂存目录**，哪个能成就用哪个 ✓，再由 Node 把结果拷回站点目录 ✓。
+  const stageCandidates = [
+    `${outPath}.pagefind-stage`,                    // 常规环境：输出目录旁最合适
+    join(PKG_ROOT, "..", "..", ".pagefind-stage"),  // 开发环境 = 仓库根（本机可用 ✓）
+    join(PKG_ROOT, ".pagefind-stage"),              // 兜底：包内
+  ];
+  let staged = null;
+  let lastErr = null;
+  for (const stage of stageCandidates) {
+    rmSync(stage, { recursive: true, force: true });
+    try {
+      runNode(BIN.pagefind, ["--site", DIST_BROWSER, "--output-path", stage], env); // search index
+      staged = stage;
+      break;
+    } catch (err) {
+      lastErr = err;
+      rmSync(stage, { recursive: true, force: true });
+    }
+  }
+  if (!staged) throw lastErr ?? new Error("pagefind failed");
+  cpSync(staged, join(DIST_BROWSER, "pagefind"), { recursive: true });
+  rmSync(staged, { recursive: true, force: true });
   runNode(join(PKG_ROOT, 'tools', 'gen-seo.mjs'), [], env); // robots/sitemap/llms/404
   runNode(join(PKG_ROOT, 'tools', 'gen-og.mjs'), [], env); // og.png with the site name
 

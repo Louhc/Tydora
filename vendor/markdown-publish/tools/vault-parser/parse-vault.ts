@@ -500,8 +500,21 @@ export async function parseVault(opts: ParseOptions): Promise<void> {
 
 /** Strip markdown syntax to readable plain text (for search scoring/snippets
  *  and embeddings). Keeps link/wikilink display text, drops code/markup. */
+/** Tydora 行内模板 {{Ruby|本体|读音}} / {{Hilite|id|文字}} / {{Color|id|文字}} → 只保留可见文字 ✓
+ *  （纯文本摘要 / 搜索索引里不该出现花括号语法 ✗） */
+function stripTydoraTemplates(s: string): string {
+  let out = s;
+  // 模板可以嵌套（Hilite 里套 Ruby），跑两轮足够覆盖实际写法 ✓
+  for (let i = 0; i < 2; i++) {
+    out = out
+      .replace(/\{\{Ruby\|([^|{}]+)\|[^|{}]*\}\}/g, '$1')
+      .replace(/\{\{(?:Hilite|Color)\|[^|{}]*\|([^{}]*)\}\}/g, '$1');
+  }
+  return out;
+}
+
 function markdownToText(md: string): string {
-  return md
+  return stripTydoraTemplates(md)
     .replace(/```[\s\S]*?```/g, ' ') // fenced code
     .replace(/`[^`]*`/g, ' ') // inline code
     .replace(/!\[\[[^\]]*\]\]/g, ' ') // embeds

@@ -432,3 +432,30 @@ body {
   margin: 1rem 0;
   background: var(--background-primary-alt);
 }
+
+/* 注音（Tydora 的 {{Ruby|本体|读音}}，由 tools/vault-parser/markdown.ts 转成 <ruby>）✓
+   读音字号约为本体的一半、浅一档，和编辑器的观感一致 ✓ */
+ruby {
+  ruby-position: over;
+}
+ruby rt {
+  font-size: 0.55em;
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+
+/* Tydora 的行内模板渲染结果 ✓（由 tools/vault-parser/markdown.ts 生成） */
+mark.td-hilite {
+  /* 底色（0.38 透明）由内联样式给出；这里只补形状，文字颜色跟随正文 */
+  color: inherit;
+  padding: 0 0.15em;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+span.td-color {
+  /* 颜色由内联样式给出 */
+  font-weight: inherit;
+}

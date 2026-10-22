@@ -99,6 +99,195 @@ function parseYouTubeId(href: string): { id: string; hasTime: boolean } | null {
 
 // ---- custom inline rule: wikilinks & embeds ----
 
+// ---- Tydora 行内模板：{{Ruby|…}} / {{Hilite|…}} / {{Color|…}} ----
+
+/** 高亮底色（与编辑器 Editor/highlighter.ts 的 HIGHLIGHT_COLORS 一致 ✓） */
+const TYDORA_HILITE_COLORS: Record<string, string> = {
+  yellow: '#ffe58f',
+  green: '#b7ebc6',
+  blue: '#b3ddff',
+  pink: '#ffc9de',
+  purple: '#dcc9ff',
+  orange: '#ffd6a5',
+};
+
+/** 文字色（与编辑器 Editor/extensions/text-color.ts 的 TEXT_COLORS 一致 ✓） */
+const TYDORA_TEXT_COLORS: Record<string, string> = {
+  red: '#e03131',
+  orange: '#e8590c',
+  green: '#2f9e44',
+  blue: '#1c7ed6',
+  violet: '#7048e8',
+  pink: '#d6336c',
+};
+
+/** 高亮底色透明度（与编辑器 mark 的 0.38 一致 ✓） */
+const TYDORA_HILITE_ALPHA = 0.38;
+
+/** #rgb / #rrggbb → rgba() ✓（不支持时原样返回） */
+function hexToRgba(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  let h = m[1];
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/** 参数既可以是调色板 id，也可以直接写 #hex ✓（与编辑器一致） */
+function resolveTydoraColor(param: string, palette: Record<string, string>, fallback: string): string {
+  const key = param.trim();
+  if (!key) return fallback;
+  const byId = palette[key.toLowerCase()];
+  if (byId) return byId;
+  if (/^#[0-9a-f]{3,8}$/i.test(key)) return key;
+  return fallback;
+}
+
+/** 从 start 处的 `{{` 找到配对的 `}}`（支持嵌套），返回**结束位置之后**的下标；找不到返回 -1 */
+function findTemplateEnd(src: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < src.length - 1; i++) {
+    if (src[i] === '{' && src[i + 1] === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (src[i] === '}' && src[i + 1] === '}') {
+      depth--;
+      i++;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/** 模板 → 纯文本（正文取本体、Hilite/Color 取文字）✓，供标题 slug / TOC 使用 */
+function tydoraPlainText(s: string): string {
+  let out = s;
+  for (let i = 0; i < 2; i++) {
+    out = out
+      .replace(/\{\{Ruby\|([^|{}]+)\|[^|{}]*\}\}/g, '$1')
+      .replace(/\{\{(?:Hilite|Color)\|[^|{}]*\|([^{}]*)\}\}/g, '$1');
+  }
+  return out;
+}
+
+/** 按 `|` 切分模板参数，但**忽略嵌套 `{{…}}` 内部的 `|`** ✓ */
+function splitTemplateArgs(body: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let last = 0;
+  for (let i = 0; i < body.length - 1; i++) {
+    if (body[i] === '{' && body[i + 1] === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (body[i] === '}' && body[i + 1] === '}') {
+      depth--;
+      i++;
+      continue;
+    }
+    if (body[i] === '|' && depth === 0) {
+      parts.push(body.slice(last, i));
+      last = i + 1;
+    }
+  }
+  parts.push(body.slice(last));
+  return parts;
+}
+
+/** 单个模板体（已去掉外层 {{ }}）→ HTML；不认识的写法返回 null（由调用方原样转义输出） */
+function renderTydoraTemplate(body: string): string | null {
+  const parts = splitTemplateArgs(body);
+  if (parts.length < 3) return null; // 至少 name + 两个参数
+  const name = parts[0].trim();
+  const param = parts[1];
+  const inner = parts.slice(2).join('|');
+
+  if (name === 'Ruby') {
+    const base = param;
+    const rt = inner;
+    /**
+     * 本体恰好是**一个模板**时自动翻转 ✓（与编辑器一致）：
+     * `{{Ruby|{{Hilite|yellow|心構}}|こころがま}}` → `{{Hilite|yellow|{{Ruby|心構|こころがま}}}}`
+     */
+    if (base.startsWith('{{') && findTemplateEnd(base, 0) === base.length) {
+      const innerParts = splitTemplateArgs(base.slice(2, -2));
+      const innerName = (innerParts[0] ?? '').trim();
+      if ((innerName === 'Hilite' || innerName === 'Color') && innerParts.length >= 3) {
+        const flipped =
+          `{{${innerName}|${innerParts[1]}|{{Ruby|${innerParts.slice(2).join('|')}|${rt}}}}}`;
+        return renderTydoraInline(flipped);
+      }
+    }
+    return `<ruby>${renderTydoraInline(base)}<rt>${renderTydoraInline(rt)}</rt></ruby>`;
+  }
+  if (name === 'Hilite') {
+    const hex = resolveTydoraColor(param, TYDORA_HILITE_COLORS, TYDORA_HILITE_COLORS.yellow);
+    return `<mark class="td-hilite" style="background-color:${hexToRgba(hex, TYDORA_HILITE_ALPHA)}">${renderTydoraInline(inner)}</mark>`;
+  }
+  if (name === 'Color') {
+    const hex = resolveTydoraColor(param, TYDORA_TEXT_COLORS, TYDORA_TEXT_COLORS.red);
+    return `<span class="td-color" style="color:${hex}">${renderTydoraInline(inner)}</span>`;
+  }
+  return null;
+}
+function renderTydoraInline(text: string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const open = text.indexOf('{{', i);
+    if (open < 0) {
+      out += escapeHtml(text.slice(i));
+      break;
+    }
+    if (open > i) out += escapeHtml(text.slice(i, open));
+    const end = findTemplateEnd(text, open);
+    if (end < 0) {
+      out += escapeHtml(text.slice(open));
+      break;
+    }
+    const html = renderTydoraTemplate(text.slice(open + 2, end - 2));
+    out += html ?? escapeHtml(text.slice(open, end));
+    i = end;
+  }
+  return out;
+}
+
+/**
+ * 行内规则：把 Tydora 的 `{{模板}}` 语法渲染成 HTML ✓
+ *
+ * 站点之前把这类字面量原样输出 ✗（生成的 HTML 里是 `<p>{{Ruby|素早|すばや}}く</p>`），
+ * 于是发布出来的网站看不到注音 / 高亮 / 文字色 ✓。
+ *
+ * 支持 `{{Ruby|本体|读音}}`、`{{Hilite|yellow|文字}}`、`{{Color|red|文字}}`，
+ * 以及它们的嵌套（`{{Hilite|…|{{RubY…}}}}` 这类）✓。
+ * 代码块 / 行内代码里的内容不会走到行内规则 ✓，因此不会被误解析 ✓。
+ */
+function tydoraTemplateRule(md: MarkdownIt): void {
+  md.inline.ruler.before('link', 'tydora_template', (state, silent) => {
+    const start = state.pos;
+    const src = state.src;
+    if (src[start] !== '{' || src[start + 1] !== '{') return false;
+    const end = findTemplateEnd(src, start);
+    if (end < 0) return false;
+    if (silent) {
+      state.pos = end;
+      return true;
+    }
+    const html = renderTydoraTemplate(src.slice(start + 2, end - 2));
+    if (html === null) return false; // 不认识的模板 → 不当成模板处理
+    const token = state.push('html_inline', '', 0);
+    token.content = html;
+    state.pos = end;
+    return true;
+  });
+}
+
 function wikilinkRule(md: MarkdownIt): void {
   md.inline.ruler.before('link', 'wikilink', (state, silent) => {
     const start = state.pos;
@@ -277,6 +466,7 @@ export function createMarkdown(): MarkdownIt {
   md.use(footnote);
   md.use(taskLists, { enabled: true, label: false });
 
+  tydoraTemplateRule(md);
   wikilinkRule(md);
   tagRule(md);
   calloutRule(md);
@@ -289,7 +479,7 @@ export function createMarkdown(): MarkdownIt {
     const token = tokens[idx];
     const level = Number(token.tag.slice(1));
     const inline = tokens[idx + 1];
-    const text = inline && inline.type === 'inline' ? inline.content : '';
+    const text = inline && inline.type === 'inline' ? tydoraPlainText(inline.content) : '';
     const slug = slugifyHeading(text);
     if (env && env.headings) env.headings.push({ level, text, slug });
     return defaultHeadingOpen(tokens, idx, options, env, self);

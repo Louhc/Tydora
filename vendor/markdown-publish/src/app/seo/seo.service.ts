@@ -77,7 +77,7 @@ export class SeoService {
     // link previews work everywhere; the baseURI fallback survives subpaths.
     const ogImage = site.url
       ? `${site.url}/og.png`
-      : new URL('og.png', this.doc.baseURI).href;
+      : this.ogImageFromBaseUri();
     const og: Record<string, string> = {
       'og:title': ogTitle,
       'og:description': desc,
@@ -98,6 +98,20 @@ export class SeoService {
     this.setJsonLd(input, abs, desc, site);
   }
 
+  /**
+   * `og:image` 的兜底地址 ✓。
+   *
+   * ⚠️ 预渲染时（Angular 用 Domino 模拟 DOM）`document.baseURI` 是 **NotYetImplemented** ✗ ——
+   * 直接访问会抛错，于是每条路由都打一条 `ERROR Error: NotYetImplemented` ✓。
+   * 没配置 siteUrl 时用相对路径兜底 ✓（爬虫要绝对地址就该在发布配置里填站点地址 ✓）。
+   */
+  private ogImageFromBaseUri(): string {
+    try {
+      return new URL('og.png', this.doc.baseURI).href;
+    } catch {
+      return 'og.png';
+    }
+  }
   private absolute(path: string, siteUrl: string): string {
     const p = path.startsWith('/') ? path : `/${path}`;
     if (siteUrl) {
@@ -176,8 +190,21 @@ function clip(text: string, max: number): string {
 }
 
 /** Plain-text excerpt from raw markdown, for meta description. */
+/** Tydora 行内模板 {{Ruby|本体|读音}} / {{Hilite|id|文字}} / {{Color|id|文字}} → 只保留可见文字 ✓
+ *  （纯文本摘要 / 搜索索引里不该出现花括号语法 ✗） */
+function stripTydoraTemplates(s: string): string {
+  let out = s;
+  // 模板可以嵌套（Hilite 里套 Ruby），跑两轮足够覆盖实际写法 ✓
+  for (let i = 0; i < 2; i++) {
+    out = out
+      .replace(/\{\{Ruby\|([^|{}]+)\|[^|{}]*\}\}/g, '$1')
+      .replace(/\{\{(?:Hilite|Color)\|[^|{}]*\|([^{}]*)\}\}/g, '$1');
+  }
+  return out;
+}
+
 export function excerptFromMarkdown(markdown: string): string {
-  return (markdown ?? '')
+  return stripTydoraTemplates(markdown ?? '')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`]*`/g, ' ')
     .replace(/!\[\[[^\]]*\]\]/g, ' ')
