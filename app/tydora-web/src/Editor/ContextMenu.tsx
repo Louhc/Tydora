@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { applyMarkToInlineNodes } from "./extensions/highlight-ext";
 import { executeCommand } from "./extensions/custom-commands";
 import { loadShortcuts, formatShortcutDisplay } from "./shortcuts";
 import type { ShortcutItem } from "./shortcuts";
@@ -20,7 +21,7 @@ interface ContextMenuProps {
    * - 不带 placement：锚点 = 鼠标落点，向右下展开（右键菜单）；
    * - placement: "above"：菜单浮在锚点**上方**，锚点取选区的左上角（划选文本时自动弹出）。
    */
-  position: { x: number; y: number; placement?: "above" } | null;
+  position: { x: number; y: number; bottom?: number; placement?: "above" } | null;
   onClose: () => void;
 }
 
@@ -521,8 +522,17 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       const GAP = 4;
 
       let left = position.x;
-      // 划选弹出时浮在选区上方（锚点是选区左上角）；右键时锚点就是鼠标落点、向右下展开
-      let top = position.placement === "above" ? position.y - rect.height - 8 : position.y;
+      /**
+       * 划选弹出：优先浮在**选区上方** ✓；但上方空间不够时会被夹到窗口顶 ✗ ——
+       * 那样菜单就**压在选中的文字上**了 ✗（用户实测："选中文字时菜单会遮挡文本" ✓）。
+       * 所以上方放不下就改放到**选区下方** ✓（需要 bottom，由调用方传入 ✓）。
+       */
+      let top = position.y;
+      if (position.placement === "above") {
+        const above = position.y - rect.height - 8;
+        const below = typeof position.bottom === "number" ? position.bottom + 8 : position.y + 24;
+        top = above >= GAP ? above : below;
+      }
 
       if (left + rect.width > window.innerWidth - GAP) {
         left = position.x - rect.width;
@@ -571,6 +581,7 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     setHighlighterColor(color);
     if (editor && !editor.state.selection.empty) {
       editor.chain().focus().setHighlight({ color }).run();
+      applyMarkToInlineNodes(editor, "highlight", { color });
     }
     collapseSelection();
     onClose();

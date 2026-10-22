@@ -29,12 +29,18 @@ import type { Editor } from "@tiptap/react";
 /** 打字后保持常亮的时长：超过它才恢复闪烁 */
 const TYPING_HOLD_MS = 600;
 
-/** 行高缓存：同一元素只算一次（getComputedStyle 很贵） */
-const lineHeightCache = new WeakMap<HTMLElement, number>();
-
+/**
+ * 取某个元素的行高（px）✓。
+ *
+ * ⚠️ **不要缓存**结果 ✗。
+ *
+ * 以前用 `WeakMap` 按元素缓存 ✓ —— 但字号是运行时可变的 ✓（Ctrl+滚轮 / 设置面板 ✓），
+ * 缓存不失效 ✗ → 从大字号缩到小字号后，光标仍按**旧的大行高**画 ✗
+ * → "字号很小的时候，标题的光标高得离谱"✗（用户实测 ✓）。标题的 line-height 是
+ * 1.25、字号又是 2.2em ✓，缓存过期时差异尤其明显 ✓。
+ * `getComputedStyle` 只在光标移动时取一次 ✓，代价可以接受 ✓。
+ */
 function lineHeightOf(el: HTMLElement, fallback: number): number {
-  const cached = lineHeightCache.get(el);
-  if (cached !== undefined) return cached;
   let lh = fallback;
   try {
     const parsed = Number.parseFloat(getComputedStyle(el).lineHeight);
@@ -42,7 +48,6 @@ function lineHeightOf(el: HTMLElement, fallback: number): number {
   } catch {
     /* 取不到就用 fallback */
   }
-  lineHeightCache.set(el, lh);
   return lh;
 }
 
@@ -94,6 +99,17 @@ export function useSmoothCaret(
       // 注意必须同时看 **document.hasFocus()**：OS 焦点切到别的程序（例如浏览器）时，
       // WebView 里的元素常常收不到 blur，view.hasFocus() 仍是 true，
       // 只判它的话自绘光标会继续闪（原生光标由系统按窗口活动状态隐藏，所以以前没这问题）。
+      /**
+       * ⚠️ **组字（输入法）期间不要动光标** ✗。
+       *
+       * `view.coordsAtPos()` 是布局读取 ✓、写 `caret.style` 是样式写入 ✓ ——
+       * 在 IME 组字过程中做这些会打断组字 ✗：实测 Google 日语输入法打 `so` 时，
+       * 第一个 `s` 被提前提交、变成 `sそ` ✗（用户实测 ✓）。组字期间交给原生光标 ✓。
+       */
+      if (view.composing) {
+        setHidden(true);
+        return;
+      }
       if (!document.hasFocus() || !view.hasFocus() || !sel.empty || !editor.isEditable) {
         setHidden(true);
         return;
@@ -153,13 +169,45 @@ export function useSmoothCaret(
       raf = requestAnimationFrame(update);
     };
 
+    /**
+     * ⚠️ 组字结束时必须**再调度一次** ✓。
+     *
+     * 上面 `view.composing` 守卫会在组字期间把光标藏起来 ✓；而 IME 按回车提交时，
+     * 那次 `transaction` 往往**仍处于 composing 状态** ✗ → 光标被藏、之后没有事件再触发 ✗
+     * → "按下回车结束输入后光标不出现"✗（用户实测 ✓）。监听 `compositionend` 补一次即可 ✓。
+     */
+    const onCompositionEnd = () => schedule();
+    host.addEventListener("compositionend", onCompositionEnd, true);
+
     editor.on("selectionUpdate", schedule);
     editor.on("transaction", schedule);
     editor.on("focus", schedule);
     editor.on("blur", schedule);
     // 只监听"尺寸变化"，不监听 scroll —— 滚动由内容坐标天然跟随
+    /**
+     * 尺寸变化时重算光标位置 ✓。
+     *
+     * ⚠️ 必须 observe **内容元素**（`view.dom`）而不是只 observe 滚动容器 ✗：
+     * 字号变化时滚动容器自身尺寸不变 ✓（变的是内容高度 / 行高 ✓），
+     * 只 observe scroller 根本不会触发 ✗ —— 表现就是"放大缩小后光标位置还是旧的"✗。
+     */
     const resizeObserver = new ResizeObserver(schedule);
     resizeObserver.observe(scroller);
+    try {
+      resizeObserver.observe(editor.view.dom as HTMLElement);
+    } catch {
+      /* view.dom 不可用时忽略 */
+    }
+    /**
+     * 字号变化是改 `--editor-font-size` 这个 CSS 变量 ✓，内容尺寸变化可能有延迟 ✓，
+     * 所以再监听根元素的 `style` 变化 ✓ —— 保证字号一改就重算 ✓。
+     */
+    const styleObserver = new MutationObserver(schedule);
+    try {
+      styleObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
+    } catch {
+      /* 忽略 */
+    }
     window.addEventListener("resize", schedule);
     // 窗口焦点变化（切到别的程序 / 切回来）与可见性变化，都要立刻重算，
     // 否则光标会在窗口失去焦点后继续闪、或切回来时不出现。
@@ -176,10 +224,12 @@ export function useSmoothCaret(
       editor.off("focus", schedule);
       editor.off("blur", schedule);
       resizeObserver.disconnect();
+      styleObserver.disconnect();
       window.removeEventListener("resize", schedule);
       window.removeEventListener("blur", schedule);
       window.removeEventListener("focus", schedule);
       document.removeEventListener("visibilitychange", schedule);
+      host.removeEventListener("compositionend", onCompositionEnd, true);
       caret.remove();
     };
   }, [editor, hostRef, enabled]);

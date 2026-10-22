@@ -332,8 +332,8 @@ function EditorSettingsContent({
             <input
               type="range"
               className="canvas-settings-slider"
-              min="10"
-              max="24"
+              min="8"
+              max="48"
               value={settings.fontSize}
               onChange={(e) => onChange({ ...settings, fontSize: Number(e.target.value) })}
             />
@@ -349,8 +349,8 @@ function EditorSettingsContent({
             <input
               type="range"
               className="canvas-settings-slider"
-              min="10"
-              max="24"
+              min="8"
+              max="48"
               value={settings.codeFontSize}
               onChange={(e) => onChange({ ...settings, codeFontSize: Number(e.target.value) })}
             />

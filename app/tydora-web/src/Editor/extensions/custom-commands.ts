@@ -4,6 +4,7 @@ import type { Transaction } from "prosemirror-state";
 import { DOMParser as PMDOMParser, type Node } from "prosemirror-model";
 import { invoke } from "@tauri-apps/api/core";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
+import { applyMarkToInlineNodes } from "./highlight-ext";
 
 /**
  * 收掉选区（折叠到原选区 head）。
@@ -323,11 +324,15 @@ export function executeCommand(name: string, editor: Editor | null) {
       break;
     case "highlight":
       // 用当前荧光笔颜色：再按一次同样的颜色会取消高亮（toggle 语义）
-      chain.toggleHighlight({ color: getHighlighterColor() }).run();
+      const hlColor = getHighlighterColor();
+      chain.toggleHighlight({ color: hlColor }).run();
+      // 注音这类**带内容的行内节点**不会被 setMark 带上 mark ✗ → 单独补一次 ✓
+      applyMarkToInlineNodes(editor, "highlight", { color: hlColor });
       collapseSelection(editor);
       break;
     case "highlight-clear":
       chain.unsetHighlight().run();
+      applyMarkToInlineNodes(editor, "highlight", null);
       collapseSelection(editor);
       break;
     case "text-color-clear":

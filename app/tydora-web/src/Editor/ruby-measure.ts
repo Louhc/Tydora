@@ -122,6 +122,15 @@ export const RubyMeasure = Extension.create({
             update(view, prevState) {
               // 内容没变就不必重排：选区变化、装饰变化都不影响文字宽度
               if (view.state.doc.eq(prevState.doc)) return;
+              /**
+               * ⚠️ **组字（输入法）期间不要量** ✗。
+               *
+               * `measureRubies` 会读 `Range.getBoundingClientRect()` 并**写 CSS 变量** ✓ ——
+               * 在 IME 组字过程中做这些会打断组字 ✗：实测用 Google 日语输入法打 `so` 时，
+               * 第一个 `s` 被提前提交、变成 `sそ` ✗（用户实测 ✓）。
+               * 组字结束后 `compositionend` 会再触发一次 update ✓，届时补量即可 ✓。
+               */
+              if (view.composing) return;
               schedule();
             },
           };

@@ -622,7 +622,7 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     fontSizeToastTimerRef.current = setTimeout(() => setFontSizeToast(null), 1500);
   };
 
-  // Ctrl + 滚轮：在编辑区调整字号（范围与设置面板一致 10-24px，持久化到 zmd-general-settings）
+  // Ctrl + 滚轮：在编辑区调整字号（范围与设置面板一致 8-48px，持久化到 zmd-general-settings）
   useEffect(() => {
     // 收集事件目标到 .editor-container 之间所有可滚动祖先的当前位置
     const collectScrollLocks = (target: HTMLElement | null) => {
@@ -685,8 +685,9 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
         const current = typeof settings.fontSize === "number" ? settings.fontSize : 16;
         const currentMono =
           typeof settings.codeFontSize === "number" ? settings.codeFontSize : 14;
-        const next = Math.min(24, Math.max(10, Math.round(current) + dir));
-        const nextMono = Math.min(24, Math.max(10, Math.round(currentMono) + dir));
+        // 上限放宽到 48px ✓（用户要求"字号能放得更大"），下限 8px ✓
+        const next = Math.min(48, Math.max(8, Math.round(current) + dir));
+        const nextMono = Math.min(48, Math.max(8, Math.round(currentMono) + dir));
         if (next !== current || nextMono !== currentMono) {
           settings.fontSize = next;
           settings.codeFontSize = nextMono;

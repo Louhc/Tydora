@@ -631,6 +631,23 @@ async function updateImagePathsForFolder(
   return { filesUpdated, pathsUpdated };
 }
 
+/** `{{Ruby|本体|读音}}`（兼容 `:` 分隔与多余空白；与编辑器里的模板语法一致 ✓） */
+const SEARCH_RUBY_RE = /\{\{Ruby\s*[|:]\s*([^|{}:\n]*?)\s*[|:]\s*([^|{}:\n]*?)\s*\}\}/g;
+
+/**
+ * 把一行里的注音模板替换成**本体**或**读音**，用于搜索匹配 ✓。
+ *
+ * 用户要求：搜索 `AB` 时，应当同时命中
+ *   - `{{Ruby|A|X}}B`（本体是 A ✓ → 展开成本体后是 `AB` ✓）
+ *   - `{{Ruby|X|A}}B`（读音是 A ✓ → 展开成读音后是 `AB` ✓）
+ * 所以搜索时一行有**三种可匹配形态**：原文 ✓ / 本体版 ✓ / 读音版 ✓。
+ */
+function rubyExpandedLine(line: string, mode: "base" | "rt"): string {
+  if (!line.includes("{{Ruby")) return line; // 绝大多数行没有注音，快速跳过 ✓
+  SEARCH_RUBY_RE.lastIndex = 0;
+  return line.replace(SEARCH_RUBY_RE, (_m, base: string, rt: string) => (mode === "base" ? base : rt));
+}
+
 async function searchFile(filePath: string, lowerQuery: string): Promise<SearchMatch[] | null> {
   try {
     const content = await readTextFile(filePath);
@@ -638,7 +655,15 @@ async function searchFile(filePath: string, lowerQuery: string): Promise<SearchM
     const lines = content.split("\n");
     const matches: SearchMatch[] = [];
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].toLowerCase().includes(lowerQuery)) {
+      const raw = lines[i].toLowerCase();
+      let hit = raw.includes(lowerQuery);
+      // 注音：本体/读音展开后再匹配一次 ✓（`{{Ruby|A|X}}B` 与 `{{Ruby|X|A}}B` 都能被 `AB` 命中 ✓）
+      if (!hit && raw.includes("{{ruby")) {
+        hit =
+          rubyExpandedLine(lines[i], "base").toLowerCase().includes(lowerQuery) ||
+          rubyExpandedLine(lines[i], "rt").toLowerCase().includes(lowerQuery);
+      }
+      if (hit) {
         matches.push({ line: i + 1, content: lines[i].trim() });
         if (matches.length >= 3) break;
       }
@@ -1446,6 +1471,8 @@ function TreeNodeComp({
           }
         }
         lastClickedPathRef.current = node.path;
+        // 点选文件时**不要**把焦点交给编辑器 ✓（焦点留在文件树里，F2 / Ctrl+C / Delete 才能连续用 ✓）
+        suppressEditorFocusForPath(node.path);
         onSelect(node.path);
         return;
       }
@@ -1454,12 +1481,16 @@ function TreeNodeComp({
         e.preventDefault();
         onMultiSelect([node.path], 'toggle');
         lastClickedPathRef.current = node.path;
+        // 点选文件时**不要**把焦点交给编辑器 ✓（焦点留在文件树里，F2 / Ctrl+C / Delete 才能连续用 ✓）
+        suppressEditorFocusForPath(node.path);
         onSelect(node.path);
         return;
       }
       // Normal click: clear selection
       onMultiSelect([], 'replace');
       lastClickedPathRef.current = node.path;
+      // 点选文件时**不要**把焦点交给编辑器 ✓（焦点留在文件树里，F2 / Ctrl+C / Delete 才能连续用 ✓）
+      suppressEditorFocusForPath(node.path);
       onSelect(node.path);
       return;
     }
@@ -2125,6 +2156,20 @@ function FileTree({
 
   const handleFinishEdit = useCallback(async (path: string, newName: string, isDirectory: boolean) => {
     setEditingPath(null);
+    /**
+     * ⚠️ 输入框卸载后，焦点会掉到 `body` ✗ —— 所以**无论改名是否真的发生**
+     *（空字符串、未改动直接回车、非法名字、重名中止 ✓）都要把焦点交还文件树 ✓。
+     * 放在最前面而不是"改名成功后"：后者的几个 `return` 分支根本走不到 ✗
+     *（用户实测："F2 后没动字符直接回车，焦点还是会转移"✗）。
+     * 用 rAF 等 React 把输入框卸载完再聚焦 ✓。
+     */
+    requestAnimationFrame(() => {
+      try {
+        treeRef.current?.focus({ preventScroll: true });
+      } catch {
+        /* 忽略 */
+      }
+    });
     if (!newName || newName.trim() === "") return;
     newName = newName.trim();
     const currentName = path.split(pathSep()).pop() || "";
@@ -2166,7 +2211,22 @@ function FileTree({
       }
     }
 
-    try { await rename(path, newPath); await handleReload(); }
+    try {
+      await rename(path, newPath);
+      await handleReload();
+      /**
+       * ⚠️ 改名完成后要**把选中项切到新文件** ✓、并把**焦点交还文件树** ✓。
+       *
+       * 否则内联输入框卸载后焦点落到 `body` ✗（用户实测："改名完成按回车后焦点转移了"✗），
+       * 而且选中项仍停在**旧路径**上 ✗ → 紧接着按 F2 / Ctrl+C / Delete 都会失灵或指向错误对象 ✓。
+       */
+      handleMultiSelect([newPath], "replace");
+      try {
+        treeRef.current?.focus({ preventScroll: true });
+      } catch {
+        /* 忽略 */
+      }
+    }
     catch (err) {
       console.error("重命名失败:", err);
       // 之前只写日志、界面毫无反馈；这里把系统返回的原因如实提示出来
@@ -2271,6 +2331,17 @@ function FileTree({
       }
       return next;
     });
+    /**
+     * ⚠️ 单选时**同步"当前选中项"** ✓。
+     *
+     * `F2` / `Ctrl+C` / `Ctrl+D` / `Delete` 的目标取的是 `pendingActivePath` ✓，
+     * 而它以前只在「点击 / 新建 / 复制副本」时被设置 ✗ —— 改名完成后（选中项切到新路径 ✓）
+     * 它仍是**旧路径** ✗ → 紧接着按 Ctrl+D 找不到节点、毫无反应 ✗（用户实测 ✓）。
+     */
+    if (mode === "replace" && paths.length === 1) {
+      setPendingActivePath(paths[0]);
+      pendingActivePathRef.current = paths[0];
+    }
   }, []);
 
   /**
@@ -2622,8 +2693,30 @@ function FileTree({
     suppressEditorFocusForPath(filePath);
     setPendingActivePath(filePath);
     pendingActivePathRef.current = filePath;
+    /**
+     * ⚠️ 还必须把**真正的多选状态**也切到新文件 ✓。
+     *
+     * 以前只设了 `pendingActivePath`（树上的**高亮** ✓）✗，而 `F2` 改名用的是
+     * `selectedPaths` ✓ —— 于是"Ctrl+C 复制副本后按 F2"，改名的仍然是**原文件** ✗
+     *（用户实测 ✓）。这里用与新建文件相同的 `handleMultiSelect(..., "replace")` ✓。
+     */
+    handleMultiSelect([filePath], "replace");
+    /**
+     * ⚠️ 还要**清掉鼠标悬停标记** ✓。
+     *
+     * `F2` 的目标优先级是「鼠标悬停节点 → 选中项」✗ —— 复制副本后鼠标仍停在**原文件**上 ✗
+     * → 按 F2 改名的还是原文件 ✓（用户实测 ✓）。
+     * 这里清空悬停标记，压过它；鼠标不动就不会被重新设置 ✓。
+     */
+    hoveredPathRef.current = null;
+    // 副本创建后，焦点也留在文件树里 ✓（便于连续 Ctrl+C / F2 / Ctrl+D ✓）
+    try {
+      treeRef.current?.focus({ preventScroll: true });
+    } catch {
+      /* 忽略 */
+    }
     onSelect(filePath);
-  }, [onSelect]);
+  }, [onSelect, handleMultiSelect]);
 
   const handleNewRootFile = useCallback(async () => {
     const targetDir = selectionDir;
@@ -2730,9 +2823,24 @@ function FileTree({
   useEffect(() => {
     const tree = treeRef.current;
     if (!tree) return;
-    const onPointerDown = () => {
+    const onPointerDown = (e: PointerEvent) => {
       pointerDownOnTreeRef.current = true;
       markTreeInteract();
+      /**
+       * ⚠️ 按下树节点时把**焦点交给树容器** ✓。
+       *
+       * 否则焦点会落到 `body` ✗（树行是 div、不可聚焦），于是 `treeFocused` 判据为假 ✗
+       * → F2 / Ctrl+C / Delete 全部失效 ✓（用户实测："点击文件后焦点自动转移到文件内"✗）。
+       * 用 `preventScroll` 避免焦点切换把树滚一下 ✓。
+       */
+      const target = e.target as HTMLElement | null;
+      if (target && !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+        try {
+          treeRef.current?.focus({ preventScroll: true });
+        } catch {
+          /* 忽略 */
+        }
+      }
     };
     const onPointerUp = () => {
       pointerDownOnTreeRef.current = false;
@@ -2896,20 +3004,16 @@ function FileTree({
       if (document.querySelector(".context-menu, .confirm-dialog-overlay, .modal, [role='dialog']")) return;
 
       /**
-       * 「重心在文件区」的判定：焦点在树内，**或**鼠标正悬停在树上。
+       * 判定：**只看焦点是否在文件树内** ✓（与鼠标位置无关 ✗）。
        *
-       * 不要因为"焦点还留在编辑器里"就一律拦掉：点选/悬停文件树时焦点常常仍在编辑器
-       * （TipTap 是 contenteditable，点树行的 mousedown 不一定抢走焦点），那样 Ctrl+D
-       * 会变成完全无反应。真正要防的是「鼠标不在树上，快捷键却去删树上那个旧节点」——
-       * 所以下面解析目标时，编辑器持有焦点时**不**回退到 pendingActivePath。
+       * 以前"焦点在树内**或**鼠标悬停在树上"都算 ✓ —— 但用户明确：鼠标在哪不该影响 ✓，
+       * 只看焦点 ✓；目标也只取**选中的那个文件** ✓（不再用悬停节点 ✗）。
        */
       const activeEl = document.activeElement as HTMLElement | null;
       const treeFocused = !!treeRef.current?.contains(activeEl);
-      const hovering = !!hoveredPathRef.current;
-      if (!treeFocused && !hovering) return;
+      if (!treeFocused) return;
 
-      let path = hoveredPathRef.current;
-      if (!path && treeFocused) path = pendingActivePathRef.current;
+      let path = pendingActivePathRef.current;
       if (!path) return;
 
       const node = findNodeByPath(rootNodesRef.current, path);
@@ -2977,12 +3081,10 @@ function FileTree({
        */
       const activeEl = document.activeElement as HTMLElement | null;
       const treeFocused = !!treeRef.current?.contains(activeEl);
-      const hovering = !!hoveredPathRef.current;
-      // 允许「刚在文件树里操作过」也算重心在文件区：删除后文件树会重载，
-      // 光标下的那一行消失、悬停目标可能落空，此时仍应能撤销删除。
-      // 对 Ctrl+Z 是安全的 —— 它的目标是已记录的回收站条目 id，不依赖悬停行。
+      // 保留「刚在文件树里操作过」作为兜底：删除后文件树会重载，焦点/悬停都可能落空，
+      // 此时仍应能撤销删除（目标是已记录的回收站条目 id，不依赖任何行 ✓）。
       const treeRecent = lastTreeInteractRef.current > lastEditorInteractRef.current;
-      if (!treeFocused && !hovering && !treeRecent) return;
+      if (!treeFocused && !treeRecent) return;
       const ids = lastTrashMoveRef.current;
       if (ids.length === 0) return;
       e.preventDefault();
@@ -3043,12 +3145,19 @@ function FileTree({
        */
       const activeEl = document.activeElement as HTMLElement | null;
       const treeFocused = !!treeRef.current?.contains(activeEl);
-      if (!treeFocused && !hoveredPathRef.current) return;
+      /**
+       * 触发条件：**焦点在文件树内** ✓（与鼠标位置无关 ✗）。
+       *
+       * 以前还允许"鼠标悬停在树上"也算 ✓ —— 但用户明确：鼠标在哪不该影响 ✓，
+       * 只看焦点在不在树上 ✓；目标也只看**选中的那个文件** ✓。
+       */
+      if (!treeFocused) return;
 
-      // 目标优先级：鼠标悬停节点 → 树上当前选中项（pendingActivePath：点击 / j·k / 新建后都会登记）
-      // → 编辑器里正打开的文件（用 QuickOpen / 大纲打开时树上可能还没有选中项）。
-      let path = hoveredPathRef.current;
-      if (!path || path === rootPath) path = pendingActivePathRef.current;
+      /**
+       * 目标：**树上当前选中项** ✓ → 编辑器里正打开的文件（兜底 ✓）。
+       * 不再使用鼠标悬停节点 ✗（用户明确"鼠标具体位置无关紧要"✓）。
+       */
+      let path = pendingActivePathRef.current;
       if (!path || path === rootPath) path = activePath;
       if (!path || path === rootPath) return; // 仓库根不能在树里重命名
       if (!findNodeByPath(rootNodesRef.current, path)) return;

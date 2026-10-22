@@ -1,4 +1,5 @@
 import { useRef, useEffect, forwardRef, useImperativeHandle, useCallback, useState, useSyncExternalStore } from "react";
+import { applyMarkToInlineNodes } from "./extensions/highlight-ext";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import { Extension, markInputRule } from "@tiptap/core";
 import type { EditorView } from "@tiptap/pm/view";
@@ -303,7 +304,21 @@ function scrollEditorToHeading(
     const scrollContainer = container?.querySelector(".tiptap-editor");
     if (!scrollContainer) return;
     const view = getEditorView(editor);
-    const coords = view?.coordsAtPos?.(targetPos);
+    // ⚠️ rAF 期间注音可能已自动展开、文档变了 ✗ → pos 必钳制 ✓，且失败不能崩 ✓
+    const safePos = (() => {
+      try {
+        const size = view!.state.doc.content.size;
+        return Math.max(1, Math.min(targetPos, size));
+      } catch {
+        return 1;
+      }
+    })();
+    let coords: { top: number; bottom: number } | null | undefined = null;
+    try {
+      coords = view?.coordsAtPos?.(safePos) as { top: number; bottom: number } | undefined;
+    } catch {
+      coords = null;
+    }
     if (coords) {
       const containerRect = scrollContainer.getBoundingClientRect();
       scrollContainer.scrollTop += coords.top - containerRect.top - 20;
@@ -443,7 +458,21 @@ function applyLineJumpToView(
     const scrollContainer = container?.querySelector(".tiptap-editor") as HTMLElement | null;
     if (!scrollContainer) return;
     const view = getEditorView(editor);
-    const coords = view?.coordsAtPos?.(pos);
+    // ⚠️ rAF 期间注音可能已自动展开、文档变了 ✗ → pos 必钳制 ✓，且失败不能崩 ✓
+    const safePos = (() => {
+      try {
+        const size = view!.state.doc.content.size;
+        return Math.max(1, Math.min(pos, size));
+      } catch {
+        return 1;
+      }
+    })();
+    let coords: { top: number; bottom: number } | null | undefined = null;
+    try {
+      coords = view?.coordsAtPos?.(safePos) as { top: number; bottom: number } | undefined;
+    } catch {
+      coords = null;
+    }
     if (coords) {
       const containerRect = scrollContainer.getBoundingClientRect();
       scrollContainer.scrollTop += coords.top - containerRect.top - containerRect.height / 3;
@@ -885,7 +914,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           scrollRatio: state.scrollRatio,
         });
       }, []);
-    const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number; placement?: "above" } | null>(null);
+    const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number; bottom?: number; placement?: "above" } | null>(null);
     const [tableToolbar, setTableToolbar] = useState<{ table: HTMLElement } | null>(null);
     const [linkDialog, setLinkDialog] = useState<{ defaultText: string } | null>(null);
     const [mathDialog, setMathDialog] = useState<{ latex: string; block: boolean; pos: number | null } | null>(null);
@@ -2319,7 +2348,16 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             // 编辑器尚未就绪或已销毁时不处理：否则下面 editor.chain() 会抛
             // "Cannot read properties of null (reading 'chain')" 这类未捕获异常
             if (!editor || editor.isDestroyed) return false;
-            const text = event.clipboardData?.getData("text/plain") ?? "";
+            /**
+             * ⚠️ 去掉**末尾单个换行** ✓。
+             *
+             * 网页上复制标题时，Chrome 会在 `text/plain` 尾部加一个 CRLF
+             *（HTML 里对应 `<br class="Apple-interchange-newline">` ✓）。
+             * 于是纯文本变成两行 ✗ → 走"多行 → 拆成段落"的分支 ✗
+             * → 粘到 `###` 标题行时就会**先换行再插入**✗（用户实测 ✓）。
+             * 只去掉**一个**末尾换行 ✓，中间/开头的换行保留 ✓。
+             */
+            const text = (event.clipboardData?.getData("text/plain") ?? "").replace(/\r?\n$/, "");
             event.preventDefault();
             if (text) {
               const lines = text.split(/\r?\n/);
@@ -3109,7 +3147,19 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
 
         if (!hit) return false;
         try {
-          editor.chain().focus().setTextSelection({ from: hit.from, to: hit.to }).run();
+          /**
+           * ⚠️ 缓存里的位置**必须钳制** ✓。
+           *
+           * `hit` 是按 Markdown 内容做 key 缓存下来的 **PM 位置** ✓，但点搜索结果会
+           * **展开注音**（节点 → 字面量 ✓），文档随即变长/变短 ✗ —— 缓存里那个位置
+           * 属于**旧文档** ✓。直接拿去 `setTextSelection` 会抛
+           * `RangeError: Position 95 out of range` ✗
+           *（实测：先点第一个结果、再点第二个时触发 ✓）。
+           */
+          const size = editor.state.doc.content.size;
+          const from = Math.max(1, Math.min(hit.from, size));
+          const to = Math.max(from, Math.min(hit.to, size));
+          editor.chain().focus().setTextSelection({ from, to }).run();
           return true;
         } catch {
           return false;
@@ -3315,6 +3365,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         // 已经是该颜色就不重复写事务（省掉无谓的撤销记录与重渲染）
         if (editor.isActive("highlight", { color: highlighterColor })) return;
         editor.chain().setHighlight({ color: highlighterColor }).run();
+        applyMarkToInlineNodes(editor, "highlight", { color: highlighterColor });
         // 上完色顺手收掉选区：蓝色覆盖层盖着就看不见刚上的颜色
         try {
           editor.commands.setTextSelection(editor.state.selection.head);
@@ -3948,6 +3999,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           setContextMenuPos({
             x: Math.min(start.left, end.left),
             y: Math.min(start.top, end.top),
+            // 选区底部：上方放不下时菜单要改放到这里 ✓
+            bottom: Math.max(start.bottom, end.bottom),
             placement: "above",
           });
         } catch {

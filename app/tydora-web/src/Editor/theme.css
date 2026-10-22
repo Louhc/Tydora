@@ -2092,10 +2092,15 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   color: var(--text-secondary, #999);
 }
 
-/* 高亮 */
+/* 高亮（`==高亮==` 与 `{{Hilite|…}}` 都走这里）——
+   ⚠️ 按用户要求：**底色透明** ✓、**不改文字颜色** ✓。
+   以前这里画浅黄渐变 + 强制深墨色前景，是为了解决"深色主题下浅字浅底"；
+   现在底色彻底透明，文字颜色继承即可 ✓，也就不会再有那个问题。 */
 .tiptap-editor mark {
-  /* 用 background-image 代替 background-color，通过 background-size 缩小着色区域 */
-  background-image: linear-gradient(var(--bg-highlight, #fff3b0), var(--bg-highlight, #fff3b0));
+  /* 用 background-image 代替 background-color，通过 background-size 缩小着色区域 ✓。
+     颜色为**半透明** ✓（"淡一点" ✓），文字颜色**继承** ✓（不改文字颜色 ✓）。
+     注意：这里不用 color-mix，直接用 rgba —— 兼容性更稳 ✓。 */
+  background-image: linear-gradient(rgba(255, 243, 176, 0.38), rgba(255, 243, 176, 0.38));
   background-size: 100% calc(100% - 0.35em);
   background-position: center;
   background-repeat: no-repeat;
@@ -2103,21 +2108,15 @@ html.platform-macos .tiptap-editor .frontmatter-node {
   border-radius: 2px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  /* `--bg-highlight` 从未被定义 → 底色恒为浅黄，所以前景必须固定深墨色，
-     否则深色主题下 `==高亮==` 的文字是浅色、落在浅黄底上读不出来。
-     与下面 mark[data-color] 用同一条约定。 */
-  color: var(--highlight-ink, #26282c);
+  color: inherit;
 }
 
-/* 多色高亮（荧光笔）：颜色由行内 style 的 background-color 提供
-   （renderHTML 同时写 data-color，Markdown 往返靠它）。
-   必须关掉上面那条渐变 —— background-image 画在 background-color 之上，
-   不关掉就完全看不见颜色。 */
+/* 多色高亮（荧光笔 `{{Hilite|…}}`）：底色由行内 style 的 background-color 提供
+   （已是半透明 ✓，见 highlight-ext.ts 的 toTranslucentColor）；这里关掉上面的渐变 ✓、
+   保持文字颜色继承 ✓。 */
 .tiptap-editor mark[data-color] {
   background-image: none;
-  /* 调色板都是浅色底，前景固定深墨色：沿用主题前景色的话，
-     深色主题下会变成浅字浅底。 */
-  color: var(--highlight-ink, #26282c);
+  color: inherit;
 }
 
 /* 荧光笔模式：提示当前处于「划选即高亮」状态 */

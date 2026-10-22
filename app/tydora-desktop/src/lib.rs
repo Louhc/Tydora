@@ -946,9 +946,22 @@ fn copy_file_to_clipboard(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Windows：通过 PowerShell Set-Clipboard -Path 将文件作为 FileDropList 写入剪贴板
+        use std::os::windows::process::CommandExt;
         let script = format!("Set-Clipboard -Path '{}'", path.replace('\'', "''"));
+        // ⚠️ 必须**隐藏子进程窗口** ✓（CREATE_NO_WINDOW）。
+        // 否则每次复制文件都会闪一个控制台窗口 ✗，并把焦点从应用抢走 ✗ ——
+        // 表现就是"复制文件后焦点跑到编辑器里，无法连续按 Ctrl+C / F2"✗（用户实测 ✓）。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let output = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &script,
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|e| e.to_string())?;
         if !output.status.success() {

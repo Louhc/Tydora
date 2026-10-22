@@ -126,8 +126,16 @@ export const SearchHighlight = Extension.create<SearchHighlightStorage>({
             const size = doc.content.size;
             /** 原文偏移 → 显示区间；落在行内原子节点内部时扩到整个节点 */
             const mapRange = (mdFrom: number, mdTo: number) => {
-              let from = mdOffsetToPmPos(map, mdFrom);
-              let to = mdOffsetToPmPos(map, mdTo);
+              /**
+               * ⚠️ 映射结果**必须钳制在文档范围内** ✓。
+               *
+               * 注音展开匹配时，命中范围可能落在模板语法附近，映射出来的 PM 位置
+               * 有极小概率越界 ✗ —— 实测会抛 `RangeError: Position 95 out of range` ✗
+               *（点搜索结果里的第二个命中时出现 ✓）。这里做一个兜底钳制 ✓。
+               */
+              const clamp = (n: number) => Math.max(0, Math.min(n, size));
+              let from = clamp(mdOffsetToPmPos(map, mdFrom));
+              let to = clamp(mdOffsetToPmPos(map, mdTo));
               if (to <= from) {
                 // PM 里没有字面量内部的坐标 → 整块高亮该节点（未展开的注音就是这种）
                 const leaf = inlineLeafRangeAt(doc, from, size);
