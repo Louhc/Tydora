@@ -256,16 +256,6 @@
  * 是输入卡顿的主因之一。类名重复添加不会产生样式失效，所以连续输入期间零开销；
  * 停手后移除类，动画从头开始 → 正好是"满亮 → 开始闪"的 Word 手感。
  */
-/**
- * 侧栏开合（260ms 宽度动画）期间：**关掉光标的平滑过渡** ✓。
- *
- * 动画每帧都会重排 ✓ → 光标的"目标位置"每帧都在变 ✗ → 带着 70ms 缓动去追 ✗
- * → 表现为"光标先往上滑一下、再回到正确位置"（用户实测 ✓）。
- * 这段窗口由 TipTapEditor 的 `resize()` 打标记 ✓，结束后自动移除 ✓。
- */
-html[data-caret-no-anim] .tydora-caret {
-  transition: none !important;
-}
 .tydora-caret.is-typing {
   animation: none;
   opacity: 1;

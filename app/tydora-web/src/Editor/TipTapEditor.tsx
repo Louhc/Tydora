@@ -801,6 +801,8 @@ function vimPageScrollCenterTipTap(
   }
 }
 
+
+
 const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
   ({ value, onChange, mode, typewriterMode, previewMaxWidth, lineHeight, paragraphSpacing, codeLineHeight, irLineNumbers, editorSettings, imageSettings, currentFilePath, activeVaultPath, onWordCount, active = true }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -1947,7 +1949,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       ],
       content: value || "",
       onUpdate: ({ editor: ed, transaction }) => {
-        const md = getMarkdownSafe(ed);
+const md = getMarkdownSafe(ed);
         // 记录「当前内容 → 此刻光标」：撤销回到这份内容时用它精确还原 ✓
         if (md != null && !suppressCaretCacheRef.current) {
           currentMarkdownRef.current = md;
@@ -2948,12 +2950,10 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     offset: number | null;
     until: number;
     raf: number | null;
-    caretTimer: number | null; // 关掉光标过渡的续期定时器
   }>({
     offset: null,
     until: 0,
     raf: null,
-    caretTimer: null,
   });
 
   // 卸载时取消"钉住光标"的 rAF 循环 ✓
@@ -2964,18 +2964,22 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         cancelAnimationFrame(st.raf);
         st.raf = null;
       }
-      if (st.caretTimer != null) {
-        window.clearTimeout(st.caretTimer);
-        st.caretTimer = null;
-        document.documentElement.removeAttribute("data-caret-no-anim");
-      }
     };
   }, []);
   useEffect(() => {
     if (!editor) return;
     const scroller = containerRef.current?.querySelector(".tiptap-editor") as HTMLElement | null;
     if (!scroller) return;
-    const update = () => {
+    /**
+     * 量一次光标相对滚动容器顶部的偏移 ✓。
+     *
+     * ⚠️ 必须**合并到一帧一次** ✓：以前直接挂在 `transaction` 上同步量 ✗，
+     * 每次按键都会强制读一次布局（`coordsAtPos` + `getBoundingClientRect`）✗ ——
+     * 长按 Backspace 时按键重复频率很高 ✗ → 主线程被反复布局卡住 ✗ →
+     * 表现就是"文字一块一块地被删掉"（用户实测 ✓）。
+     */
+    const measure = () => {
+      pendingRaf = 0;
       const view = getEditorView(editor);
       if (!view) return;
       try {
@@ -2987,11 +2991,17 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         caretScreenOffsetRef.current = null;
       }
     };
+    let pendingRaf = 0;
+    const update = () => {
+      if (pendingRaf) return; // 同一帧内的多次事务只量一次 ✓
+      pendingRaf = requestAnimationFrame(measure);
+    };
     update();
     editor.on("selectionUpdate", update);
     editor.on("transaction", update);
     scroller.addEventListener("scroll", update, { passive: true });
     return () => {
+      if (pendingRaf) cancelAnimationFrame(pendingRaf);
       editor.off("selectionUpdate", update);
       editor.off("transaction", update);
       scroller.removeEventListener("scroll", update);
@@ -3056,13 +3066,6 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       }
       state.until = Date.now() + 200; // 每帧续期 ✓；宽度不再变后自然过期 ✓
 
-      // 同步关掉自绘光标的 70ms 过渡 ✓（否则会追帧 → "先上后回"✗）
-      document.documentElement.setAttribute("data-caret-no-anim", "");
-      if (state.caretTimer != null) window.clearTimeout(state.caretTimer);
-      state.caretTimer = window.setTimeout(() => {
-        state.caretTimer = null;
-        document.documentElement.removeAttribute("data-caret-no-anim");
-      }, 240);
 
       if (state.offset != null) pinCaretToOffset(scroller, state.offset);
     });
@@ -3150,17 +3153,6 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
           state.offset = caretScreenOffsetRef.current;
         }
         state.until = Math.max(state.until, Date.now() + 520); // 覆盖 260ms 动画 + 收尾 ✓
-        /**
-         * 变形/重排窗口内关掉平滑光标的 70ms 过渡 ✓（否则它会追帧 → "先上后回"✗）。
-         * 定时器**可续期** ✓：拖动侧栏、连续 resize 会反复调用本函数 ✓，
-         * 每次都把清除时间往后推 ✓ —— 否则一次长拖动会在 620ms 时被提前解除 ✗。
-         */
-        document.documentElement.setAttribute("data-caret-no-anim", "");
-        if (state.caretTimer != null) window.clearTimeout(state.caretTimer);
-        state.caretTimer = window.setTimeout(() => {
-          state.caretTimer = null;
-          document.documentElement.removeAttribute("data-caret-no-anim");
-        }, 620); // 略大于上面的 520ms 窗口 ✓
 
         if (state.offset == null) {
           const max = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
@@ -3843,11 +3835,37 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       requestAnimationFrame(() => apply(true));
     }, [editor]);
 
+    /** 最新的 value ✓（给 capture 里的"内容是否匹配"判据用；放 ref 避免每次按键重订阅 ✓） */
+    const valueRef = useRef(value);
+    valueRef.current = value;
+
     // IR 模式（含每篇文章）：持续记录光标 PM 位置与视口相对位置
     useEffect(() => {
       if (!editor || mode !== "ir") return;
       const container = containerRef.current?.querySelector(".tiptap-editor") as HTMLElement | null;
       const capture = () => {
+        /**
+         * 只有"编辑器里确实是这个文件的内容"时才允许采样 / 存档 ✓。
+         *
+         * 换文件的过渡帧里 ✓，`container.scrollTop` 还是**上一个文件**的 ✓、
+         * `scrollHeight` 也可能是脏的 ✗ → `scrollTop / max` 会算出 ≈1 ✗
+         * → 写进**新文件**的存档 ✓ → 下次打开直接跑到末尾 ✓（用户实测 ✓）。
+         *
+         * 用长度做轻量比对 ✓（与位置恢复用的判据一致 ✓）；拿不到 markdown 时不阻塞 ✓。
+         */
+        const editorMd = getMarkdownSafe(editor);
+        const contentMatchesFile = editorMd == null || editorMd.length === valueRef.current.length;
+         if (!contentMatchesFile) return;
+         /**
+          * ⚠️ 第二条不变量 ✓：滚动位置必须**对这份内容而言是可能的** ✗。
+          *
+          * 实测过渡帧里出现过 `scrollTop 37965`，而正文只有 3605px ✗ ——
+          * 那是继承了上一个（长）文件的位置 ✓。此刻写存档会把“到底部”永久记下来 ✓。
+          * 判据是硬不变量（不是阈值猜测 ✓）：scrollTop 不可能超过正文高度 ✓。
+          */
+         const contentH = (container?.querySelector(".tiptap") as HTMLElement | null)?.offsetHeight ?? 0;
+         if (container && contentH > 0 && container.scrollTop > contentH + 8) return;
+
         const sel = editor.state.selection;
         if (!sel) return;
         let ratio = irViewStateRef.current.ratio;
@@ -3866,7 +3884,7 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         // 记下这个文件的视图位置，供重开文件 / 重启软件后回到原处（存储内部有节流）。
         // 正在等待恢复位置的文件先不写，免得把归零值或上一个文件的位置覆盖上去。
         const suppressed = pendingRestorePathRef.current === currentFilePath;
-        if (!suppressed) {
+          if (!suppressed) {
           saveFileViewPosition(currentFilePath, {
             mode: "ir",
             cursor: sel.head,
@@ -3924,7 +3942,16 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
      * 那段逻辑一次都不会执行（这正是「刷新后回到文件开头」的真正原因）。
      * 而且内容 / 布局可能晚一两帧才到位，所以这里带重试，而不是赌一次。
      */
+
+
     const restoredPathRef = useRef<string | null>(null);
+    /**
+     * 恢复会话号 ✓：快速切文件时，**上一个**文件的落位回调必须失效 ✗。
+     *
+     * 实测日志：正在打开短文件 ✓，却收到 `settle 1.md` ✗ —— 长文件那次恢复的
+     * ResizeObserver 还活着 ✓，它用**旧的 ratio** 改了**新文件**的滚动位置 ✗✓。
+     */
+    const restoreSessionRef = useRef(0);
     // 渲染期就立起写保护：编辑器可能是「带着文件重新挂载」的（刷新就是这种情况），
     // 那时任何 effect 里的写保护都嫌晚 —— 视图状态 effect 会在同一个 commit 里
     // 先记一次「光标 1、滚动 0」，把该文件上一次的位置覆盖成顶部，
@@ -3945,19 +3972,34 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         return;
       }
       const saved = pendingRestoreSnapshotRef.current ?? loadFileViewPosition(currentFilePath);
+      const mySession = ++restoreSessionRef.current; // 本次恢复的会话号 ✓
       let attempts = 0;
       let done = false;
       const tryRestore = () => {
         if (done) return;
         const container = (containerRef.current?.querySelector(".tiptap-editor")
           ?? document.querySelector(".tiptap-editor")) as HTMLElement | null;
-        const max = container ? container.scrollHeight - container.clientHeight : 0;
         const wantScroll = !!saved && saved.scrollRatio > 0.001;
+        const max = container ? container.scrollHeight - container.clientHeight : 0;
+        /**
+         * ⚠️ 必须确认**编辑器里已经是目标文件的内容** ✓。
+         *
+         * 实测（探针日志）：切文件时这个 effect 可能先跑在**旧文档仍挂载**的那一帧 ✗ ——
+         * 于是 `scrollHeight` 量到的是上一个文件的高度 ✗（日志里不同文件全都 max=35687 ✗）。
+         * 然后 `scrollTop = ratio × 旧 max` ✗；新内容一渲染（更矮 ✗）视口就落在文末留白里 ✗
+         * → 表现就是"打开文件偶发一片空白、文字都在窗口之外"✓。
+         *
+         * 用长度做轻量比对 ✓：不同文件几乎不会同长度 ✓；拿不到 markdown 时不阻塞 ✓。
+         */
+        const currentMd = container ? getMarkdownSafe(editor) : null;
+        const contentReady = !wantScroll || currentMd == null || currentMd.length === value.length;
+
+
         // 容器 / 内容没就绪（想要滚动却暂无可滚动空间）→ 再等一帧。
         // 这里刻意不要求 getEditorView：它在这个时机会短暂为 null，会让我们永远放弃；
         // 设置光标本身已有 try/catch 兜底。
-        if (!container || (wantScroll && max <= 0)) {
-          if (attempts++ < 40) {
+        if (!container || (wantScroll && (max <= 0 || !contentReady))) {
+          if (attempts++ < 120) {
             requestAnimationFrame(tryRestore);
           }
           return;
@@ -3988,7 +4030,63 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             /* 文档结构变了、位置不合法：只恢复滚动 */
           }
         }
-        container.scrollTop = Math.min(1, Math.max(0, saved.scrollRatio)) * max;
+        /**
+         * 用存档比例恢复滚动 ✓ —— 但必须作用在**最终布局**上 ✗。
+         *
+         * 过渡帧里 `scrollHeight` 还可能是**旧文档**的 ✗（短文件前面刚开过长文件 ✓），
+         * 于是 `ratio × 旧max` 远超真实可滚范围 ✗ → 浏览器夹到最底 ✗
+         * → 打开短文件直接“跑到末尾” ✓（用户实测 ✓），而且下一拍采样又把这个错误位置存回去 ✓。
+         *
+         * 做法：先按当前 max 写一次 ✓，随后几帧核对其合法性 ✓（max 变化超过 32px 就按新 max 重算 ✓，
+         * 最多 4 次 ✓）—— 这是"等布局稳定后再落位" ✓，不是事后修补 ✓。
+         */
+        const applyRatio = (m: number) => {
+          if (m <= 0) {
+            container.scrollTop = 0;
+            return;
+          }
+          container.scrollTop = Math.min(1, Math.max(0, saved.scrollRatio)) * m;
+        };
+        applyRatio(max);
+        /**
+         * 用存档比例落位后，**等布局真正稳定**再校正一次 ✓。
+         *
+         * 之前用"最多 4 帧"的预算 ✗ —— 但 React 换文档的布局要更晚几帧才稳定 ✓，
+         * 预算常在最脏的那几帧就用完了 ✗ → 后面对齐时没人管 ✓ → 位置留在底部 ✓（实测 ✓）。
+         * 现在改成**事件驱动** ✓：盯着正文尺寸 ✓，一变就按当前真实 `max` 重新落位 ✓；
+         * 用户一旦滚轮 / 触摸 ✓，或 1.5 秒后 ✓，立即交还控制权 ✓（不跟用户抢 ✓）。
+         */
+        const contentEl = container.querySelector(".tiptap") as HTMLElement | null;
+        let lastAppliedMax = max;
+        let released = false;
+        const reapply = () => {
+          // 已被更新的恢复会话取代 → 立刻停手 ✓（绝不能改别的文件的滚动 ✗）
+          if (mySession !== restoreSessionRef.current) {
+            release();
+            return;
+          }
+          if (released || !container.isConnected) return;
+          const liveMax = Math.max(0, container.scrollHeight - container.clientHeight);
+          if (Math.abs(liveMax - lastAppliedMax) > 8) {
+            lastAppliedMax = liveMax;
+            applyRatio(liveMax);
+          }
+        };
+        const release = () => {
+          if (released) return;
+          released = true;
+          observer.disconnect();
+          window.clearTimeout(releaseTimer);
+          container.removeEventListener("wheel", release);
+          container.removeEventListener("touchstart", release);
+        };
+        const observer = new ResizeObserver(reapply);
+        if (contentEl) observer.observe(contentEl);
+        observer.observe(container);
+        const releaseTimer = window.setTimeout(release, 1500);
+        container.addEventListener("wheel", release, { passive: true, once: true });
+        container.addEventListener("touchstart", release, { passive: true, once: true });
+        reapply();
       };
       requestAnimationFrame(tryRestore);
       // value 也进依赖：内容晚到时会再跑一次（已恢复过的文件由 restoredPathRef 挡住）
@@ -4068,6 +4166,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       }
     }, [mode, editor, restoreIrScrollToRatio]);
 
+
+    
     // 文末留白：文本到达末尾后仍可继续向下滚动，让最后一行能滚到窗口中间附近（手动滚动，非打字机模式）
     useEffect(() => {
       if (!editor) return;
@@ -4076,7 +4176,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
       if (!wrapper || !scrollContainer) return;
 
       const updateEndScrollSpace = () => {
-        // 留白高度约为可视区高度的一半，保证最后一行可以滚到窗口中部
+        // 文末留白：约为可视区高度的一半 ✓，保证最后一行能滚到窗口中部
+        // （"滚到底一片空白"的根因是**自绘光标被写到文末之外**✗ 撑大了 scrollHeight ✓，与这段留白无关 ✓）
         const space = Math.max(120, Math.round(scrollContainer.clientHeight / 2));
         wrapper.style.setProperty("--editor-end-scroll-space", `${space}px`);
       };

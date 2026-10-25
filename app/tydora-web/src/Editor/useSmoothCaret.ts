@@ -17,7 +17,9 @@ import type { Editor } from "@tiptap/react";
  *    早期实现每次按键都做 `animation = "none"; void offsetWidth; animation = ""`，
  *    每次都要强制 reflow + 重建动画，是"输入一快就卡"的主因。
  * 3. **行高按元素缓存**（WeakMap）：`getComputedStyle` 会强制样式重算，不能每帧调用。
- * 4. 显示/隐藏用 `visibility`（不触发布局），不用 `display`。
+ * 4. 显示/隐藏用 **`display: none`** ✓ —— 它让光标**完全不进布局** ✓；
+ *    早期用 `visibility` ✗ 元素仍参与布局 ✓，绝对定位后代会把滚动容器的 `scrollHeight` 撑大 ✗
+ *    → 滚到底一片空白 ✓（这条坑踩了很多轮 ✗）。状态只在显示/隐藏切换时写一次 ✓，不是每帧 ✓。
  * 5. 先读完所有几何量（coordsAtPos / getBoundingClientRect），再统一写样式，避免读写交错。
  *
  * ## 位置策略
@@ -66,18 +68,40 @@ export function useSmoothCaret(
     const caret = document.createElement("div");
     caret.className = "tydora-caret";
     caret.setAttribute("aria-hidden", "true");
+    caret.style.display = "none"; // 初始隐藏 ✓（hidden 初值是 true ✓），不进布局 ✓
 
     let raf = 0;
     let typingTimer = 0;
-    /** 隐藏状态缓存：避免每帧重复写 visibility / 触发样式失效 */
+    /** 隐藏状态缓存：避免每帧重复写 display / 触发样式失效 */
     let hidden = true;
+    /** 上一次写入时光标所在文档的正文高度 ✓（用来识别"换文档"的那一两帧 ✗）*/
+    let lastContentHeight = -1;
 
+    /**
+     * 正文内容的高度 ✓ —— 用来**夹住光标位置** ✗。
+     *
+     * ⚠️ 光标是 `position: absolute` 的后代 ✗，**绝对定位同样计入滚动容器的 `scrollHeight`** ✗。
+     * 换文件时它在布局中途可能被写到旧文档的位置（实测到过 4.5 万像素 ✗），
+     * 于是滚动条凭空多出几万像素可滚 ✗ → 用户滚下去全是空白 ✓（复现日志已确认 ✓）。
+     */
+    const contentHeight = () => {
+      const content = scroller.querySelector(".tiptap") as HTMLElement | null;
+      return Math.max(0, content?.offsetHeight ?? scroller.clientHeight);
+    };
+
+    /**
+     * 显示 / 隐藏光标 ✓ —— 隐藏用 **`display: none`** ✓。
+     *
+     * 为什么不用 `visibility: hidden` ✗：元素仍然参与布局 ✓，而光标是 `position: absolute` 后代 ✗
+     * → 会把滚动容器的 `scrollHeight` 撑大 ✗ → 滚到底一片空白 ✓（之前用了好几轮"夹位置/归位"去擦 ✓）。
+     * `display: none` 让它**完全不进布局** ✓ → 从根上不会再撑大滚动容器 ✓。
+     * 只切一次状态 ✓（不是每帧 ✓），开销可以忽略 ✓。
+     */
     const setHidden = (next: boolean) => {
       if (hidden === next) return;
       hidden = next;
-      caret.style.visibility = next ? "hidden" : "visible";
+      caret.style.display = next ? "none" : "block";
     };
-
     const markTyping = () => {
       // 重复 add 同一类名不会产生样式失效 → 连续输入期间零开销
       caret.classList.add("is-typing");
@@ -142,6 +166,24 @@ export function useSmoothCaret(
       }
 
       // 视口坐标 → 滚动内容坐标：滚动时 coords 与 rect 同步变化，相加后恒定不变
+      /**
+       * ── 根因守卫 ✓：换文档的那一两帧**不写位置** ──
+       *
+       * 这一刻 `coordsAtPos()` 用的是新布局 ✓，但 `scroller.scrollTop` 还停在旧文档的位置 ✗
+       * （实测 35914，而新正文只有 7945 ✗）→ `viewportTop + scrollTop` 算出来是脏坐标 ✗ →
+       * 光标被写到旧文档深处 ✗ → 它又是绝对定位后代 ✗ → 撑大 `scrollHeight` ✗ → 滚到底一片空白 ✓。
+       *
+       * 判据：正文高度**大幅变矮** ✓（打字只会变几像素 ✓；换文档是成百上千 ✓）。
+       * 命中就隐藏 + 归位 ✓，等下一帧（布局稳定后）再正常写入 ✓ —— 一次性 ✓，不轮询 ✓。
+       */
+      const nowContentH = contentHeight();
+      if (lastContentHeight >= 0 && nowContentH < lastContentHeight - 200) {
+        lastContentHeight = nowContentH;
+        setHidden(true);
+        return;
+      }
+      lastContentHeight = nowContentH;
+
       const left = viewportLeft + scroller.scrollLeft;
       const top = viewportTop + scroller.scrollTop;
 
@@ -158,9 +200,11 @@ export function useSmoothCaret(
       }
 
       // ── 写入阶段：只写不读（不要在这里读 offsetWidth 等，否则又变成强制布局）──
-      setHidden(false);
-      caret.style.transform = `translate3d(${left}px, ${top}px, 0)`;
+      // 先把位置写好，再显示 ✓ —— 反过来会从"上一次的位置"滑过来 ✗（用户实测：光标从左上角滑入 ✗）
+      const clampedTop = Math.max(0, Math.min(top, contentHeight() + 8));
+      caret.style.transform = `translate3d(${left}px, ${clampedTop}px, 0)`;
       caret.style.height = `${Math.max(8, boxHeight)}px`;
+      setHidden(false);
       markTyping();
     };
 
@@ -182,16 +226,22 @@ export function useSmoothCaret(
         raf = 0;
       }
       /**
-       * ⚠️ 必须包 try/catch ✓：这个事件由 TipTapEditor 的 ResizeObserver 派发 ✓，
-       * 组件正在卸载 / 视图还没挂载时会抛
-       * "The editor view is not available. Cannot access view.hasFocus"（用户实测 ✓）。
-       * 吞掉即可 —— 下一次 `schedule()` 会在视图就绪后补上 ✓。
+       * **只压制这一次同步重绘的过渡** ✓。
+       *
+       * 之前用「给 <html> 挂 data-caret-no-anim」来关过渡 ✗ —— 全局标记一旦没及时撤掉 ✗，
+       * 平时打字的光标动画也会被一起关掉 ✗（用户实测："正常输入字母时光标的动画似乎也被取消了"）。
+       * 改成写在光标元素自己的 inline style 上 ✓、下一帧立刻还原 ✓ —— 不可能残留 ✓。
        */
+      const prevTransition = caret.style.transition;
+      caret.style.transition = "none";
       try {
         update();
       } catch {
-        /* 视图未就绪：忽略这次同步 */
+        /* 视图未就绪：忽略这次同步，下一次 schedule() 会补上 */
       }
+      requestAnimationFrame(() => {
+        caret.style.transition = prevTransition;
+      });
     };
     window.addEventListener("tydora:caret-sync", onCaretSync);
 
@@ -217,7 +267,14 @@ export function useSmoothCaret(
      * 字号变化时滚动容器自身尺寸不变 ✓（变的是内容高度 / 行高 ✓），
      * 只 observe scroller 根本不会触发 ✗ —— 表现就是"放大缩小后光标位置还是旧的"✗。
      */
-    const resizeObserver = new ResizeObserver(schedule);
+    /**
+     * 内容尺寸一变（换文档 / 字号变化 / 图片加载 ✓）就检查光标是否越界 ✓。
+     *
+     * 这就是"切换文档时一次性做好" ✓ —— 由 `ResizeObserver` 驱动 ✗，不是轮询 ✓。
+     * 换文档时正文会突然变矮 ✓，而光标可能还停在旧文档的深处 ✗：
+     * 它是绝对定位后代 ✗ → 会把滚动容器的 `scrollHeight` 撑大 ✓ → 滚到底一片空白 ✓。
+     */
+    const resizeObserver = new ResizeObserver(schedule); // 尺寸变化 → 重新量一次（守卫在 update 里 ✓）
     resizeObserver.observe(scroller);
     try {
       resizeObserver.observe(editor.view.dom as HTMLElement);

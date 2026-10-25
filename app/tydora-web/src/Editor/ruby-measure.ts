@@ -33,24 +33,6 @@ function getMeasureCtx(): CanvasRenderingContext2D | null {
 /**
  * 用一个元素的**当前字体**量一段文字的宽度（px）。
  * pseudo 传 "::after" 时取伪元素的字体（读音是 0.5em 字号，必须用它自己的）。
- */
-function measureTextPx(el: Element, text: string, pseudo?: string): number {
-  if (!text) return 0;
-  const ctx = getMeasureCtx();
-  if (!ctx) return 0;
-  const cs = getComputedStyle(el, pseudo);
-  // font 简写不一定可靠（部分环境下为空），逐项拼出来更稳
-  const style = cs.fontStyle || "normal";
-  const weight = cs.fontWeight || "400";
-  const size = cs.fontSize || "16px";
-  const family = cs.fontFamily || "serif";
-  ctx.font = `${style} ${weight} ${size} ${family}`;
-  try {
-    return ctx.measureText(text).width;
-  } catch {
-    return 0;
-  }
-}
 
 /**
  * 量根节点下所有 .md-ruby，把宽度写进 CSS 变量。
@@ -65,11 +47,25 @@ export function measureRubies(root: HTMLElement | null | undefined): void {
   if (!root) return;
   const nodes = root.querySelectorAll<HTMLElement>(".md-ruby[data-rt]");
   if (nodes.length === 0) return;
+
+  /**
+   * ⚠️ 必须**分三段**做：先全部读 → 再全部算 → 最后全部写 ✓。
+   *
+   * 以前在一个 for 循环里「读一次布局 → 写一次样式」交替 ✗：
+   * 每次写 CSS 变量都让布局失效 ✗ → 下一次读又强制重排 ✗
+   * → 整篇 N 个注音就是 N 次强制布局 ✗。
+   * 实测（性能探针）平均 **44ms / 次** ✗，一帧才 16ms ✗ → 输入被切成一块一块 ✓。
+   */
+
+  // ── ① 只读：本体宽度（合并成一次布局）+ 计算字体 ──
   const range = document.createRange();
+  const fontCache = new Map<string, string>();
+  const tasks: { el: HTMLElement; baseW: number; rt: string; margin: number; font: string }[] = [];
+
   for (const el of nodes) {
     if (!el.isConnected) continue;
     const rt = el.dataset.rt ?? "";
-    // 本体：Range 量内容宽度（不含 padding，正好是我们需要的数值）
+    if (!rt) continue;
     let baseW = 0;
     try {
       range.selectNodeContents(el);
@@ -77,21 +73,54 @@ export function measureRubies(root: HTMLElement | null | undefined): void {
     } catch {
       baseW = 0;
     }
-    // 读音：按 ::after 的字体量（它是 0.5em 字号）
-    const rtW = measureTextPx(el, rt, "::after");
-    /**
-     * 安全余量：实测宽度是"字形的紧贴包围盒"，相邻两个注音的读音会几乎挨在一起
-     *（用户实测：两个 アクセル 贴上了 ✗）。这里给读音宽度多加一点，
-     * 由于 CSS 最终是 `(读音宽 − 本体宽) / 2` 分到两侧，所以每边实际多出 余量/2。
-     *
-     * ⚠️ 余量必须**跟随字号**：固定 px 在用户调大字号后就不够用了 ✗。
-     * 这里取本体字号的 0.5em（默认字号下约 8px，每边约 4px）✓。
-     * 想更松/更紧就改 RT_MARGIN_EM ✓。
-     */
-    const baseFontPx = parseFloat(getComputedStyle(el).fontSize) || 16;
-    const rtMargin = baseFontPx * RT_MARGIN_EM;
-    if (baseW > 0) el.style.setProperty("--ruby-base-w", `${baseW.toFixed(2)}px`);
-    if (rtW > 0) el.style.setProperty("--ruby-rt-w", `${(rtW + rtMargin).toFixed(2)}px`);
+
+    const cs = getComputedStyle(el);
+    const baseFontPx = parseFloat(cs.fontSize) || 16;
+    const margin = baseFontPx * RT_MARGIN_EM;
+
+    // 读音是 ::after、字号 0.5em：字体族 / 字重 / 字形沿本体 ✓
+    const fontKey = `${cs.fontStyle}|${cs.fontWeight}|${cs.fontFamily}|${baseFontPx}`;
+    let font = fontCache.get(fontKey);
+    if (font == null) {
+      const pseudo = getComputedStyle(el, "::after");
+      const pseudoSize = parseFloat(pseudo.fontSize) || baseFontPx * 0.5;
+      font = `${pseudo.fontStyle || "normal"} ${pseudo.fontWeight || "400"} ${pseudoSize}px ${pseudo.fontFamily || cs.fontFamily || "serif"}`;
+      fontCache.set(fontKey, font);
+    }
+
+    tasks.push({ el, baseW, rt, margin, font });
+  }
+
+  if (tasks.length === 0) return;
+
+  // ── ② 只算：canvas 量读音（不碰布局 ✓，同字体同文本只量一次 ✓）──
+  const ctx = getMeasureCtx();
+  const textCache = new Map<string, number>();
+  const results: { el: HTMLElement; baseW: number; rtW: number; margin: number }[] = [];
+  for (const t of tasks) {
+    let rtW = 0;
+    if (ctx) {
+      const key = t.font + "\u0000" + t.rt;
+      const cached = textCache.get(key);
+      if (cached != null) {
+        rtW = cached;
+      } else {
+        ctx.font = t.font;
+        try {
+          rtW = ctx.measureText(t.rt).width;
+        } catch {
+          rtW = 0;
+        }
+        textCache.set(key, rtW);
+      }
+    }
+    results.push({ el: t.el, baseW: t.baseW, rtW, margin: t.margin });
+  }
+
+  // ── ③ 只写：一次性写回变量（此后不再读布局 ✓）──
+  for (const r of results) {
+    if (r.baseW > 0) r.el.style.setProperty("--ruby-base-w", `${r.baseW.toFixed(2)}px`);
+    if (r.rtW > 0) r.el.style.setProperty("--ruby-rt-w", `${(r.rtW + r.margin).toFixed(2)}px`);
   }
 }
 
