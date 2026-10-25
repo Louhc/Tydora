@@ -307,6 +307,35 @@
   margin: 1px 4px 1px 0;
 }
 
+/**
+ * 折叠组占位行 ✓
+ *
+ * 视觉与普通文件行完全一致（沿用 .tree-node 的尺寸 / hover / 圆角 ✓），
+ * 差别只有三点：**没有图标** ✓、显示 `...` ✓、右侧带一个方向指示 ✓。
+ * 展开后换成强调色 ✓（功能同时变成"收起" ✓）。
+ */
+.tree-node-folded-toggle {
+  font-style: normal;
+}
+
+.tree-node-folded-toggle .tree-node-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  letter-spacing: 0.12em;
+  color: var(--text-secondary, #9aa0a6);
+}
+
+.tree-node-folded-toggle.expanded {
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.12);
+}
+
+.tree-node-folded-toggle.expanded .tree-node-name {
+  color: var(--text-accent, #89b4fa);
+}
+
+.tree-node-folded-toggle.expanded::after {
+  transform: rotate(90deg);
+  opacity: 0.9;
+}
 .tree-node:hover {
   background: rgba(255, 255, 255, 0.08);
 }

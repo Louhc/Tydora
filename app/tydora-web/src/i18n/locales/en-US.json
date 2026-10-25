@@ -143,7 +143,7 @@
       "fontCustomPlaceholder": "Enter font-family, press Enter or blur to apply",
       "fontSize": "Font Size",
       "fontSizeDesc": "Terminal text size. You can also Ctrl + scroll in the terminal to zoom.",
-      "contextMenu": {
+      "foldedRowExpandTitle": "Show folded items", "foldedRowCollapseTitle": "Hide folded items", "contextMenu": {
         "copy": "Copy",
         "paste": "Paste",
         "find": "Find",
@@ -921,7 +921,7 @@
       "openInNewWindow": "Open in New Window",
       "openInNewPanel": "Open in New Panel",
       "favorite": "Favorite",
-      "star": "Star",
+      "fold": "Fold", "unfold": "Unfold", "star": "Star",
       "unstar": "Unstar",
       "newFile": "New File",
       "newCanvas": "New Canvas",

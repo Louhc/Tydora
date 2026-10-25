@@ -16,8 +16,9 @@ import { BookmarksPanel } from "./Bookmarks";
 import { TagPanel, parseTagSearchQuery, resolveTagFileSet } from "./tags";
 import { type SidebarTab } from "./Settings";
 import { FileTreeIcon } from "./SidebarFileIcons";
-import { displayFileName, isMarkdownFileName, restoreExtension, validateFileName } from "./utils/fileName";
+import { displayFileName, isMarkdownFileName, normalizePathKey, restoreExtension, validateFileName } from "./utils/fileName";
 import { isStarred, toggleStarred } from "./utils/starred-paths";
+import { isFolded, loadFolded, remapFolded, setFolded, subscribeFolded } from "./utils/folded-paths";
 import { formatBytes } from "./utils/formatBytes";
 import { getTrashMaxBytes, measureTotalUsage, moveToTrash, restoreTrashEntry } from "./services/recycleBin";
 import "./Sidebar.css";
@@ -917,6 +918,10 @@ interface FileActions {
   starLabel: string;
   starIcon: React.ReactNode;
   onToggleStar: () => void;
+  /** 折叠（藏起来，只在同级留一行 `...`）：标签与图标随当前状态变化，可批量 */
+  foldLabel: string;
+  foldIcon: React.ReactNode;
+  onToggleFold: () => void;
   onMoveTo: () => void;
   onOpenInNewPanel: () => void;
 }
@@ -949,6 +954,23 @@ const MENU_ICONS = {
       // 免得被某处的 `svg { fill: none }` 一类规则把实心星吃成空的
       style={{ fill: "currentColor", stroke: "none" }}
     />,
+  ),
+  // 折叠：把若干项藏到一行 `...` 后面（和星标同一层的轻量标记）
+  fold: menuIcon(
+    <>
+      <path d="M3 6h18" />
+      <path d="M3 12h18" />
+      <path d="M3 18h18" />
+    </>,
+  ),
+  // 取消折叠：展开成一行 `...` 的反面（用箭头表示"取回"）
+  unfold: menuIcon(
+    <>
+      <path d="M4 6h10" />
+      <path d="M4 12h10" />
+      <path d="M4 18h10" />
+      <polyline points="17 9 20 12 17 15" />
+    </>,
   ),
   open: menuIcon(
     <>
@@ -1089,6 +1111,7 @@ function getFileMenuItems(
     { label: t("sidebar.contextMenu.rename"), icon: MENU_ICONS.rename, onClick: actions.onRename, separator: true },
     // 标星 / 取消标星：只在树里把该项强调出来（不进收藏面板，标文件夹不连带子项）
     { label: actions.starLabel, icon: actions.starIcon, onClick: actions.onToggleStar, separator: true },
+    { label: actions.foldLabel, icon: actions.foldIcon, onClick: actions.onToggleFold },
     {
       label: t("sidebar.contextMenu.duplicate"),
       icon: MENU_ICONS.duplicate,
@@ -1124,6 +1147,7 @@ function getFolderMenuItems(actions: FileActions, t: (key: string) => string): C
     { label: t("sidebar.contextMenu.rename"), icon: MENU_ICONS.rename, onClick: actions.onRename, separator: true },
     // 标星 / 取消标星：只在树里把该项强调出来（不进收藏面板，标文件夹不连带子项）
     { label: actions.starLabel, icon: actions.starIcon, onClick: actions.onToggleStar, separator: true },
+    { label: actions.foldLabel, icon: actions.foldIcon, onClick: actions.onToggleFold },
     { label: t("sidebar.contextMenu.moveTo"), icon: MENU_ICONS.moveTo, onClick: actions.onMoveTo },
     { label: t("sidebar.contextMenu.delete"), icon: MENU_ICONS.delete, onClick: actions.onDelete, danger: true, separator: true },
     {
@@ -1333,6 +1357,9 @@ function SearchResults({
 
 // ── TreeNode Component ───────────────────────────────────────────────
 
+/** 空集合：给折叠相关 props 兜底 ✓（漏传时不会整页崩） */
+const EMPTY_PATH_SET: Set<string> = new Set();
+
 function TreeNodeComp({
   node,
   depth,
@@ -1356,6 +1383,10 @@ function TreeNodeComp({
   onToggleExpand,
   onMoveTo,
   showFileIcons,
+  foldedPaths = EMPTY_PATH_SET,
+  expandedFoldedDirs = EMPTY_PATH_SET,
+  onToggleFoldedDir,
+  onSetFolded,
   onRequestDelete,
 }: {
   node: TreeNode;
@@ -1380,6 +1411,13 @@ function TreeNodeComp({
   onToggleExpand: (path: string, expanded: boolean) => void;
   onMoveTo: (path: string, isDirectory: boolean) => void;
   showFileIcons: boolean;
+  /** 已折叠的路径集合（折叠的项不在树里直接显示，只在同级留一行 `...`） */
+  foldedPaths: Set<string>;
+  /** 哪些目录的折叠组当前是展开的（运行时状态） */
+  expandedFoldedDirs: Set<string>;
+  onToggleFoldedDir: (dirPath: string) => void;
+  /** 批量折叠 / 取消折叠 */
+  onSetFolded: (paths: string[], folded: boolean) => void;
   /** 删除（右键菜单 / Delete 键）：交给 FileTree 统一处理（移入回收站，或超配额时二次确认） */
   onRequestDelete?: (node: TreeNode) => void;
 }) {
@@ -1641,6 +1679,17 @@ function TreeNodeComp({
     starLabel: i18n.t(isStarred(node.path) ? "sidebar.contextMenu.unstar" : "sidebar.contextMenu.star"),
     starIcon: isStarred(node.path) ? MENU_ICONS.starFilled : MENU_ICONS.star,
     onToggleStar: handleToggleStar,
+    // 折叠：标签与图标随当前状态变化；多选时对**整个选区**批量处理 ✓
+    foldLabel: i18n.t(isFolded(node.path) ? "sidebar.contextMenu.unfold" : "sidebar.contextMenu.fold"),
+    foldIcon: isFolded(node.path) ? MENU_ICONS.unfold : MENU_ICONS.fold,
+    onToggleFold: () => {
+      const targets =
+        selectedPaths.has(node.path) && selectedPaths.size > 1
+          ? [...selectedPaths]
+          : [node.path];
+      // 方向由"被点的这一项"决定：全部标成它的反面（混合状态时行为可预测 ✓）
+      onSetFolded(targets, !isFolded(node.path));
+    },
     onDuplicate: handleDuplicate,
     onDuplicateAndCopy: handleDuplicateAndCopy,
     onCopyFile: handleCopyFileToClipboard,
@@ -1764,34 +1813,83 @@ function TreeNodeComp({
           className={`tree-children${collapsing ? " collapsing" : ""}`}
           style={{ '--tree-depth': depth } as React.CSSProperties}
         >
-          {node.children.map((child) => (
-            <TreeNodeComp
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              pendingActivePath={pendingActivePath}
-              onSelect={onSelect}
-              onRefresh={onRefresh}
-              onReload={onReload}
-              onRequestDelete={onRequestDelete}
-              rootPath={rootPath}
-              dragOverPath={dragOverPath}
-              onMouseDown={onMouseDown}
-              editingPath={editingPath}
-              onStartEdit={onStartEdit}
-              onFinishEdit={onFinishEdit}
-              onNewWindow={onNewWindow}
-              onOpenInNewPanel={onOpenInNewPanel}
-              canOpenInNewPanel={canOpenInNewPanel}
-              onBookmark={onBookmark}
-              selectedPaths={selectedPaths}
-              onMultiSelect={onMultiSelect}
-              lastClickedPathRef={lastClickedPathRef}
-              onToggleExpand={onToggleExpand}
-              onMoveTo={onMoveTo}
-              showFileIcons={showFileIcons}
-            />
-          ))}
+          {(() => {
+            const dirKey = normalizePathKey(node.path);
+            const isGroupExpanded = expandedFoldedDirs.has(dirKey);
+            const visible: TreeNode[] = [];
+            const folded: TreeNode[] = [];
+            for (const child of node.children ?? []) {
+              if (foldedPaths.has(normalizePathKey(child.path))) folded.push(child);
+              else visible.push(child);
+            }
+            const renderChild = (child: TreeNode) => (
+              <TreeNodeComp
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                pendingActivePath={pendingActivePath}
+                onSelect={onSelect}
+                onRefresh={onRefresh}
+                onReload={onReload}
+                onRequestDelete={onRequestDelete}
+                rootPath={rootPath}
+                dragOverPath={dragOverPath}
+                onMouseDown={onMouseDown}
+                editingPath={editingPath}
+                onStartEdit={onStartEdit}
+                onFinishEdit={onFinishEdit}
+                onNewWindow={onNewWindow}
+                onOpenInNewPanel={onOpenInNewPanel}
+                canOpenInNewPanel={canOpenInNewPanel}
+                onBookmark={onBookmark}
+                selectedPaths={selectedPaths}
+                onMultiSelect={onMultiSelect}
+                lastClickedPathRef={lastClickedPathRef}
+                onToggleExpand={onToggleExpand}
+                onMoveTo={onMoveTo}
+                showFileIcons={showFileIcons}
+                foldedPaths={foldedPaths}
+                expandedFoldedDirs={expandedFoldedDirs}
+                onToggleFoldedDir={onToggleFoldedDir}
+                onSetFolded={onSetFolded}
+              />
+            );
+            return (
+              <>
+                {visible.map(renderChild)}
+                {folded.length > 0 && (
+                  <>
+                    {/* 折叠组：视觉与普通文件行一致，但没有图标、文件名位置是 `...` ✓
+                        点击展开 / 收起 ✓；没有折叠项时这一行根本不渲染 ✓ */}
+                    <div
+                      className={`tree-node tree-node-folded-toggle${isGroupExpanded ? " expanded" : ""}`}
+                      style={{ "--tree-depth": depth + 1 } as React.CSSProperties}
+                      title={i18n.t(
+                        isGroupExpanded
+                          ? "sidebar.foldedRowCollapseTitle"
+                          : "sidebar.foldedRowExpandTitle",
+                      )}
+                      data-folded-toggle="1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleFoldedDir(node.path);
+                      }}
+                    >
+                    {/* 与同级文件对齐：空出箭头位，让展开符号落在「图标」的位置 ✓；关掉文件图标时它自己占箭头位 ✓ */}
+                    {showFileIcons && <span className="tree-icon-spacer" />}
+                    <span className={`tree-chevron${isGroupExpanded ? " expanded" : ""}`} aria-hidden="true">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
+                    </span>
+                    <span className="tree-node-name">...</span>
+                    </div>
+                    {isGroupExpanded && folded.map(renderChild)}
+                  </>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -1844,6 +1942,51 @@ function FileTree({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const [editingPath, setEditingPath] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  /** 折叠路径（localStorage 持久化；跨侧栏 / 跨窗口靠 `folded-changed` 事件同步） */
+  const [foldedPaths, setFoldedPathsState] = useState<Set<string>>(() => loadFolded());
+  /** 哪些目录的折叠组当前是**展开**的（只是运行时状态，不持久化） */
+  const [expandedFoldedDirs, setExpandedFoldedDirs] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    return subscribeFolded(() => setFoldedPathsState(new Set(loadFolded())));
+  }, []);
+  /**
+   * 批量折叠 / 取消折叠 ✓。
+   * 折叠后这些项会从树里消失 ✓，只在各自父目录留一行 `...` ✓；
+   * 取消折叠时顺带清掉"展开中"标记 ✓，免得留下空壳状态 ✓。
+   */
+  const handleSetFolded = useCallback((paths: string[], folded: boolean) => {
+    setFolded(paths, folded);
+    setFoldedPathsState(new Set(loadFolded()));
+    // 折叠后这些行就不在树里了 ✓：从多选里摘掉 ✓（否则会留下"看不见的选中项"✗）
+    setSelectedPaths((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      for (const p of paths) next.delete(p);
+      return next.size === prev.size ? prev : next;
+    });
+    if (!folded) {
+      setExpandedFoldedDirs((prev) => {
+        const next = new Set(prev);
+        for (const p of paths) {
+          next.delete(normalizePathKey(p));
+          // 目录：连带清掉所有后代目录的展开标记 ✓
+          const key = normalizePathKey(p) + "/";
+          for (const d of [...next]) if (d.startsWith(key)) next.delete(d);
+        }
+        return next;
+      });
+    }
+  }, []);
+  /** 切换某个目录的折叠组展开 / 收起 ✓ */
+  const handleToggleFoldedDir = useCallback((dirPath: string) => {
+    setExpandedFoldedDirs((prev) => {
+      const next = new Set(prev);
+      const key = normalizePathKey(dirPath);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
   const lastClickedPathRef = useRef<string | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
   const lastScrollTopRef = useRef(0);
@@ -2081,8 +2224,17 @@ function FileTree({
     const pending = pendingRevealPathRef.current;
     if (!pending) return;
     pendingRevealPathRef.current = null;
-    scrollToPath(pending);
-  }, [rootNodes, scrollToPath]);
+      /**
+       * 折叠的项在树里**不存在** ✓ → 直接 reveal 会落空 ✗。
+       * 先把它（连同所在目录）取消折叠 ✓，下一帧再滚过去 ✓。
+       */
+      if (foldedPaths.has(normalizePathKey(pending))) {
+        handleSetFolded([pending], false);
+        requestAnimationFrame(() => scrollToPath(pending));
+        return;
+      }
+      scrollToPath(pending);
+  }, [rootNodes, scrollToPath, foldedPaths, handleSetFolded]);
 
   // 刷新后同步恢复滚动。优先用当前 DOM/ref 位置，避免 rAF 循环在点击过程中把列表拽走。
   useLayoutEffect(() => {
@@ -2213,6 +2365,8 @@ function FileTree({
 
     try {
       await rename(path, newPath);
+      // 折叠是按完整路径记录的 ✓：改名 / 移动后要连带把记录改掉 ✓（目录连带后代）
+      remapFolded(path, newPath);
       await handleReload();
       /**
        * ⚠️ 改名完成后要**把选中项切到新文件** ✓、并把**焦点交还文件树** ✓。
@@ -2778,10 +2932,13 @@ function FileTree({
     onNewWhiteboard: handleNewRootWhiteboard,
     onSearch: showDevAlert,
     onRename: () => {},
-    // 树空白区的菜单没有"标的物"，星标在这里是空操作（类型上仍需提供）
+    // 树空白区的菜单没有"标的物"，星标 / 折叠在这里是空操作（类型上仍需提供）
     starLabel: "",
     starIcon: null,
     onToggleStar: () => {},
+    foldLabel: "",
+    foldIcon: null,
+    onToggleFold: () => {},
     onDuplicate: showDevAlert,
     onDuplicateAndCopy: showDevAlert,
     onCopyFile: () => {},
@@ -3562,40 +3719,87 @@ function FileTree({
         data-is-dir="1"
       >
       {rootNodes.length > 0 &&
-        rootNodes.map((node) => (
-          <TreeNodeComp
-            key={node.path}
-            node={node}
-            depth={0}
-            pendingActivePath={pendingActivePath}
-            onSelect={(path) => {
-              // 鼠标点击后 Vim 光标跟随到该文件：pending-active 始终指向最近交互的节点，
-              // 任何未来的 reveal 也只滚到当前文件（在视野内，nearest 不会产生滚动）
-              setPendingActivePath(path);
-              pendingActivePathRef.current = path;
-              onSelect(path);
-            }}
-            onRefresh={handleRefresh}
-            onReload={handleReload}
-            onRequestDelete={requestDelete}
-            rootPath={rootPath}
-            dragOverPath={dragOverPath}
-            onMouseDown={handleMouseDown}
-            editingPath={editingPath}
-            onStartEdit={handleStartEdit}
-            onFinishEdit={handleFinishEdit}
-            onNewWindow={onNewWindow}
-            onOpenInNewPanel={onOpenInNewPanel}
-            canOpenInNewPanel={canOpenInNewPanel}
-            onBookmark={onBookmark}
-            selectedPaths={selectedPaths}
-            onMultiSelect={handleMultiSelect}
-            lastClickedPathRef={lastClickedPathRef}
-            onToggleExpand={handleToggleExpand}
-            onMoveTo={handleMoveTo}
-            showFileIcons={showFileIcons}
-          />
-        ))}
+        (() => {
+          const rootKey = normalizePathKey(rootPath);
+          const isRootGroupExpanded = expandedFoldedDirs.has(rootKey);
+          const visible: TreeNode[] = [];
+          const folded: TreeNode[] = [];
+          for (const node of rootNodes) {
+            if (foldedPaths.has(normalizePathKey(node.path))) folded.push(node);
+            else visible.push(node);
+          }
+          const renderRoot = (node: TreeNode) => (
+            <TreeNodeComp
+              key={node.path}
+              node={node}
+              depth={0}
+              pendingActivePath={pendingActivePath}
+              onSelect={(path) => {
+                // 鼠标点击后 Vim 光标跟随到该文件：pending-active 始终指向最近交互的节点，
+                // 任何未来的 reveal 也只滚到当前文件（在视野内，nearest 不会产生滚动）
+                setPendingActivePath(path);
+                pendingActivePathRef.current = path;
+                onSelect(path);
+              }}
+              onRefresh={handleRefresh}
+              onReload={handleReload}
+              onRequestDelete={requestDelete}
+              rootPath={rootPath}
+              dragOverPath={dragOverPath}
+              onMouseDown={handleMouseDown}
+              editingPath={editingPath}
+              onStartEdit={handleStartEdit}
+              onFinishEdit={handleFinishEdit}
+              onNewWindow={onNewWindow}
+              onOpenInNewPanel={onOpenInNewPanel}
+              canOpenInNewPanel={canOpenInNewPanel}
+              onBookmark={onBookmark}
+              selectedPaths={selectedPaths}
+              onMultiSelect={handleMultiSelect}
+              lastClickedPathRef={lastClickedPathRef}
+              onToggleExpand={handleToggleExpand}
+              onMoveTo={handleMoveTo}
+              showFileIcons={showFileIcons}
+              foldedPaths={foldedPaths}
+              expandedFoldedDirs={expandedFoldedDirs}
+              onToggleFoldedDir={handleToggleFoldedDir}
+              onSetFolded={handleSetFolded}
+            />
+          );
+          return (
+            <>
+              {visible.map(renderRoot)}
+              {folded.length > 0 && (
+                <>
+                  {/* 库根目录的折叠组 ✓（根级被折叠的项没有父目录行可挂，单独在这里兜住） */}
+                  <div
+                    className={`tree-node tree-node-folded-toggle${isRootGroupExpanded ? " expanded" : ""}`}
+                    title={i18n.t(
+                      isRootGroupExpanded
+                        ? "sidebar.foldedRowCollapseTitle"
+                        : "sidebar.foldedRowExpandTitle",
+                    )}
+                    data-folded-toggle="1"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleFoldedDir(rootPath);
+                    }}
+                  >
+                    {/* 与同级文件对齐：空出箭头位，让展开符号落在「图标」的位置 ✓；关掉文件图标时它自己占箭头位 ✓ */}
+                    {showFileIcons && <span className="tree-icon-spacer" />}
+                    <span className={`tree-chevron${isRootGroupExpanded ? " expanded" : ""}`} aria-hidden="true">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
+                    </span>
+                    <span className="tree-node-name">...</span>
+                  </div>
+                  {isRootGroupExpanded && folded.map(renderRoot)}
+                </>
+              )}
+            </>
+          );
+        })()}
 
       {ctxMenu && (
         <ContextMenu
