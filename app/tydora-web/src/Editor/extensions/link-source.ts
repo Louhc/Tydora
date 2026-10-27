@@ -32,6 +32,7 @@
 import { Node } from "@tiptap/core";
 import { Plugin, TextSelection } from "prosemirror-state";
 import { findLinkRangeAt } from "../link-source";
+import { splitLiteral } from "./link-literal"; // 规则层（纯函数）✓
 
 /** 标记「链接字面量展开 / 收起」这类**程序化**改写事务（语义同 ruby.ts 的 RUBY_TOGGLE_META） */
 export const LINK_TOGGLE_META = "tydoraLinkToggle";
@@ -60,8 +61,6 @@ export function parseLinkSourceText(text: string): { text: string; href: string 
 let sawLiteralExpand = false;
 /** 当前文档里是否还有字面量（便宜的快路径；不确定时以全量扫描为准） */
 let hasLiteral = false;
-/** 展开/收起自身引起的那一次更新不参与判断，避免抖动 */
-let suppressAutoExpandOnce = false;
 
 /**
  * 组字状态自跟踪（与 ruby.ts 同一套理由）：
@@ -211,7 +210,6 @@ function expandLinkAt(view: any, run: { from: number; to: number; href: string; 
 
   hasLiteral = true;
   sawLiteralExpand = true;
-  suppressAutoExpandOnce = true;
   view.dispatch(tr);
   return true;
 }
@@ -222,7 +220,7 @@ function expandLinkAt(view: any, run: { from: number; to: number; href: string; 
  * 给出 `range` 时只扫该区间（打字时扫光标所在块，便宜）；不给则全文档扫描。
  * 光标仍在某个字面量的**闭区间**内（含两端）时那个字面量保持展开。
  */
-function collapseLiterals(view: any, range?: { from: number; to: number }): void {
+function collapseLiterals(view: any, range?: { from: number; to: number }, force?: boolean): void {
   const { state } = view;
   const linkSource = state.schema.nodes.linkSource;
   if (!linkSource) return;
@@ -236,7 +234,7 @@ function collapseLiterals(view: any, range?: { from: number; to: number }): void
   state.doc.nodesBetween(scanFrom, scanTo, (node: any, pos: number) => {
     if (node.type !== linkSource) return true;
     const inside = sel.from >= pos && sel.to <= pos + node.nodeSize;
-    if (!inside) hits.push({ from: pos, to: pos + node.nodeSize, text: node.textContent });
+    if (force || !inside) hits.push({ from: pos, to: pos + node.nodeSize, text: node.textContent });
     return false;
   });
 
@@ -250,20 +248,28 @@ function collapseLiterals(view: any, range?: { from: number; to: number }): void
   let kept = 0;
   for (let i = hits.length - 1; i >= 0; i--) {
     const h = hits[i];
-    const m = LINK_SOURCE_RE.exec(h.text);
-    if (!m) {
-      // 解析失败：**保持 linkSource**（原样输出，不会把 [ ] 写成 \[ \]）
-      kept++;
+    /**
+     * R1：字面量**必须**能解析出链接 ✓；解析出的链接前后若还有文字 ✓，
+     * 就把它拆成「普通文本 + link mark + 普通文本」✓（不丢字 ✓、不留非法字面量 ✗）。
+     */
+    const parts = splitLiteral(h.text);
+    if (!parts) {
+      // 真的解析不出链接 → 整块降级成纯文本 ✓（旧实现是"原样保留非法字面量"✗，
+      // 会让非法状态永久存在 ✓；降级后至少能继续编辑 ✓，序列化也不会坏 ✓）
+      tr.replaceWith(h.from, h.to, state.schema.text(h.text));
       continue;
     }
-    const replacement = linkMark
-      ? state.schema.text(m[1], [linkMark.create({ href: m[2] })])
-      : state.schema.text(h.text);
+    const pieces: any[] = [];
+    if (parts.before) pieces.push(state.schema.text(parts.before));
+    pieces.push(
+      linkMark ? state.schema.text(parts.label, [linkMark.create({ href: parts.href })]) : state.schema.text(`[${parts.label}](${parts.href})`),
+    );
+    if (parts.after) pieces.push(state.schema.text(parts.after));
+    const replacement = pieces.length === 1 ? pieces[0] : pieces;
     tr.replaceWith(h.from, h.to, replacement);
   }
 
   if (tr.docChanged) {
-    suppressAutoExpandOnce = true;
     tr.setMeta(LINK_TOGGLE_META, true);
     view.dispatch(tr);
   }
@@ -300,8 +306,20 @@ export const LinkSource = Node.create({
               composingHere = false;
               return false;
             },
-            keydown: (_view, event) => {
-              if ((event as KeyboardEvent).isComposing === false) composingHere = false;
+            keydown: (view, event) => {
+              const ke = event as KeyboardEvent;
+              if (ke.isComposing === false) composingHere = false;
+              /**
+               * R3：**F2** 显式展开光标旁边的链接 ✓（替代原来的"光标贴近自动展开"✗）。
+               * 这样展开是用户意图 ✓，不会再和"收起"打架 ✓。
+               */
+              if (ke.key === "F2" && !ke.shiftKey && !ke.ctrlKey && !ke.metaKey && !ke.altKey) {
+                const run = adjacentLink(view.state);
+                if (run && expandLinkAt(view, run)) {
+                  ke.preventDefault();
+                  return true;
+                }
+              }
               return false;
             },
             blur: () => {
@@ -323,6 +341,47 @@ export const LinkSource = Node.create({
               const me = event as MouseEvent;
               composingHere = false;
               if (me.button !== 0 || me.ctrlKey || me.metaKey || me.altKey) return false;
+              /**
+               * 点击**已展开**的字面量 → 收起成链接 ✓（用户要求：再点一次收起来 ✓）。
+               *
+               * 展开态渲染成 `<span data-link-source>` ✓（不是 `<a>` ✗），所以要在
+               * 上面那条"点链接展开"的逻辑**之前**处理 ✓。
+               */
+              const literalEl = (me.target as HTMLElement | null)?.closest?.("[data-link-source]") as HTMLElement | null;
+              if (literalEl) {
+                let litPos = -1;
+                try {
+                  litPos = view.posAtDOM(literalEl, 0);
+                } catch {
+                  litPos = -1;
+                }
+                if (litPos >= 0) {
+                  /**
+                   * ⚠️ `posAtDOM` 返回的是字面量**内部**的位置 ✓，`doc.nodeAt()` 会拿到里面的
+                   * 文本节点 ✗（不是 `linkSource` ✗）→ 早期判断永远不成立 ✓ → 点了没反应 ✗（实测 ✓）。
+                   * 正确做法：解析出 `$pos` 后**逐层向上**找 `linkSource` 祖先 ✓。
+                   */
+                  const $pos = view.state.doc.resolve(litPos);
+                  let litDepth = -1;
+                  for (let d = $pos.depth; d > 0; d--) {
+                    if ($pos.node(d).type.name === "linkSource") {
+                      litDepth = d;
+                      break;
+                    }
+                  }
+                  if (litDepth > 0) {
+                    const from = $pos.before(litDepth);
+                    const to = $pos.after(litDepth);
+                    // 光标先落到字面量之后 ✓，再强制收起 ✓（收起后位置由 ProseMirror 映射 ✓）
+                    const tr = view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(to)));
+                    view.dispatch(tr);
+                    collapseLiterals(view, { from, to }, true);
+                    me.preventDefault();
+                    return true;
+                  }
+                }
+              }
+
               const anchor = (me.target as HTMLElement | null)?.closest?.("a") as HTMLAnchorElement | null;
               if (!anchor || anchor.classList.contains("wiki-link")) return false;
               const href = anchor.getAttribute("href");
@@ -374,14 +433,15 @@ export const LinkSource = Node.create({
 
             const docChanged = !view.state.doc.eq(prevState.doc);
             const selChanged = !view.state.selection.eq(prevState.selection);
-            const internal = suppressAutoExpandOnce;
-            suppressAutoExpandOnce = false;
+            // 清掉"刚收起"的一次性标记 ✓（R3 之后不再需要它来抑制自动展开 ✓，仅保持状态干净 ✓）
 
-            // ① 自动展开
-            if (!internal) {
-              const run = adjacentLink(view.state);
-              if (run && expandLinkAt(view, run)) return;
-            }
+            /**
+             * R3：**不再"光标贴近就自动展开"** ✗。
+             *
+             * 旧实现只要光标停在链接边缘就展开 ✓，而收起之后光标往往**仍在边缘** ✓
+             * → 收起的下一条事务立刻又把它展开 ✗ → 表现成"收不起来"✓（实测 ✓）。
+             * 现在只允许**显式**展开：单击链接 ✓ / F2 ✓（见 keydown ✓）。
+             */
 
             if (!docChanged && !selChanged && !hasLiteral) return;
 
