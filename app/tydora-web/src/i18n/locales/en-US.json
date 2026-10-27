@@ -143,7 +143,7 @@
       "fontCustomPlaceholder": "Enter font-family, press Enter or blur to apply",
       "fontSize": "Font Size",
       "fontSizeDesc": "Terminal text size. You can also Ctrl + scroll in the terminal to zoom.",
-      "foldedRowExpandTitle": "Show folded items", "foldedRowCollapseTitle": "Hide folded items", "contextMenu": {
+      "contextMenu": {
         "copy": "Copy",
         "paste": "Paste",
         "find": "Find",
@@ -916,6 +916,8 @@
     }
   },
   "sidebar": {
+    "foldedRowExpandTitle": "Show folded items in \"{{folder}}\" ({{count}})",
+    "foldedRowCollapseTitle": "Hide folded items in \"{{folder}}\" ({{count}})",
     "contextMenu": {
       "open": "Open",
       "openInNewWindow": "Open in New Window",

@@ -1863,11 +1863,12 @@ function TreeNodeComp({
                         点击展开 / 收起 ✓；没有折叠项时这一行根本不渲染 ✓ */}
                     <div
                       className={`tree-node tree-node-folded-toggle${isGroupExpanded ? " expanded" : ""}`}
-                      style={{ "--tree-depth": depth + 1 } as React.CSSProperties}
+                      style={{ "--tree-depth": depth + 1, paddingLeft: `${8 + (depth + 1) * 8}px` } as React.CSSProperties}
                       title={i18n.t(
                         isGroupExpanded
                           ? "sidebar.foldedRowCollapseTitle"
                           : "sidebar.foldedRowExpandTitle",
+                        { count: folded.length, folder: node.name },
                       )}
                       data-folded-toggle="1"
                       onClick={(e) => {
@@ -1876,15 +1877,17 @@ function TreeNodeComp({
                       }}
                     >
                     {/* 与同级文件对齐：空出箭头位，让展开符号落在「图标」的位置 ✓；关掉文件图标时它自己占箭头位 ✓ */}
-                    {showFileIcons && <span className="tree-icon-spacer" />}
                     <span className={`tree-chevron${isGroupExpanded ? " expanded" : ""}`} aria-hidden="true">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </span>
                     <span className="tree-node-name">...</span>
+                    <span className="tree-folded-count">{folded.length}</span>
                     </div>
-                    {isGroupExpanded && folded.map(renderChild)}
+                    {isGroupExpanded && (
+                      <div className="tree-folded-group">{folded.map(renderChild)}</div>
+                    )}
                   </>
                 )}
               </>
@@ -3774,10 +3777,12 @@ function FileTree({
                   {/* 库根目录的折叠组 ✓（根级被折叠的项没有父目录行可挂，单独在这里兜住） */}
                   <div
                     className={`tree-node tree-node-folded-toggle${isRootGroupExpanded ? " expanded" : ""}`}
+                    style={{ paddingLeft: "8px" } as React.CSSProperties}
                     title={i18n.t(
                       isRootGroupExpanded
                         ? "sidebar.foldedRowCollapseTitle"
                         : "sidebar.foldedRowExpandTitle",
+                      { count: folded.length, folder: rootPath.split(/[\\/]/).filter(Boolean).pop() ?? "" },
                     )}
                     data-folded-toggle="1"
                     onClick={(e) => {
@@ -3786,15 +3791,17 @@ function FileTree({
                     }}
                   >
                     {/* 与同级文件对齐：空出箭头位，让展开符号落在「图标」的位置 ✓；关掉文件图标时它自己占箭头位 ✓ */}
-                    {showFileIcons && <span className="tree-icon-spacer" />}
                     <span className={`tree-chevron${isRootGroupExpanded ? " expanded" : ""}`} aria-hidden="true">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
                     </span>
                     <span className="tree-node-name">...</span>
+                    <span className="tree-folded-count">{folded.length}</span>
                   </div>
-                  {isRootGroupExpanded && folded.map(renderRoot)}
+                  {isRootGroupExpanded && (
+                    <div className="tree-folded-group">{folded.map(renderRoot)}</div>
+                  )}
                 </>
               )}
             </>

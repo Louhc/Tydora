@@ -143,7 +143,7 @@
       "fontCustomPlaceholder": "输入字体族名称，回车或失焦生效",
       "fontSize": "字号",
       "fontSizeDesc": "终端文字大小，也可在终端内 Ctrl + 滚轮快速缩放。",
-      "foldedRowExpandTitle": "展开已折叠的项目", "foldedRowCollapseTitle": "收起已折叠的项目", "contextMenu": {
+      "contextMenu": {
         "copy": "复制",
         "paste": "粘贴",
         "find": "查找",
@@ -915,6 +915,8 @@
     }
   },
   "sidebar": {
+    "foldedRowExpandTitle": "展开「{{folder}}」中已折叠的项目（{{count}}）",
+    "foldedRowCollapseTitle": "收起「{{folder}}」中已折叠的项目（{{count}}）",
     "contextMenu": {
       "open": "打开",
       "openInNewWindow": "在新窗口中打开",

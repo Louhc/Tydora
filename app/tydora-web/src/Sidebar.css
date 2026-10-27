@@ -314,14 +314,114 @@
  * 差别只有三点：**没有图标** ✓、显示 `...` ✓、右侧带一个方向指示 ✓。
  * 展开后换成强调色 ✓（功能同时变成"收起" ✓）。
  */
-.tree-node-folded-toggle {
-  font-style: normal;
+/**
+ * 折叠组（`...` 展开后的内容）的**展开动画** ✓
+ *
+ * 只播展开 ✓、纯 CSS ✓ —— 复用目录那套 `tree-expand` 关键帧 ✓。
+ * 刻意**不做**"收起时延迟卸载" ✗：那需要额外的 collapsing 状态机 ✓，
+ * 上一版因此出现"连带收起下面的全部内容"✗、"点两次才收起"✗（实测 ✓）。
+ * 收起直接卸载 ✓，展开时这一段从上方滑入淡现 ✓。
+ */
+.tree-folded-group {
+  animation: tree-expand 0.16s ease-out both;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .tree-folded-group {
+    animation: none;
+  }
+}
+.tree-node-folded-toggle {
+  font-style: normal;
+  /**
+   * A：**纵向窄** ✓ —— 行高比普通文件行矮一截 ✓（普通行是 3px 上下内边距 + 13px 字号 ✓），
+   * 这样它在树里天然像"分隔/分组行" ✓，不会和文件混淆 ✓；横向仍是整行 ✓。
+   */
+  padding-top: 0;
+  padding-bottom: 0;
+  min-height: 16px;
+  font-size: 12px;
+}
+
+/* 这一行里的箭头也缩小一档 ✓，配合更矮的行高 ✓ */
+.tree-node-folded-toggle .tree-chevron {
+  width: 16px; /* 与图标位同宽 ✓ —— 否则 `...` 会比文件名左移 4px ✗ */
+  height: 16px;
+}
+
+.tree-node-folded-toggle .tree-chevron svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* B：数量徽标 ✓ —— 一眼知道藏了几项；等宽数字避免抖动 ✓ */
+.tree-node-folded-toggle .tree-folded-count {
+  margin-left: auto; /* 推到整行最右 ✓ */
+  font-size: 11px;
+  line-height: 1;
+  padding-right: 2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary, #9aa0a6);
+  opacity: 0.85;
+}
+
+.tree-node-folded-toggle.expanded .tree-folded-count {
+  color: var(--text-accent, #89b4fa);
+  opacity: 1;
+}
+
+/**
+ * 分组行（`...`）的 hover —— 与文件行**完全不同的一套语言** ✓
+ *
+ * 文件行：hover 是整条浅灰底（`rgba(255,255,255,.08)`）✓
+ * 分组行：**主题色文字 + 左侧 2px 强调竖条 + 极淡色调** ✓ ——
+ * 读起来像"活动指示条 / 分组标题"✓，而不是一个可以打开的文件 ✓。
+ */
+/**
+ * 折叠组（`...` 展开后的内容）的**展开动画** ✓
+ *
+ * 只播展开 ✓、纯 CSS ✓ —— 复用目录那套 `tree-expand` 关键帧 ✓。
+ * 刻意**不做**"收起时延迟卸载" ✗：那需要额外的 collapsing 状态机 ✓，
+ * 上一版因此出现"连带收起下面的全部内容"✗、"点两次才收起"✗（实测 ✓）。
+ * 收起直接卸载 ✓，展开时这一段从上方滑入淡现 ✓。
+ */
+.tree-folded-group {
+  animation: tree-expand 0.16s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-folded-group {
+    animation: none;
+  }
+}
+.tree-node-folded-toggle {
+  color: var(--text-secondary, #9aa0a6);
+  background: transparent;
+  box-shadow: inset 0 0 0 0 transparent;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.tree-node-folded-toggle:hover {
+  color: var(--text-accent, #89b4fa);
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.06);
+  box-shadow: inset 2px 0 0 var(--text-accent, #89b4fa);
+}
+
+/* 展开态：竖条常驻（略淡）✓，与 hover 区分 ✓ */
+.tree-node-folded-toggle.expanded {
+  color: var(--text-accent, #89b4fa);
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.08);
+  box-shadow: inset 2px 0 0 rgba(var(--accent-rgb, 137, 180, 250), 0.55);
+}
+
+.tree-node-folded-toggle.expanded:hover {
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.14);
+  box-shadow: inset 2px 0 0 var(--text-accent, #89b4fa);
+}
 .tree-node-folded-toggle .tree-node-name {
   font-family: var(--font-mono, ui-monospace, monospace);
   letter-spacing: 0.12em;
-  color: var(--text-secondary, #9aa0a6);
+  color: inherit; /* 跟随行的 hover / 展开色 ✓ */
 }
 
 .tree-node-folded-toggle.expanded {
