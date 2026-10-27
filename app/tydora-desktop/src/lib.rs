@@ -1669,7 +1669,7 @@ fn github_http_client() -> Result<reqwest::Client, String> {
 async fn check_github_update() -> Result<Option<GithubUpdateInfo>, String> {
     let client = github_http_client()?;
     let resp = client
-        .get("https://api.github.com/repos/zuorn/Tydora/releases/latest")
+        .get("https://api.github.com/repos/Louhc/Tydora/releases/latest")
         .send()
         .await
         .map_err(|e| format!("请求 GitHub 失败: {e}"))?;
@@ -2014,7 +2014,7 @@ fn detect_system_package() -> Option<SystemPackageInfo> {
 async fn check_portable_update() -> Result<Option<GithubUpdateInfo>, String> {
     let client = github_http_client()?;
     let resp = client
-        .get("https://api.github.com/repos/zuorn/Tydora/releases/latest")
+        .get("https://api.github.com/repos/Louhc/Tydora/releases/latest")
         .send()
         .await
         .map_err(|e| format!("请求 GitHub 失败: {e}"))?;
@@ -2053,7 +2053,7 @@ async fn check_portable_update() -> Result<Option<GithubUpdateInfo>, String> {
         Some(a) => a.browser_download_url.clone(),
         // 兜底：按命名规则构造下载地址
         None => format!(
-            "https://github.com/zuorn/Tydora/releases/download/v{version}/Tydora_{version}_x64_portable.zip"
+            "https://github.com/Louhc/Tydora/releases/download/v{version}/Tydora-Refined-{version}-windows-x64-portable-release.zip"
         ),
     };
 
