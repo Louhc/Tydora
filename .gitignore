@@ -10,6 +10,8 @@ target/
 website/site/
 app/tydora-cli/binaries/
 app/tydora-desktop/binaries/
+# 构建/开发时把 TEMP 重定向到这里（%TEMP% 里 esbuild 删临时文件会被拒）
+.tmp-build/
 
 # Python
 __pycache__/
