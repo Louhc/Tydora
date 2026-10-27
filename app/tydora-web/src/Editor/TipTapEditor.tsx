@@ -1109,6 +1109,98 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             };
           },
         }),
+        /**
+         * 光标在「链接 / 注音字面量」里时，**Enter 会被 schema 卡住** ✗。
+         *
+         * 字面量节点的 `content` 是 `text*` ✓，既不能拆开 ✓、也不允许插 `hardBreak` ✓ ——
+         * 于是标题里展开成 `[文字](地址)` 后按 Enter **毫无反应** ✗（用户实测 ✓）。
+         *
+         * 预期行为是"标题不分行、直接结束这个标题"✓ —— 所以把光标移到字面量之后，
+         * 再走标准的 `splitBlock` ✓（等价于在标题末尾按 Enter ✓）。
+         * 其它位置的 Enter 一律放行 ✓。
+         */
+        Extension.create({
+          name: "enterOutOfInlineLiteral",
+          priority: 3000,
+          addKeyboardShortcuts() {
+            return {
+              "Enter": () => {
+                const editor = this.editor;
+                const { state } = editor;
+                const { $from, empty } = state.selection;
+                if (!empty) return false;
+
+                /**
+                 * 只处理**标题** ✓。
+                 *
+                 * ⚠️ 不能用 `$from.parent` 判类型 ✗：光标落在「链接 / 注音字面量」里时，
+                 * parent 就是那个字面量节点 ✓、不是 heading ✗ → 会被提前放行 ✓
+                 * （用户实测："超链接标题依旧无法换行"✗）。所以往上找 heading 祖先 ✓。
+                 */
+                let headingDepth = -1;
+                for (let d = $from.depth; d > 0; d--) {
+                  if ($from.node(d).type.name === "heading") {
+                    headingDepth = d;
+                    break;
+                  }
+                }
+                if (headingDepth < 0) return false;
+
+                /**
+                 * 位置：**光标在哪里就在哪里拆** ✓ —— 即使光标落在「链接 / 注音字面量」内部 ✓，
+                 * 也照常在光标处把块分开 ✓（用户明确要求：可以接受破坏字面量语法 ✓）。
+                 *
+                 * 字面量节点本身不能被 split ✗，所以先把它**降级成纯文本** ✓
+                 *（保留源码文字 ✓，例如 `[文字](地址)` 原样 ✓），再在光标处拆块 ✓。
+                 *
+                 * 早期版本为了"不破坏字面量" ✗ 把位置挪到字面量之后 ✓，
+                 * 结果超链接标题的中间 / 开头换行都不符合直觉 ✗（用户实测 ✓）。
+                 */
+                let pos = $from.pos;
+                for (let d = $from.depth; d > headingDepth; d--) {
+                  const node = $from.node(d);
+                  if (node.type.name !== "linkSource" && node.type.name !== "ruby") continue;
+                  const nodeStart = $from.before(d);
+                  const nodeEnd = $from.after(d);
+                  const offset = $from.pos - nodeStart - 1; // 字面量内部偏移 ✓
+                  if (!editor.chain().insertContentAt({ from: nodeStart, to: nodeEnd }, node.textContent).run()) {
+                    return false;
+                  }
+                  pos = nodeStart + offset;
+                  break;
+                }
+                const offsetInBlock = pos - $from.start(headingDepth);
+                if (offsetInBlock <= 0) {
+                  /**
+                   * ③ 光标在标题**最开始** → 在标题**上方**插入空段落 ✓，
+                   *    但光标**留在标题开头** ✓（空行在上方 ✓，不把用户带到上一行 ✗）。
+                   *    新段落占 2 个位置 → 标题内容起点是 `blockStart + 3` ✓。
+                   */
+                  const blockStart = $from.before(headingDepth);
+                  return editor
+                    .chain()
+                    .insertContentAt(blockStart, { type: "paragraph" })
+                    .setTextSelection(blockStart + 3)
+                    .run();
+                }
+
+                /**
+                 * ① / ②：在光标处拆块 ✓，再**按需**把新块改成正文 ✓。
+                 *
+                 * `splitBlock` 会沿用原节点类型 ✗ → 拆出来的新块可能还是 heading ✗；
+                 * 但**不能在链式里无条件调用 `setNode("paragraph")`** ✗ —— 新块已经是段落时
+                 * 再调一次会多插一个空段落 ✓ → 表现成"末尾换行出现两行空行"✗（用户实测 ✓）。
+                 * 所以先拆分 ✓，再检查新块类型 ✓，只有确实是标题时才转换 ✓。
+                 */
+                const ok = editor.chain().setTextSelection(pos).splitBlock().run();
+                if (ok && editor.state.selection.$from.parent.type.name === "heading") {
+                  editor.chain().setNode("paragraph").run();
+                }
+                return ok;
+              },
+            };
+          },
+        }),
         StarterKit.configure({
           paragraph: false,
           codeBlock: false,
