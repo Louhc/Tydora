@@ -2,7 +2,6 @@
 // 渲染引擎与参考项目（note-to-red）一致：SVG foreignObject 方案，文字与浏览器渲染 100% 一致
 
 import { toPng } from "html-to-image";
-import appIconUrl from "../../assets/icon.png?inline";
 import {
   prepareExportElement,
   inlineImages,
@@ -54,16 +53,23 @@ const RATIO_SIZES: Record<XhsRatio, { width: number; height: number }> = {
 export const XHS_CARD_WIDTH = RATIO_SIZES["3:4"].width;
 export const XHS_CARD_HEIGHT = RATIO_SIZES["3:4"].height;
 
-// 布局参数对齐参考项目：内边距 22px/24px、footer 高 48px
+// 布局参数对齐参考项目：内边距 22px/24px
 const CONTENT_PADDING_TOP = 22;
 const CONTENT_PADDING_X = 24;
 const FOOTER_HEIGHT = 48;
+/**
+ * 卡片底部留白。
+ *
+ * 原来是 logo 页脚（Tydora 图标 + 页码）占 48px；用户要求去掉那一行，
+ * 改成**两倍高度的空白**（96px）—— 与上方内容同底色、网格线连着。
+ */
+const CARD_BOTTOM_BLANK = FOOTER_HEIGHT * 2;
 /** 导出像素比（参考项目 EXPORT_PIXEL_RATIO = 3） */
 const EXPORT_PIXEL_RATIO = 3;
 
 /** 正文可用高度（受卡片比例影响） */
 function getContentHeight(ratio: XhsRatio): number {
-  return RATIO_SIZES[ratio].height - CONTENT_PADDING_TOP - FOOTER_HEIGHT;
+  return RATIO_SIZES[ratio].height - CONTENT_PADDING_TOP - CARD_BOTTOM_BLANK;
 }
 
 /** 正文字体族映射 */
@@ -144,9 +150,8 @@ const CARD_CONTENT_CSS = `
 }
 .xhs-card .md-tag, .xhs-card span[data-tag] { color: var(--accent, #0A84FF); }
 .xhs-card .mermaid-node img { border-radius: 12px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06); }
-.xhs-card .xhs-card-footer { display: flex; align-items: center; justify-content: space-between; font-family: Optima-Regular, Optima, PingFangSC-light, PingFangTC-light, "PingFang SC", sans-serif; }
-.xhs-card .xhs-card-footer-brand { font-size: 13px; color: var(--text-secondary); letter-spacing: 0.5px; }
-.xhs-card .xhs-card-footer-page { font-size: 13px; color: var(--text-secondary); }
+/* 页码：右下角角落（页脚去掉后单独放在底部留白里） */
+.xhs-card .xhs-card-page { position: absolute; right: 24px; bottom: 20px; font-size: 12px; line-height: 1; letter-spacing: 0.08em; color: var(--text-secondary); opacity: 0.8; font-family: Optima-Regular, Optima, PingFangSC-light, PingFangTC-light, "PingFang SC", sans-serif; }
 .xhs-card .xhs-card-cover-title { font-size: 32px; font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; color: var(--text-primary); margin: 0; }
 .xhs-card .xhs-card-cover-summary { font-size: 14px; line-height: 1.7; color: var(--text-secondary); margin: 16px 0 0; }
 .xhs-card .xhs-card-cover-bar { width: 40px; height: 4px; border-radius: 2px; background: var(--accent); margin-bottom: 20px; }
@@ -162,9 +167,6 @@ function ensureCardStylesheet(): void {
   document.head.appendChild(style);
 }
 
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
 
 function applyCardBase(
   card: HTMLElement,
@@ -197,41 +199,6 @@ function createGridOverlay(fontSizePx: number): HTMLElement {
   return overlay;
 }
 
-function buildFooter(settings: XhsSettings, index: number, total: number): HTMLElement {
-  const footer = document.createElement("div");
-  footer.className = "xhs-card-footer";
-  // 与参考项目一致的 footer：通栏置于卡片底部，顶部 1px 分隔线
-  footer.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:${FOOTER_HEIGHT}px;padding:0 ${CONTENT_PADDING_X}px;box-sizing:border-box;border-top:1px solid var(--border, rgba(0,0,0,0.08));background:var(--bg-primary);`;
-
-  const left = document.createElement("span");
-  left.className = "xhs-card-footer-brand";
-  left.style.display = "flex";
-  left.style.alignItems = "center";
-  left.style.gap = "6px";
-  // 品牌名称前放置应用图标
-  const icon = document.createElement("img");
-  icon.src = appIconUrl;
-  icon.alt = "";
-  icon.style.width = "22px";
-  icon.style.height = "22px";
-  icon.style.borderRadius = "5px";
-  icon.style.flexShrink = "0";
-  left.appendChild(icon);
-  left.appendChild(document.createTextNode("Tydora"));
-
-  const right = document.createElement("span");
-  right.style.cssText = "display:flex;align-items:center;";
-  if (settings.pageNumber) {
-    const page = document.createElement("span");
-    page.className = "xhs-card-footer-page";
-    page.textContent = `${pad(index + 1)} / ${pad(total)}`;
-    right.appendChild(page);
-  }
-
-  footer.appendChild(left);
-  footer.appendChild(right);
-  return footer;
-}
 
 interface CoverInfo {
   title: string;
@@ -249,15 +216,13 @@ function buildCoverCard(
   theme: XhsTheme,
   settings: XhsSettings,
   info: CoverInfo,
-  index: number,
-  total: number,
 ): HTMLElement {
   const card = document.createElement("div");
   applyCardBase(card, theme, RATIO_SIZES[settings.ratio], XHS_FONT_FAMILIES[settings.fontFamily]);
 
   const wrap = document.createElement("div");
   wrap.className = "xhs-card-cover";
-  wrap.style.cssText = `position:absolute;left:${CONTENT_PADDING_X}px;right:${CONTENT_PADDING_X}px;top:${CONTENT_PADDING_TOP}px;bottom:${FOOTER_HEIGHT}px;display:flex;flex-direction:column;justify-content:center;`;
+  wrap.style.cssText = `position:absolute;left:${CONTENT_PADDING_X}px;right:${CONTENT_PADDING_X}px;top:${CONTENT_PADDING_TOP}px;bottom:${CARD_BOTTOM_BLANK}px;display:flex;flex-direction:column;justify-content:center;`;
 
   const bar = document.createElement("div");
   bar.className = "xhs-card-cover-bar";
@@ -274,7 +239,6 @@ function buildCoverCard(
   // 网格线置于最底层（内容之前插入），不遮挡标题/图片
   if (settings.gridLines) card.appendChild(createGridOverlay(settings.fontSize));
   card.appendChild(wrap);
-  card.appendChild(buildFooter(settings, index, total));
   return card;
 }
 
@@ -306,6 +270,9 @@ function buildBodyCard(
   settings: XhsSettings,
   index: number,
   total: number,
+  host: HTMLElement,
+  anchorFrom: number,
+  anchorEnd: number,
 ): HTMLElement {
   const card = document.createElement("div");
   const { width } = RATIO_SIZES[settings.ratio];
@@ -314,15 +281,13 @@ function buildBodyCard(
   const segH = Math.max(0, to - from);
   const height = Math.max(
     RATIO_SIZES[settings.ratio].height,
-    CONTENT_PADDING_TOP + Math.ceil(segH) + FOOTER_HEIGHT,
+    CONTENT_PADDING_TOP + Math.ceil(segH) + CARD_BOTTOM_BLANK,
   );
   applyCardBase(card, theme, { width, height }, XHS_FONT_FAMILIES[settings.fontFamily]);
 
   // 视口结构必须与测量容器同构（padding 22/24，顶部无偏移）：
-  // 1) 高度 = 22 + 分段内容高度，overflow:hidden 在分段末尾精确裁剪（用原始浮点值，
-  //    避免 ceil 放大导致下一段顶部露出细边）；
-  // 2) 用 padding 而非 top 偏移，保证克隆内容的 margin 折叠行为与测量容器一致，
-  //    否则首个元素的 margin 会把整段内容下推，导致裁剪错位。
+  // 1) 高度 = 22 + 分段内容高度，overflow:hidden 在分段末尾精确裁剪；
+  // 2) 用 padding 而非 top 偏移，保证克隆内容的 margin 折叠行为与测量容器一致。
   const viewport = document.createElement("div");
   viewport.style.cssText =
     `position:absolute;top:0;left:0;right:0;height:${CONTENT_PADDING_TOP + segH}px;` +
@@ -334,15 +299,69 @@ function buildBodyCard(
   content.querySelectorAll("hr").forEach((el) => {
     (el as HTMLElement).style.visibility = "hidden";
   });
-  // 与测量容器 contentEl 一致（flow-root 阻止 margin 穿透），保证克隆内
-  // 各元素垂直位置与测量坐标一一对应
+  // 与测量容器 contentEl 一致（flow-root 阻止 margin 穿透）
   content.style.display = "flow-root";
-  content.style.transform = `translateY(${-from}px)`;
   viewport.appendChild(content);
   // 网格线置于最底层（内容之前插入），不遮挡正文/图片
   if (settings.gridLines) card.appendChild(createGridOverlay(settings.fontSize));
   card.appendChild(viewport);
-  card.appendChild(buildFooter(settings, index, total));
+
+  /**
+   * ⚠️ 裁剪必须用**克隆体自己的坐标**：先挂到离屏宿主拿到真实布局，再量锚点块的位置。
+   *
+   * 测量容器（`.tiptap-export-container` 里的编辑器内容）与卡片克隆体虽然同源同 CSS，
+   * 表格/列表/标题的亚像素行高累积会让同一个块相差十几像素 —— 用测量出的 `from/to`
+   * 去 translate + 定高，就会切在块中间（实测：04 底边露出 `### ②` 上半截、05 顶部缺一条）。
+   *
+   * `anchors` 是断点对应块在 `UNSPLITTABLE_SELECTORS` 里的下标；-1 表示该断点没有锚点
+   *（第一个断点 / 内容末尾 / 按页高切分），此时退回测量坐标。
+   */
+  host.appendChild(card);
+
+  const els = content.querySelectorAll(UNSPLITTABLE_SELECTORS.join(", "));
+  const contentTop = content.getBoundingClientRect().top;
+  const cloneTopAt = (i: number): number | null => {
+    if (i < 0) return null;
+    const el = els[i] as HTMLElement | undefined;
+    if (!el) return null;
+    return el.getBoundingClientRect().top - contentTop;
+  };
+  const cloneBottomAt = (i: number): number | null => {
+    if (i < 0) return null;
+    const el = els[i] as HTMLElement | undefined;
+    if (!el) return null;
+    return el.getBoundingClientRect().bottom - contentTop;
+  };
+  const cStart = cloneTopAt(anchorFrom) ?? from;
+  /**
+   * 裁剪线的优先级：
+   *   1. `endAnchor`（断点前最后一个块的**底边**）—— 留出段间距当安全余量，
+   *      抵掉栅格化与 DOM 布局之间那十几像素的偏差；
+   *   2. 断点落在内容末尾 → 裁到克隆体底部；
+   *   3. 都没有（无 hr 分页 / 断在块中间）→ 退回测量坐标。
+   */
+  const endBottom = cloneBottomAt(anchorEnd);
+  const cEnd =
+    endBottom !== null && endBottom > cStart
+      ? endBottom
+      : to >= contentEl.offsetHeight - 0.5
+        ? content.getBoundingClientRect().height
+        : to - from + cStart;
+  const clipH = Math.max(0, cEnd - cStart);
+
+  content.style.transform = `translateY(${-cStart}px)`;
+  viewport.style.height = `${CONTENT_PADDING_TOP + clipH}px`;
+  card.style.height = `${Math.max(
+    RATIO_SIZES[settings.ratio].height,
+    CONTENT_PADDING_TOP + Math.ceil(clipH) + CARD_BOTTOM_BLANK,
+  )}px`;
+  // 页码：右下角角落（原来跟着页脚走，页脚去掉后单独放在底部留白里）
+  if (settings.pageNumber) {
+    const page = document.createElement("span");
+    page.className = "xhs-card-page";
+    page.textContent = `${String(index + 1).padStart(2, "0")} / ${String(total).padStart(2, "0")}`;
+    card.appendChild(page);
+  }
   return card;
 }
 
@@ -439,6 +458,10 @@ interface PreparedXhs {
   theme: XhsTheme;
   contentEl: HTMLElement;
   breaks: number[];
+  /** 每个断点对应的块下标（-1 = 用测量坐标，见 prepareXhsContent 里的说明） */
+  anchors: number[];
+  /** 每个断点"之前最后一个块"的下标（裁剪线，-1 = 裁到内容末尾） */
+  endAnchors: number[];
   useCoverCard: boolean;
   coverInfo: CoverInfo;
   totalPages: number;
@@ -475,7 +498,7 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
     container.classList.add("xhs-themed");
     container.setAttribute("data-xhs-theme", theme.id);
     container.style.width = `${cardW}px`;
-    container.style.padding = `${CONTENT_PADDING_TOP}px ${CONTENT_PADDING_X}px ${FOOTER_HEIGHT}px`;
+    container.style.padding = `${CONTENT_PADDING_TOP}px ${CONTENT_PADDING_X}px ${CARD_BOTTOM_BLANK}px`;
     container.style.boxSizing = "border-box";
     container.style.background = "var(--bg-primary)";
     container.style.color = "var(--text-primary)";
@@ -577,11 +600,54 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
       pageNumber: opts.settings.pageNumber,
     });
 
+    /**
+     * 每个断点"落在哪个块上"（UNSPLITTABLE_SELECTORS 里的下标）。
+     *
+     * 为什么需要：测量容器与卡片克隆体虽然同源同 CSS，但表格/列表/标题的亚像素行高
+     * 累积会让同一个块在两者里差出十几像素 —— 按测量坐标裁剪就会切在标题中间
+     *（用户实测：04 底边露出 `### ②` 的上半截、05 顶部缺一条）。
+     * 记下"块下标"后，卡片可以在**自己的克隆体**里重新量这个块的位置再裁剪 ✓。
+     * 只在按分割线分页（断点必然落在块边界）时启用；按页高切分可能断在段落中间，
+     * 那时仍用测量坐标（-1 表示不用锚点）。
+     */
+    const anchorEls = Array.from(contentEl.querySelectorAll(UNSPLITTABLE_SELECTORS.join(", ")));
+    const baseTop = contentEl.getBoundingClientRect().top;
+    const contentHeight = contentEl.offsetHeight;
+    const anchors: number[] = hasHr
+      ? breaks.map((b, i) => {
+          if (i === 0 || b >= contentHeight - 0.5) return -1;
+          const idx = anchorEls.findIndex(
+            (el) => el.getBoundingClientRect().top - baseTop >= b - 0.6,
+          );
+          return idx;
+        })
+      : breaks.map(() => -1);
+    /**
+     * 每个断点"之前最后一个块"的下标（裁剪用）。
+     *
+     * 为什么不用"下一个块的顶"当裁剪线：栅格化（html-to-image 的 SVG foreignObject）里
+     * 内容的垂直位置与 DOM 布局能差十几像素（实测 12px），裁在"下一个块顶"就会把这个块
+     * 的头一行露出来。裁在**上一个块的底**，中间至少隔着一个段间距（这里 20~50px），
+     * 这点偏差就落在空白里了。
+     */
+    const endAnchors: number[] = hasHr
+      ? breaks.map((b, i) => {
+          if (i === breaks.length - 1) return -1; // 最后一张：裁到内容末尾
+          let idx = -1;
+          anchorEls.forEach((el, j) => {
+            if (el.getBoundingClientRect().bottom - baseTop <= b + 0.5) idx = j;
+          });
+          return idx;
+        })
+      : breaks.map(() => -1);
+
     return {
       settings: opts.settings,
       theme,
       contentEl,
       breaks,
+      anchors,
+      endAnchors,
       useCoverCard,
       coverInfo,
       totalPages,
@@ -614,7 +680,7 @@ function buildJobs(prepared: PreparedXhs, host: HTMLElement): RenderJob[] {
   const coverOffset = useCoverCard ? 1 : 0;
   const jobs: RenderJob[] = [];
   if (useCoverCard) {
-    const coverEl = buildCoverCard(theme, prepared.settings, coverInfo, 0, totalPages);
+    const coverEl = buildCoverCard(theme, prepared.settings, coverInfo);
     host.appendChild(coverEl);
     jobs.push({
       el: coverEl,
@@ -628,8 +694,19 @@ function buildJobs(prepared: PreparedXhs, host: HTMLElement): RenderJob[] {
   }
   for (let i = 0; i < breaks.length - 1; i++) {
     const idx = coverOffset + i;
-    const el = buildBodyCard(contentEl, breaks[i], breaks[i + 1], theme, prepared.settings, idx, totalPages);
-    host.appendChild(el);
+    // buildBodyCard 自己会把卡片挂到 host（需要真实布局来按克隆体坐标裁剪）
+    const el = buildBodyCard(
+      contentEl,
+      breaks[i],
+      breaks[i + 1],
+      theme,
+      prepared.settings,
+      idx,
+      totalPages,
+      host,
+      prepared.anchors[i] ?? -1,
+      prepared.endAnchors[i + 1] ?? -1,
+    );
     jobs.push({
       el,
       height: el.offsetHeight,

@@ -81,6 +81,40 @@ function snapToLineBoundary(
 }
 
 /**
+ * 把断点**向下吸附到下一行的行顶** ✓
+ *
+ * 只允许向下 ✗→✓：
+ *  - 若允许"最近的边界"✓，`hr.bottom` 会经常吸到**上一行的行底** ✗ →
+ *    那一行就被前后两张卡片**同时包含** ✓ → 下一页顶部出现重复的一行 ✓（实测两次 ✓）；
+ *  - 只取"第一个 ≥ y 的行顶" ✓ → 断点永远不小于 y ✓，上一行完整留在上一张 ✓，
+ *    下一张从干净的一行开始 ✓。
+ *
+ * 找不到时返回 y 本身（不吸附 ✓）。
+ */
+function snapDownToLineStart(y: number, lines: LineRect[]): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (const line of lines) {
+    if (line.top >= y - 0.5 && line.top < best) best = line.top;
+  }
+  return Number.isFinite(best) ? best : y;
+}
+
+/**
+ * 把断点**向上吸到下一个块的顶边**：在 `(afterY, y)` 之间有块顶时取最小的那个块顶。
+ *
+ * 用途见 hr 分支：只吸到「行顶」会把块的首行留在卡片底边上（测量与克隆有几像素差就露馅）；
+ * 吸到块顶至少多出 margin-top + 半行距的余量。限定 `top > afterY` 保证断点不会跑到
+ * 分割线之前。
+ */
+function snapUpToBlockTop(afterY: number, y: number, rects: { top: number }[]): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (const r of rects) {
+    if (r.top > afterY - 0.5 && r.top < y && r.top < best) best = r.top;
+  }
+  return Number.isFinite(best) ? best : y;
+}
+
+/**
  * 计算分页断点。返回内容相对坐标（CSS px），首尾分别为 0 与内容总高。
  * 内容中存在 hr（---）时严格按分割线分页；无 hr 时按页高安全切分。
  */
@@ -124,9 +158,26 @@ export function computePageBreaks(
   // 只要存在 hr（---），断点即为每个 hr 底部：分割线之间的内容各自成一张卡片，
   // 完全忽略页高与标题分页设置（卡片高度由 render.ts 按分段内容自适应）。
   if (hrRects.length > 0) {
+    /**
+     * 严格按分割线分页 ✓ —— 但断点要**吸附到文本行边界** ✗→✓：
+     * `hr.bottom` 与上一行行底 / 下一行行顶常有半行偏差 ✗，
+     * 不吸附就会出现"两张卡片共享同一行、且这一行被切一半"✗（用户实测 ✓）。
+     */
+    const allLines = collectTextLines(contentEl, offsetTop);
     const breaks: number[] = [0];
     for (const hr of hrRects) {
-      const b = hr.bottom;
+      const snapped = snapDownToLineStart(hr.bottom, allLines);
+      /**
+       * ⚠️ 再往上吸到**下一个块的顶边**。
+       *
+       * 只吸到「行顶」会在卡片底部切进块的首行：测量容器与卡片克隆里的垂直位置
+       * 只要有几像素差（margin 折叠 / 字体度量 / 行高取整），块的第一行就会从卡片
+       * 底边露出一截 —— 用户实测：第 4 张底边露出 `### ②` 标题的上半截。
+       *
+       * 块的顶边比块内首行的行顶至少高「margin-top + 半行距」，这几十像素正好是
+       * 安全余量，且断点仍落在 hr 之后（不会把分割线前的内容切走）。
+       */
+      const b = snapUpToBlockTop(hr.bottom, snapped, rects);
       if (b > breaks[breaks.length - 1] && b < contentBottom) breaks.push(b);
     }
     if (breaks[breaks.length - 1] < contentBottom) breaks.push(contentBottom);
