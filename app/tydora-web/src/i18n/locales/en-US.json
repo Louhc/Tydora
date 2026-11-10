@@ -197,6 +197,7 @@
       "resetConfirm": "Reset all shortcuts to defaults?",
       "pressKeys": "Press keys...",
       "notSet": "Not set, click to set",
+      "clearTitle": "No shortcut (unbind)",
       "format": "Format",
       "list": "List",
       "heading": "Heading",
@@ -211,6 +212,8 @@
       "system": "System",
       "other": "Other",
       "labels": {
+        "find": "Find",
+        "replace": "Replace",
         "bold": "Bold",
         "italic": "Italic",
         "strike": "Strikethrough",
@@ -1118,7 +1121,14 @@
       "highlighterMode": "Highlighter",
       "clearHighlight": "Clear highlight",
       "textColor": "Text Color",
-      "defaultColor": "Default color"
+      "defaultColor": "Default color",
+      "underline": "Underline",
+      "underlineStraight": "Straight underline",
+      "underlineWavy": "Wavy underline",
+      "underlineDouble": "Double underline",
+      "underlineDashed": "Dashed underline",
+      "underlineDotted": "Dotted underline",
+      "underlineClear": "Clear underline"
     },
     "textColor": {
       "red": "Red",

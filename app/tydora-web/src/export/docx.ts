@@ -30,7 +30,7 @@ interface RunStyle {
   bold?: boolean;
   italics?: boolean;
   strike?: boolean;
-  underline?: { type: typeof UnderlineType.SINGLE };
+  underline?: { type: (typeof UnderlineType)[keyof typeof UnderlineType]; color?: string };
   highlight?: string; // eslint-disable-line @typescript-eslint/no-redundant-type-constituents
   superScript?: boolean;
   subScript?: boolean;
@@ -38,6 +38,18 @@ interface RunStyle {
   size?: number;
   color?: string;
 }
+
+/**
+ * Tydora 下划线 mark（`{{Straight|…}}` 等五种）→ Word 的 `<w:u w:val>`。
+ * Word 没有"粗细"这个概念，所以 `粗细` 参数在 docx 里会被忽略（其余链路都生效）。
+ */
+const UNDERLINE_TYPE: Record<string, (typeof UnderlineType)[keyof typeof UnderlineType]> = {
+  straight: UnderlineType.SINGLE,
+  wavy: UnderlineType.WAVE,
+  double: UnderlineType.DOUBLE,
+  dashed: UnderlineType.DASH,
+  dotted: UnderlineType.DOTTED,
+};
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -162,6 +174,14 @@ function parseInlines(node: Node, base: RunStyle = {}): (TextRun | ExternalHyper
         items.push(new ExternalHyperlink({ children: linkRuns, link: href }));
       }
     } else if (tag === "span") {
+      // 下划线 mark：{{Straight|颜色|粗细|文字}} → <w:u w:val="single|double|dash|dotted|wave">
+      // 颜色存在 data-color（#hex），Word 的 w:u 支持 w:color，一并带上。
+      if (n.classList.contains("md-underline")) {
+        const styleKey = n.getAttribute("data-style") || "straight";
+        const type = UNDERLINE_TYPE[styleKey] ?? UnderlineType.SINGLE;
+        const c = n.getAttribute("data-color");
+        next.underline = c ? { type, color: c.replace(/^#/, "") } : { type };
+      }
       // 递归处理 span（如 highlight.js 的高亮 span）
       n.childNodes.forEach(c => walk(c, next));
     } else {

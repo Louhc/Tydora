@@ -10,6 +10,11 @@
     { "id": "highlight", "label": "高亮", "keys": ["Ctrl", "="], "group": "格式" },
     { "id": "quote", "label": "引用", "keys": ["Ctrl", ";"], "group": "格式" },
     { "id": "ruby", "label": "注音（Ruby）", "keys": ["Ctrl", "G"], "group": "格式" },
+    { "id": "underline-straight", "label": "直线下划线", "keys": [], "group": "格式" },
+    { "id": "underline-wavy", "label": "波浪下划线", "keys": [], "group": "格式" },
+    { "id": "underline-double", "label": "双下划线", "keys": [], "group": "格式" },
+    { "id": "underline-dashed", "label": "虚线下划线", "keys": [], "group": "格式" },
+    { "id": "underline-dotted", "label": "圆点下划线", "keys": [], "group": "格式" },
     { "id": "hr", "label": "水平分割线", "keys": ["Ctrl", "Shift", "H"], "group": "格式" },
     { "id": "unordered-list", "label": "无序列表", "keys": ["Ctrl", "L"], "group": "列表" },
     { "id": "ordered-list", "label": "有序列表", "keys": [], "group": "列表" },
@@ -52,7 +57,9 @@
     { "id": "escape", "label": "关闭提示", "keys": ["Escape"], "group": "系统" },
     { "id": "quick-open", "label": "快速打开文件", "keys": ["Ctrl", "O"], "group": "系统" },
     { "id": "command-palette", "label": "命令面板", "keys": ["Ctrl", "P"], "group": "系统" },
-    { "id": "open-settings", "label": "打开/关闭设置", "keys": ["Ctrl", ","], "group": "系统" }
+    { "id": "open-settings", "label": "打开/关闭设置", "keys": ["Ctrl", ","], "group": "系统" },
+    { "id": "find", "label": "查找", "keys": ["Ctrl", "F"], "group": "查找替换" },
+    { "id": "replace", "label": "替换", "keys": ["Ctrl", "H"], "group": "查找替换" }
   ],
   "app": {
     "save": ["Ctrl", "S"],

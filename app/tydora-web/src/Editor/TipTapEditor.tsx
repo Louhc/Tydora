@@ -52,6 +52,7 @@ import {
 } from "./highlighter";
 import i18n from "../i18n";
 import { TextColor } from "./extensions/text-color";
+import { Underline } from "./extensions/underline";
 import { TydoraHighlight } from "./extensions/highlight-ext";
 import { CaretHistory, caretBeforeChangeKey } from "./extensions/caret-history";
 import { RubyMeasure } from "./ruby-measure";
@@ -64,7 +65,7 @@ import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
 import { BulletListMindmap } from "./extensions/bullet-list-mindmap";
 import { HardBreakCleanup } from "./extensions/hardbreak-cleanup";
 import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFloatingToolbar";
-import { deleteCurrentLine, executeCommand, insertClipboardHtml } from "./extensions/custom-commands";
+import { deleteCurrentLine, executeCommand, insertClipboardHtml, pasteFromClipboard } from "./extensions/custom-commands";
 import { normalizePathKey } from "../utils/fileName";
 import { Math as MathExtension } from "./extensions/math";
 import { installImageWordMarkRule, installEmptyParagraphRule } from "./extensions/markdown-setup";
@@ -1998,6 +1999,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         RubyMeasure,
         // 文字颜色（渲染成 <span style="color: …">，见 extensions/text-color.ts）
         TextColor,
+        // 直线 / 波浪下划线（{{Straight|…}} / {{Wavy|…}}，见 extensions/underline.ts）
+        Underline,
         Typography,
         Markdown.configure({
           html: true,
@@ -2337,6 +2340,9 @@ const md = getMarkdownSafe(ed);
                 "bold": "bold", "italic": "italic", "strike": "strike",
                 "inline-code": "inline-code", "code-block": "code",
                 "link": "link", "highlight": "highlight", "quote": "quote", "ruby": "ruby",
+                "underline-straight": "underline-straight", "underline-wavy": "underline-wavy",
+                "underline-double": "underline-double", "underline-dashed": "underline-dashed",
+                "underline-dotted": "underline-dotted",
                 "hr": "line", "unordered-list": "list",
                 "ordered-list": "ordered-list", "check-list": "check",
                 "indent": "indent", "outdent": "outdent", "task-toggle": "task-toggle",
@@ -2474,31 +2480,19 @@ const md = getMarkdownSafe(ed);
           }
           const items = event.clipboardData?.items;
           /**
-           * ⚠️ 普通 Ctrl+V 也要走**与右键粘贴相同**的路径。
+           * 普通 Ctrl+V 一律**不能**交给 PM 自己的粘贴。
            *
-           * 原因：PM 自己的粘贴（`pasteHTML` / `parseSlice`）实测会把注音压成纯文本 ✗
-           *（harness 对照：同一段 HTML 用 `parse` 能得到 ruby 节点 ✓，用 `parseSlice`
-           * 只能得到纯文本 ✗）。右键粘贴已在 custom-commands 里改成 `parse + insertContent` ✓，
-           * 这里保持一致 ✓，两种粘贴方式行为完全相同 ✓。
+           * 原因：PM 的粘贴走 `parseSlice` + `replaceSelection`，切片在**起始边界**上
+           * 会把行内节点降级 —— 粘一段多个注音时"只有第一个丢读音"（harness 实测：
+           * 同一段 3 个 ruby，`parse` + `insertContent` 得 3 个 ✓，
+           * `parseSlice` + `replaceSelection` 只剩 2 个、第一个变纯文本 ✗）。
            *
-           * 单块 → 只插行内内容（不拆段 ✓）；多块 → 整篇插入（保持段落 ✓）。
+           * 所以两个粘贴入口都走 `insertClipboardHtml`（parse + insertContent）：
+           *   - 事件里带 HTML  → 直接用它（同步）；
+           *   - 事件里没有 HTML → 读系统剪贴板（`pasteFromClipboard`，与右键完全相同）。
+           * 详见下方两段。
            */
-          /**
-           * ⚠️ 不能依赖 `event.clipboardData`。
-           *
-           * 实测（日志）：Ctrl+V 的 paste 事件里 `clipboardData.types` 是**空数组** ✗、
-           * `getData("text/html")` 与 `getData("text/plain")` 都返回空串 ✗ ——
-           * 于是"用事件里的 HTML 自己插入"这条路永远进不去 ✓，只能退回 PM 的旧粘贴 ✗
-           *（而 PM 的旧粘贴会把注音压成纯文本 ✗）。右键粘贴之所以是好的 ✓，是因为它走
-           * Rust 的 `read_clipboard_html`（不依赖事件里的剪贴板 ✓）。
-           *
-           * 所以这里让 Ctrl+V **也走同一条命令** ✓：先阻止浏览器默认粘贴 ✓，
-           * 其余交给 `executeCommand("paste")` ✓（与右键完全一致 ✓）。
-           */
-          // 注：这里**不**读 event.clipboardData（实测为空 ✗，见上方说明）
-          if (!items) return false;
-
-          for (const item of items) {
+          for (const item of items ?? []) {
             if (item.type.startsWith("image/")) {
               event.preventDefault();
               const file = item.getAsFile();
@@ -2508,24 +2502,33 @@ const md = getMarkdownSafe(ed);
               }
             }
           }
+          if (!editor || editor.isDestroyed) return false;
           /**
            * ★ 普通 Ctrl+V：**用事件里带来的 HTML 走与右键完全相同的插入逻辑** ✓。
            *
-           * 之前误判"paste 事件里 clipboardData 为空"✗（那是一次合成事件的读数 ✓）；
-           * 事务探针实测：真实的 Ctrl+V 里 `types=["text/plain","text/html"]`、
-           * `htmlLen≈297` ✓ —— 数据是**有**的 ✓。
-           *
-           * 为什么不能交给 PM 自己粘（`parseSlice` 路径 ✗）：它解析出的 slice 是
-           * `openStart=2/openEnd=1` 的不对称形状 ✓，插入时**起始边界上的行内节点会被降级**
-           * ✗ —— 表现就是"复制多个注音时，只有第一个丢读音"✗（harness 精确复现 ✓）。
-           * 走 insertClipboardHtml（parse + insertContent）则不会有这个问题 ✓。
+           * 事件里有 HTML 时直接用（同步、无 IO ✓）。
            */
           const pasteHtml = event.clipboardData?.getData("text/html") ?? "";
-          if (pasteHtml && editor && !editor.isDestroyed) {
+          if (pasteHtml && insertClipboardHtml(editor, pasteHtml)) {
             event.preventDefault();
-            if (insertClipboardHtml(editor, pasteHtml)) return true;
+            return true;
           }
-          return false;
+          /**
+           * ⚠️ 事件里没有 HTML（WebView2 下 Ctrl+V 的 clipboardData 可能为空）
+           * 或插入失败时，**绝不能退回 PM 自己的粘贴**：
+           * `parseSlice` 会在**起始边界**降级行内节点 —— 粘一段多个注音时
+           * 只有第一个丢读音（harness：3 个 ruby → parse 后 3 个，
+           * parseSlice 后只剩 2 个，第一个变纯文本 ✗）。
+           *
+           * 改为读**系统剪贴板**、走与右键菜单「粘贴」完全相同的
+           * `pasteFromClipboard`（read_clipboard_html → insertClipboardHtml）✓。
+           */
+          // 剪贴板里是**文件**（图片等）时交给浏览器原生粘贴：HTML 通道读不到文件，
+          // 抢过来反而会把它吞掉。
+          if ((event.clipboardData?.files?.length ?? 0) > 0) return false;
+          event.preventDefault();
+          void pasteFromClipboard(editor);
+          return true;
         },
         handleDrop: (_view: any, event: DragEvent) => {
           const files = event.dataTransfer?.files;

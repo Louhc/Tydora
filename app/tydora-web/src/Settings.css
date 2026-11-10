@@ -1605,7 +1605,13 @@
 }
 
 .settings-shortcut-keys.editing {
-  background: var(--accent);
+  /*
+   * 录制态：**绝对不能**用纯 accent 底 + 白字 ✗
+   * —— accent 若是浅色（黄/浅绿 ✓）白字直接看不见（用户实测 ✗）。
+   * 改为"淡 accent 底 + accent 描边"✓，文字沿用主题前景色 ✓ 任何主题都清晰 ✓。
+   */
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.16);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
   padding: 8px 12px;
   border-radius: 6px;
 }
@@ -1617,9 +1623,9 @@
 }
 
 .settings-shortcut-keys.editing .settings-kbd {
-  background: rgba(255, 255, 255, 0.2);
-  border-color: rgba(255, 255, 255, 0.3);
-  color: white;
+  background: var(--bg-surface);
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .settings-shortcut-keys.editing .settings-kbd-sep {
@@ -1648,6 +1654,7 @@
 }
 
 .settings-shortcut-save,
+.settings-shortcut-clear,
 .settings-shortcut-cancel {
   width: 24px;
   height: 24px;
@@ -1669,6 +1676,10 @@
 
 .settings-shortcut-cancel:hover {
   background: rgba(239, 68, 68, 0.5);
+}
+
+.settings-shortcut-clear:hover {
+  background: rgba(var(--accent-rgb, 137, 180, 250), 0.35);
 }
 
 .settings-shortcut-reset {

@@ -89,7 +89,20 @@ import "./tags/Tag.css";
 import "./tags/TagAutocomplete.css";
 import "./components/FindReplaceDialog.css";
 import shortcutsConfig from "./config/shortcuts.json";
+
 import { matchShortcut, formatShortcutDisplay, formatShortcutKey, loadShortcuts, getShortcutKeys } from "./Editor/shortcuts";
+
+/**
+ * 应用级快捷键（find / replace / close-window）的**当前生效键位** ✓
+ *
+ * 这些键以前只读 `shortcutsConfig.app` 的原值 ✗ → 设置里改了也不生效，
+ * 而且它们根本不在设置页列表里 ✗（列表只渲染 `shortcutsConfig.editor`）。
+ * 现在优先读用户可自定义的那份 ✓；**空数组表示"用户主动禁用"** ✓（不回退默认 ✓）。
+ */
+function appKeys(id: "find" | "replace" | "close-window"): string[] {
+  const item = loadShortcuts().find((s) => s.id === id);
+  return item ? item.keys : shortcutsConfig.app[id];
+}
 import { track, trackPageview, hasConsentChoice, isAnalyticsEnabled, setAnalyticsEnabled, ANALYTICS_EVENTS } from "./analytics";
 import { ConsentDialog } from "./analytics/ConsentDialog";
 
@@ -3402,10 +3415,10 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
     const handler = (e: KeyboardEvent) => {
       // Vim 语义冲突：Ctrl+W=删除前一个 word（insert）/ 操作符前缀（normal 窗格操作）
       // Ctrl+F=整页向下；Ctrl+H=退格（insert）/ 光标左（normal）
-      if (vimShouldTakeOver(e) && matchShortcut(e, shortcutsConfig.app["close-window"])) return;
-      if (vimShouldTakeOver(e) && matchShortcut(e, shortcutsConfig.app["find"])) return;
-      if (vimShouldTakeOver(e) && matchShortcut(e, shortcutsConfig.app["replace"])) return;
-      if (matchShortcut(e, shortcutsConfig.app["close-window"])) {
+      if (vimShouldTakeOver(e) && matchShortcut(e, appKeys("close-window"))) return;
+      if (vimShouldTakeOver(e) && matchShortcut(e, appKeys("find"))) return;
+      if (vimShouldTakeOver(e) && matchShortcut(e, appKeys("replace"))) return;
+      if (matchShortcut(e, appKeys("close-window"))) {
         e.preventDefault();
         const win = getCurrentWindow();
         const label = win.label;
@@ -3421,11 +3434,11 @@ function App({ initialFilePath, initialVaultPath }: { initialFilePath?: string |
           }
         }
       }
-      if (matchShortcut(e, shortcutsConfig.app["find"])) {
+      if (matchShortcut(e, appKeys("find"))) {
         e.preventDefault();
         openFindReplace("find");
       }
-      if (matchShortcut(e, shortcutsConfig.app["replace"])) {
+      if (matchShortcut(e, appKeys("replace"))) {
         e.preventDefault();
         openFindReplace("replace");
       }

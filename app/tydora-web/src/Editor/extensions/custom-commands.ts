@@ -5,6 +5,36 @@ import { DOMParser as PMDOMParser, type Node } from "prosemirror-model";
 import { invoke } from "@tauri-apps/api/core";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 import { applyMarkToInlineNodes } from "./highlight-ext";
+import { suppressRubyAutoExpandOnce } from "./ruby";
+
+/**
+ * 选区里的**行内内容是否全都带这个 mark**（只看块的直接行内子节点，不进注音内部）。
+ *
+ * 为什么不直接用 `editor.isActive(name)`：注音的 mark 落在**节点**上、内层文本刻意不带
+ * （见 applyMarkToInlineNodes 的"避免两层高亮"说明），`isActive` 在这种混合结构上会返回
+ * false ✗ → Ctrl+B 连按两次也不会撤销（实测：一直加粗）。
+ */
+function selectionHasMark(editor: Editor, markName: string): boolean {
+  const { state } = editor;
+  const type = state.schema.marks[markName];
+  if (!type) return false;
+  const { from, to } = state.selection;
+  let all = true;
+  let seen = false;
+  state.doc.nodesBetween(from, to, (node: Node, _pos: number, parent: Node | null) => {
+    if (!all) return false;
+    // 注音内部的文本不参与判断（它的 mark 在节点上）
+    if (parent && parent.type.name === "ruby") return false;
+    if (!node.isInline) return true;
+    seen = true;
+    if (!type.isInSet(node.marks)) {
+      all = false;
+      return false;
+    }
+    return true;
+  });
+  return seen && all;
+}
 
 /**
  * 收掉选区（折叠到原选区 head）。
@@ -200,19 +230,84 @@ export function insertClipboardHtml(editor: Editor, html: string): boolean {
 
     const firstBlock = parsedDoc.firstChild;
     const inlineOnly = !hadBreak && firstBlock != null && firstBlock.type.name === "paragraph";
+    /**
+     * ⚠️ 插入前先聚焦、再抑制"邻近注音自动展开"，最后才插入。
+     *
+     * 粘贴一个注音时，插入完成后光标正贴着它的右端 —— 不抑制的话那次更新会立刻把它
+     * 展开成 `{{Ruby|…}}` 源码，用户看到的就是"Ctrl+V 粘完没有注音"（实测）。
+     * 聚焦单独走一次，避免"抑制"被聚焦那次更新消耗掉。
+     */
+    if (!editor.isFocused) editor.commands.focus();
+    suppressRubyAutoExpandOnce();
     if (inlineOnly) {
       const inlineJson = firstBlock.content.toJSON();
       if (inlineJson && inlineJson.length > 0) {
-        editor.chain().focus().insertContent(inlineJson as any).run();
+        editor.commands.insertContent(inlineJson as any);
       }
     } else {
-      editor.chain().focus().insertContent(blocks as any).run();
+      editor.commands.insertContent(blocks as any);
     }
     return true;
   } catch (err) {
     console.warn("[paste] 插入剪贴板 HTML 失败:", err);
     return false;
   }
+}
+
+/**
+ * 从**系统剪贴板**粘贴（右键「粘贴」与 Ctrl+V 共用）。
+ *
+ * ⚠️ 为什么不用 paste 事件里的 `clipboardData`：WebView2 下 Ctrl+V 的事件里
+ * `getData("text/html")` 实测可能为空；一旦退回 ProseMirror 自己的粘贴
+ * （`parseSlice` + `replaceSelection`），**起始边界上的行内节点会被降级** ——
+ * 症状正是「粘一段多个注音时，只有第一个丢读音」。
+ *
+ * harness 对照（同一段 3 个 ruby 的 HTML）：
+ *   - `parse` + `insertContent`（本函数）→ 3 个 ruby 全部保留 ✓
+ *   - `parseSlice` + `replaceSelection`（PM 原生粘贴）→ 只剩 2 个，第一个变成纯文本 ✗
+ *
+ * 所以 Ctrl+V 也走这条「读系统剪贴板 → insertClipboardHtml」的路，与右键保持一致。
+ */
+export async function pasteFromClipboard(editor: Editor): Promise<void> {
+  if (!editor || editor.isDestroyed) return;
+  let inserted = false;
+  try {
+    const html = await invoke<string | null>("read_clipboard_html");
+    if (html && !editor.isDestroyed) inserted = insertClipboardHtml(editor, html);
+  } catch (err) {
+    console.warn("[paste] 读取剪贴板 HTML 失败，退回纯文本:", err);
+  }
+  if (inserted) return;
+  // 剪贴板里没有 HTML（例如从纯文本编辑器复制）：退回纯文本插入
+  let plain = "";
+  try {
+    const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+    plain = (await readText()) ?? "";
+  } catch {
+    try {
+      plain = await navigator.clipboard.readText();
+    } catch {
+      plain = "";
+    }
+  }
+  if (!plain || editor.isDestroyed) return;
+  const view = editor.view;
+  const lines = plain.split(/\r?\n/);
+  if (lines.length === 1) {
+    view.dispatch(view.state.tr.insertText(plain));
+    return;
+  }
+  editor
+    .chain()
+    .focus()
+    .insertContent(
+      lines.map((line) =>
+        line
+          ? { type: "paragraph", content: [{ type: "text", text: line }] }
+          : { type: "paragraph" },
+      ),
+    )
+    .run();
 }
 
 export function executeCommand(name: string, editor: Editor | null) {
@@ -310,15 +405,34 @@ export function executeCommand(name: string, editor: Editor | null) {
       break;
 
     // 行内格式
-    case "bold":
-      chain.toggleBold().run();
+    /**
+     * ⚠️ 加粗 / 斜体 / 删除线都要**额外补一次行内节点**。
+     *
+     * `toggleBold()` 之类只给**文本**加 mark；注音是"带文本内容的行内节点"，
+     * 节点自身的 `marks` 不会被更新 ✗ → 选中 `{{Ruby|辿|たど}}る` 按 Ctrl+B 时，
+     * 「る」变粗而注音不变（用户实测）；更麻烦的是序列化只会写出
+     * `{{Ruby|辿|たど}}**る**`，切一次源码模式回来，注音上的格式就彻底没了 ✗。
+     * 把 mark 补到节点上之后，序列化才是 `**{{Ruby|辿|たど}}る**` ✓（往返一致）。
+     */
+    case "bold": {
+      // 折叠光标时 isActive 是可靠的（走 storedMarks / $from.marks），带选区时才用自研判定
+      const apply = editor.state.selection.empty ? !editor.isActive("bold") : !selectionHasMark(editor, "bold");
+      chain[apply ? "setBold" : "unsetBold"]().run();
+      applyMarkToInlineNodes(editor, "bold", apply ? {} : null);
       break;
-    case "italic":
-      chain.toggleItalic().run();
+    }
+    case "italic": {
+      const apply = editor.state.selection.empty ? !editor.isActive("italic") : !selectionHasMark(editor, "italic");
+      chain[apply ? "setItalic" : "unsetItalic"]().run();
+      applyMarkToInlineNodes(editor, "italic", apply ? {} : null);
       break;
-    case "strike":
-      chain.toggleStrike().run();
+    }
+    case "strike": {
+      const apply = editor.state.selection.empty ? !editor.isActive("strike") : !selectionHasMark(editor, "strike");
+      chain[apply ? "setStrike" : "unsetStrike"]().run();
+      applyMarkToInlineNodes(editor, "strike", apply ? {} : null);
       break;
+    }
     case "inline-code":
       chain.toggleCode().run();
       break;
@@ -337,6 +451,34 @@ export function executeCommand(name: string, editor: Editor | null) {
       break;
     case "text-color-clear":
       chain.unsetTextColor().run();
+      collapseSelection(editor);
+      break;
+    case "underline-straight":
+    case "underline-wavy":
+    case "underline-double":
+    case "underline-dashed":
+    case "underline-dotted": {
+      const ulStyle = name.replace("underline-", "");
+      /**
+       * 同一样式再点一次 = 取消；换成另一种样式 = **替换**（不是叠加）。
+       * ProseMirror 的 mark 同一类型只能有一个，所以 setMark 天然覆盖旧的 ✓；
+       * `excludes: "underline"` 再兜一层，避免以后加样式时意外叠出两层。
+       */
+      if (editor.isActive("underline", { style: ulStyle })) {
+        chain.unsetMark("underline").run();
+        applyMarkToInlineNodes(editor, "underline", null);
+      } else {
+        const attrs = { style: ulStyle, color: null, width: null };
+        chain.setMark("underline", attrs).run();
+        // 注音这类带内容的行内节点也要带上（与高亮同一处理）
+        applyMarkToInlineNodes(editor, "underline", attrs);
+      }
+      collapseSelection(editor);
+      break;
+    }
+    case "underline-clear":
+      chain.unsetMark("underline").run();
+      applyMarkToInlineNodes(editor, "underline", null);
       collapseSelection(editor);
       break;
     case "highlighter-mode":
@@ -537,56 +679,12 @@ export function executeCommand(name: string, editor: Editor | null) {
        *
        * HTML 由自定义命令 read_clipboard_html（Rust + arboard）读取 —— Tauri 的 clipboard
        * 插件只有 readText / writeHtml、没有读 HTML 的能力，而浏览器侧的
-       * navigator.clipboard.read() 会弹权限窗。插入走 ProseMirror 自己的粘贴管线
-       * （view.pasteHTML），因此与用户直接 Ctrl+V 的效果、以及各扩展的过滤规则一致。
+       * navigator.clipboard.read() 会弹权限窗。插入走 insertClipboardHtml
+       * （parse + insertContent），避免 PM 原生 parseSlice 把首个行内节点降级。
+       *
+       * Ctrl+V 现在也走同一个函数（见 TipTapEditor 的 handlePaste）✓。
        */
-      void (async () => {
-        // 编辑器可能尚未就绪或已被销毁（例如切换文件/面板重建期间触发）：
-        // 不判空会抛 "Cannot read properties of null (reading 'chain')" 这类未捕获异常。
-        if (!editor || editor.isDestroyed) return;
-        let inserted = false;
-        try {
-          const html = await invoke<string | null>("read_clipboard_html");
-          if (html) {
-            // 插入逻辑与 Ctrl+V 共用 ✓（见 insertClipboardHtml 的说明）
-            insertClipboardHtml(editor, html);
-            inserted = true;
-          }
-        } catch (err) {
-          console.warn("[paste] 读取剪贴板 HTML 失败，退回纯文本:", err);
-        }
-        if (inserted) return;
-        // 剪贴板里没有 HTML（例如从纯文本编辑器复制）：退回纯文本插入
-        let plain = "";
-        try {
-          const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
-          plain = (await readText()) ?? "";
-        } catch {
-          try {
-            plain = await navigator.clipboard.readText();
-          } catch {
-            plain = "";
-          }
-        }
-        if (!plain) return;
-        const view = editor.view;
-        const lines = plain.split(/\r?\n/);
-        if (lines.length === 1) {
-          view.dispatch(view.state.tr.insertText(plain));
-          return;
-        }
-        editor
-          .chain()
-          .focus()
-          .insertContent(
-            lines.map((line) =>
-              line
-                ? { type: "paragraph", content: [{ type: "text", text: line }] }
-                : { type: "paragraph" },
-            ),
-          )
-          .run();
-      })();
+      void pasteFromClipboard(editor);
       break;
     }
     case "paste-plain": {

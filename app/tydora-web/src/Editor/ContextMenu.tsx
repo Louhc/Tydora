@@ -106,6 +106,36 @@ const ICONS = {
       <path d="M16 4H9a3 3 0 00-2.83 4" /><path d="M14 12a4 4 0 010 8H6" /><line x1="4" y1="12" x2="20" y2="12" />
     </svg>
   ),
+  // 下划线：U + 下方一条直线
+  underline: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 4v6a5 5 0 0010 0V4" /><line x1="5" y1="20" x2="19" y2="20" />
+    </svg>
+  ),
+  // 波浪下划线：同上，但底线是波浪
+  underlineWavy: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 4v6a5 5 0 0010 0V4" /><path d="M4 20c1.6-2 2.7-2 4.3 0s2.7 2 4.3 0 2.7 2 4.3 0 2.4-1.6 2.8-1.2" />
+    </svg>
+  ),
+  // 双下划线
+  underlineDouble: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 3v5a5 5 0 0010 0V3" /><line x1="5" y1="17" x2="19" y2="17" /><line x1="5" y1="21" x2="19" y2="21" />
+    </svg>
+  ),
+  // 虚线下划线
+  underlineDashed: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 3v5a5 5 0 0010 0V3" /><line x1="4" y1="20" x2="20" y2="20" strokeDasharray="3 3" />
+    </svg>
+  ),
+  // 圆点下划线
+  underlineDotted: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 3v5a5 5 0 0010 0V3" /><line x1="5" y1="20" x2="5" y2="20" /><line x1="9" y1="20" x2="9" y2="20" /><line x1="13" y1="20" x2="13" y2="20" /><line x1="17" y1="20" x2="17" y2="20" />
+    </svg>
+  ),
   code: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />
@@ -418,9 +448,42 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     ],
   }), [t]);
 
+  // 「下划线」子菜单：五种样式 + 清除。
+  // 点同一种样式 = 取消，点另一种 = 替换（不是叠加），见 custom-commands 的 underline-* 分支。
+  const underlineSubmenu = useMemo<SubmenuItem>(() => {
+    const styles: Array<{ style: string; labelKey: string; icon: React.ReactNode }> = [
+      { style: "straight", labelKey: "underlineStraight", icon: ICONS.underline },
+      { style: "wavy", labelKey: "underlineWavy", icon: ICONS.underlineWavy },
+      { style: "double", labelKey: "underlineDouble", icon: ICONS.underlineDouble },
+      { style: "dashed", labelKey: "underlineDashed", icon: ICONS.underlineDashed },
+      { style: "dotted", labelKey: "underlineDotted", icon: ICONS.underlineDotted },
+    ];
+    const items: Array<SubmenuEntry | { divider: true; label: string }> = styles.map(
+      ({ style, labelKey, icon }) => ({
+        name: `underline-${style}`,
+        label: t(`editor.contextMenu.${labelKey}`),
+        shortcutId: null,
+        icon,
+      }),
+    );
+    items.push({ divider: true, label: "" });
+    items.push({
+      name: "underline-clear",
+      label: t("editor.contextMenu.underlineClear"),
+      shortcutId: null,
+      icon: ICONS.eraser,
+    });
+    return {
+      name: "underline",
+      label: t("editor.contextMenu.underline"),
+      icon: ICONS.underline,
+      submenu: items,
+    };
+  }, [t]);
+
   const submenuItems = useMemo(
-    () => [...createSubmenuItems(t), highlightSubmenu, textColorSubmenu],
-    [t, highlightSubmenu, textColorSubmenu],
+    () => [...createSubmenuItems(t), highlightSubmenu, textColorSubmenu, underlineSubmenu],
+    [t, highlightSubmenu, textColorSubmenu, underlineSubmenu],
   );
 
   useEffect(() => {

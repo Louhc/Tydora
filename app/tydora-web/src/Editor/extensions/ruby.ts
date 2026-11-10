@@ -247,6 +247,16 @@ let pendingLiteral = false;
 /** 一次性抑制：由我们自己的展开/收起引起的那次更新不参与邻近判断 */
 let suppressAutoExpandOnce = false;
 /**
+ * 让**紧接着的那次更新**不做"光标邻近注音就展开"。
+ *
+ * 给"程序化插入注音"的调用方用（粘贴）：插入完成后光标正贴着新注音的右端，
+ * 不抑制的话它会被立刻展开成 `{{Ruby|…}}` 源码 —— 用户看到的就是"粘贴后没有注音"
+ * （实测：`Ctrl+V` 粘一个注音，落下的却是源码字面量）。
+ */
+export function suppressRubyAutoExpandOnce(): void {
+  suppressAutoExpandOnce = true;
+}
+/**
  * 鼠标是否按下（左键）。
  *
  * 用途：**按住鼠标拖选时**不触发「光标邻近注音就展开」的自动逻辑 —— 否则从注音边界
@@ -267,6 +277,117 @@ let composingHere = false;
  * 之后每次光标移动都全文档扫一遍（扫描是正则遍历文本节点，普通笔记上是亚毫秒级）。
  */
 let sawLiteralExpand = false;
+
+/**
+ * 光标停在**字面量右端、且该字面量正好落在块尾**时，主动把字面量渲染回注音节点。
+ *
+ * 为什么需要：右/下方向键在块尾**没有可去的位置** —— 浏览器不动光标 → 不产生事务 →
+ * `convertLiterals` 不跑；而按"闭区间"规则，光标停在字面量右端仍算编辑中，于是源码
+ * 一直留着。用户看到的就是：`{{Ruby|増設|ぞうせつ}}` 停在行末，按「右」「下」毫无反应。
+ *
+ * 这个函数只在**按键**时被调用（用户明确表达了"要离开"），所以不会影响
+ * "停在右端继续打字"的既有行为。
+ */
+function commitLiteralAtBlockEnd(view: any): boolean {
+  const { state } = view;
+  const sel = state.selection;
+  if (!sel.empty) return false;
+  const $from = sel.$from;
+  const parent = $from.parent;
+  if (!parent.isTextblock || parent.type.spec.code) return false;
+  // 必须在块尾：字面量之后没有任何字符（否则方向键能移动，交给常规收起）
+  if ($from.parentOffset !== parent.content.size) return false;
+  const last = parent.lastChild;
+  if (!last || !last.isText) return false;
+  const m = /\{\{Ruby\s*[|:]\s*([^|{}:]+?)\s*[|:]\s*([^|{}:]+?)\s*\}\}$/.exec(last.text ?? "");
+  if (!m) return false;
+  const base = m[1].trim();
+  const rt = m[2].trim();
+  const rubyType = state.schema.nodes.ruby;
+  if (!base || !rt || !rubyType) return false;
+  const node = rubyType.create({ rt }, state.schema.text(base), last.marks);
+  /**
+   * ⚠️ 起点必须按**匹配到的字面量长度**回推，不能按「最后一个子节点的 nodeSize」回推。
+   *
+   * 展开后的字面量会和它前面的普通文字合并成同一个文本节点（ProseMirror 会合并相邻文本）：
+   *   `{{Ruby|一|いち}}＋{{Ruby|三|さん}}＝{{Ruby|四|よん}}`  ← 光标停在块尾时
+   *   最后一个文本节点其实是 `＝{{Ruby|四|よん}}`，不是 `{{Ruby|四|よん}}`。
+   * 用 `sel.from - last.nodeSize` 会把前面的 `＝`（或 `＋`）一起算进替换区间 →
+   * 收起注音的瞬间把运算符删掉（用户实测：「＝」「＋」被吞）。
+   * 正则已经锚定在 `$`，所以 `m[0].length` 就是字面量本身的长度 ✓。
+   */
+  const from = sel.from - m[0].length;
+  const tr = state.tr.replaceWith(from, sel.from, node);
+  tr.setSelection(TextSelection.create(tr.doc, from + node.nodeSize)); // 光标留在注音之后
+  tr.setMeta(RUBY_TOGGLE_META, true);
+  pendingLiteral = false;
+  suppressAutoExpandOnce = true; // 收起是我们自己造成的，那一次不再自动展开
+  view.dispatch(tr);
+  return true;
+}
+
+/**
+ * 光标在块尾、刚把字面量收起之后，把光标**移到下一块**（模拟 ↓ 的继续移动）。
+ *
+ * 为什么需要：`commitLiteralAtBlockEnd` 收起后会把这次按键 `preventDefault` 掉
+ *（避免浏览器基于旧 DOM 移动光标），于是 ↓ 只完成了"收起"，人却停在原地 ✗ ——
+ * 用户实测："↓ 到下一行的注音、展开后光标在末尾，再按 ↓ 去不了下一行"。
+ *
+ * 落点算法（用户实测调过两版）：
+ *   横向 —— 取**收起之后**光标所在的 x（即注音右边缘，和原来看到的列一致 ✓）；
+ *   纵向 —— 取**下一块第一行**的垂直中线。
+ *
+ * ⚠️ 不能用 `coords.bottom + 2` 找下一行：行高是 1.8，`bottom + 2` 仍落在**同一行**的行框内，
+ * `posAtCoords` 命中原行 → 判定失败 → 掉到"下一块开头"兜底 ✗
+ *（用户实测：从「晶」右边按 ↓ 跑到了「満」左边，而不是「悦」右边）。
+ *
+ * 拿不到布局（测试环境）时才退回"下一块开头"。
+ */
+function moveCaretToNextBlock(view: any): boolean {
+  const { state } = view;
+  const from = state.selection.from;
+
+  // 下一块的起点（先算出来，两条路径都要用）
+  const $from = state.selection.$from;
+  let depth = $from.depth;
+  while (depth > 0 && !$from.node(depth).isTextblock) depth--;
+  if (depth === 0) return false;
+  const nextStart = $from.before(depth) + $from.node(depth).nodeSize;
+  if (nextStart >= state.doc.content.size) return false; // 已经是最后一块
+
+  try {
+    const caret = view.coordsAtPos(from);
+    // 下一块第一个内容位置的坐标 → 用它所在行的中线做纵向目标
+    const target = view.coordsAtPos(nextStart + 1);
+    if (caret && target && (target.bottom > target.top || target.left || target.top)) {
+      const midY = (target.top + target.bottom) / 2;
+      const hit = view.posAtCoords({ left: caret.left, top: midY });
+      if (hit && hit.pos > from) {
+        /**
+         * 命中点可能落在下一块**之后**的块（下一行很短时 x 会超出它的宽度）——
+         * 用 TextSelection.near 取最近位置即可，不会跑太远。
+         */
+        const tr = state.tr.setSelection(TextSelection.near(state.doc.resolve(hit.pos), 1));
+        tr.setMeta(RUBY_TOGGLE_META, true);
+        suppressAutoExpandOnce = true;
+        view.dispatch(tr);
+        return true;
+      }
+    }
+  } catch {
+    /* 布局不可用（测试环境）→ 走兜底 */
+  }
+
+  try {
+    const tr = state.tr.setSelection(TextSelection.near(state.doc.resolve(nextStart), 1));
+    tr.setMeta(RUBY_TOGGLE_META, true);
+    suppressAutoExpandOnce = true;
+    view.dispatch(tr);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export const Ruby = Node.create({
   name: "ruby",
@@ -423,9 +544,28 @@ export const Ruby = Node.create({
               composingHere = false;
               return false;
             },
-            keydown: (_view, event) => {
+            keydown: (view, event) => {
               const ke = event as KeyboardEvent;
               if (ke.isComposing === false) composingHere = false;
+              /**
+               * 右/下方向键：块尾的字面量没有"下一格"可去，浏览器不会移动光标，
+               * 也就不会有事务让字面量收起（见 commitLiteralAtBlockEnd 的说明）。
+               * 这里先把它渲染回注音，再吞掉这次按键 —— 否则会基于旧 DOM 移动光标。
+               *
+               * ⚠️ 吞掉之后要**补上"继续移动"**：否则 ↓ 只完成了"收起"，人停在原地 ✗
+               *（用户实测：↓ 到下一行的注音、展开后光标在末尾，再按 ↓ 去不了下一行）。
+               * 右方向键例外：块尾本来就没有右边可去，收起即结束。
+               */
+              if (
+                !ke.isComposing &&
+                !ke.ctrlKey && !ke.metaKey && !ke.altKey && !ke.shiftKey &&
+                (ke.key === "ArrowRight" || ke.key === "ArrowDown") &&
+                commitLiteralAtBlockEnd(view as any)
+              ) {
+                ke.preventDefault();
+                if (ke.key === "ArrowDown") moveCaretToNextBlock(view as any);
+                return true;
+              }
               return false;
             },
             /** 失焦同样说明输入告一段落 */
@@ -560,6 +700,31 @@ export const Ruby = Node.create({
             if (pendingLiteral || sawLiteralExpand) convertLiterals(view);
           },
         }),
+        /**
+         * 剪掉"本体被删空"的注音节点。
+         *
+         * `content: "text*"` 允许空内容 —— 剪切/删除把本体整段删掉时，节点会**留下来**
+         * 变成 `<span class="md-ruby" data-rt="…"></span>`：宽度为 0 但读音仍由 ::after
+         * 画在原地，于是字删掉了、假名还飘在那里（用户实测：剪 `{{Ruby|心構|こころがま}}え`
+         * 后原地留下一条「こころがま」）。
+         *
+         * 序列化本来就跳过空本体（不会写脏数据），所以这里只负责把显示层一起清掉。
+         * 只在**文档真的变了**的那一次事务后扫一遍，避免每次点击/移动都全篇遍历。
+         */
+        appendTransaction: (trs: readonly any[], _oldState: any, newState: any) => {
+          if (!trs.some((t: any) => t.docChanged)) return null;
+          const empties: { from: number; to: number }[] = [];
+          newState.doc.descendants((node: any, pos: number) => {
+            if (node.type.name === "ruby" && node.content.size === 0) {
+              empties.push({ from: pos, to: pos + node.nodeSize });
+            }
+          });
+          if (!empties.length) return null;
+          const tr = newState.tr;
+          for (let i = empties.length - 1; i >= 0; i--) tr.delete(empties[i].from, empties[i].to);
+          tr.setMeta(RUBY_TOGGLE_META, true);
+          return tr;
+        },
       }),
     ];
   },
@@ -583,6 +748,15 @@ export const Ruby = Node.create({
            */
           const pos = Math.min(range.from + 1, state.doc.content.size);
           const marks = state.doc.resolve(pos).marks().map((m: any) => ({ type: m.type.name, attrs: m.attrs }));
+          /**
+           * ⚠️ 刚转成节点的这一次更新里，光标正好贴着节点右侧 —— `adjacentRuby` 会立刻
+           * 在同一个位置把它**又展开回源码字面量**，于是"输入 `{{Ruby|…}}` 即时转成注音"
+           * 实际看到的是源码；若这一行正好结束在 `}}`（后面还没有「：」），光标停在字面量
+           * 右端、块内又没有下一格可去，右/下方向键都不会触发更新 → 字面量再也收不回去
+           *（用户实测：截图里 `{{Ruby|増設|ぞうせつ}}` 一直是源码，按右/下毫无反应）。
+           * 这里吃掉这次自动展开，让输入规则的结果直接渲染成注音 ✓。
+           */
+          suppressAutoExpandOnce = true;
           commands.insertContentAt(range, {
             type: "ruby",
             attrs: { rt },

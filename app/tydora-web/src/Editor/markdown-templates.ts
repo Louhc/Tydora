@@ -20,7 +20,16 @@ import { installMarkdownRuleOnce } from "./extensions/markdown-setup";
  */
 
 /** 目前认识的模板名。`Ruby` 只用于"识别并跳过"，实际转换仍由 ruby.ts 负责。 */
-export const TEMPLATE_NAMES = ["Ruby", "Color", "Hilite"] as const;
+export const TEMPLATE_NAMES = [
+  "Ruby",
+  "Color",
+  "Hilite",
+  "Straight",
+  "Wavy",
+  "Double",
+  "Dashed",
+  "Dotted",
+] as const;
 export type TemplateName = (typeof TEMPLATE_NAMES)[number];
 
 /** 参数分隔符：竖线，或表格管道保护产生的 `\u0001`。 */
@@ -86,6 +95,40 @@ export function splitFirstParam(inner: string): { param: string; content: string
     }
   }
   return { param: inner.trim(), content: "" };
+}
+
+/**
+ * 按**深度 0** 的分隔符把 `inner` 切成 `n + 1` 段：前 n 段是参数，最后一段是内容。
+ *
+ * 分隔符数量不足 n 时返回 `null`（= 这个模板写法不合法，调用方应原样留作文本，
+ * 不要把缺省参数当成内容吞掉）。
+ */
+export function splitParams(inner: string, n: number): string[] | null {
+  // 先数一下深度 0 的分隔符够不够
+  let depth = 0;
+  let seps = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === "{" && inner[i + 1] === "{") { depth++; i++; continue; }
+    if (ch === "}" && inner[i + 1] === "}") { depth--; i++; continue; }
+    if (depth === 0 && (ch === "|" || ch === "\u0001")) seps++;
+  }
+  if (seps < n) return null;
+
+  const parts: string[] = [];
+  depth = 0;
+  let start = 0;
+  for (let i = 0; i < inner.length && parts.length < n; i++) {
+    const ch = inner[i];
+    if (ch === "{" && inner[i + 1] === "{") { depth++; i++; continue; }
+    if (ch === "}" && inner[i + 1] === "}") { depth--; i++; continue; }
+    if (depth === 0 && (ch === "|" || ch === "\u0001")) {
+      parts.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(inner.slice(start));
+  return parts;
 }
 
 /**
@@ -202,7 +245,7 @@ function flipRubyBaseTemplate(m: TemplateMatch): string | null {
  */
 function matchTemplateErrorAt(text: string, pos: number): { html: string; end: number } | null {
   if (text.charCodeAt(pos) !== 123 || text.charCodeAt(pos + 1) !== 123) return null;
-  const head = /^\{\{\s*(Ruby|Color|Hilite)\b/.exec(text.slice(pos));
+  const head = /^\{\{\s*(Ruby|Color|Hilite|Straight|Wavy|Double|Dashed|Dotted)\b/.exec(text.slice(pos));
   if (!head) return null;
   const closeIdx = text.indexOf("}}", pos);
   const end = closeIdx >= 0 ? closeIdx + 2 : text.length;
@@ -400,6 +443,43 @@ export function hiliteHtmlTags(color: string | null | undefined, palette: Palett
 /** `Hilite`（高亮）的 mark HTML：与 Highlight 的渲染一致（`data-color` + 背景色 + 继承前景） */
 export function hiliteTemplateHtml(color: string, inner: string): string {
   return `<mark data-color="${escAttr(color)}">${inner}</mark>`;
+}
+
+/** 下划线样式（模板名 → data-style） */
+export type UnderlineStyle = "straight" | "wavy" | "double" | "dashed" | "dotted";
+
+/**
+ * `Wavy` / `Straight`（下划线）的 mark HTML：与 underline.ts 的 parseHTML 一致。
+ * 只写 `data-*`、不写 `style` —— 理由同 colorHtmlTags（`#hex` 会被 `#标签` 规则劈开）。
+ */
+export function underlineTemplateHtml(
+  style: UnderlineStyle,
+  color: string | null,
+  width: string | null,
+  inner: string,
+): string {
+  const attrs = [
+    `class="md-underline"`,
+    `data-style="${style}"`,
+    color ? `data-color="${escAttr(color)}"` : "",
+    width ? `data-width="${escAttr(width)}"` : "",
+  ].filter(Boolean).join(" ");
+  return `<span ${attrs}>${inner}</span>`;
+}
+
+/** 下划线的 HTML 形式（内容不能写成模板时用），开/闭标签分开返回 */
+export function underlineHtmlTags(
+  style: UnderlineStyle,
+  color: string | null | undefined,
+  width: string | null | undefined,
+): [string, string] {
+  const attrs = [
+    "class=\"md-underline\"",
+    `data-style="${style}"`,
+    color ? `data-color="${escAttr(color)}"` : "",
+    width ? `data-width="${escAttr(width)}"` : "",
+  ].filter(Boolean).join(" ");
+  return [`<span ${attrs}>`, "</span>"];
 }
 /**
  * 取某个 mark 的 HTML 开/闭标签（用于"内容含 `|`/`}}` 时退回 HTML 形式"）。

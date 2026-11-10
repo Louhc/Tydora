@@ -197,6 +197,7 @@
       "resetConfirm": "确定要重置所有快捷键为默认值吗？",
       "pressKeys": "按下快捷键...",
       "notSet": "未设置，点击设置",
+      "clearTitle": "不设置快捷键（取消绑定）",
       "format": "格式",
       "list": "列表",
       "heading": "标题",
@@ -211,6 +212,8 @@
       "system": "系统",
       "other": "其他",
       "labels": {
+        "find": "查找",
+        "replace": "替换",
         "bold": "加粗",
         "italic": "斜体",
         "strike": "删除线",
@@ -1118,7 +1121,14 @@
       "highlighterMode": "荧光笔",
       "clearHighlight": "清除高亮",
       "textColor": "文字颜色",
-      "defaultColor": "默认颜色"
+      "defaultColor": "默认颜色",
+      "underline": "下划线",
+      "underlineStraight": "直线下划线",
+      "underlineWavy": "波浪下划线",
+      "underlineDouble": "双下划线",
+      "underlineDashed": "虚线下划线",
+      "underlineDotted": "圆点下划线",
+      "underlineClear": "清除下划线"
     },
     "textColor": {
       "red": "红色",

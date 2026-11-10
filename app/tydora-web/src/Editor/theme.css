@@ -1777,6 +1777,39 @@ html.platform-macos .tiptap-editor .frontmatter-node {
    - 间距：上下 48px、两端各留 6%。
    调粗细/疏密：改 mask-size 的两处尺寸与 SVG 的 x1/x2/stroke-width（保持 x1 == 38-x2 即对称）。 */
 /**
+ * 下划线（直线 / 波浪）：`{{Straight|颜色|粗细|文本}}` / `{{Wavy|…}}`
+ *
+ * 颜色与粗细由 mark 的**行内 style** 给出（见 extensions/underline.ts 的 renderHTML），
+ * 这里只兜底：万一某条导出链路把行内 style 过滤掉，也还能画出线来。
+ * 波浪线的 `text-decoration-skip-ink: none` 必须保留 —— 否则字母之间的连接处会断开。
+ */
+/* 兜底（正常渲染由 underline.ts 生成行内 style）：行内 style 被过滤时才生效 */
+.tiptap-editor .md-underline {
+  padding-bottom: 0.12em;
+  border-bottom: 2px solid var(--accent);
+}
+.tiptap-editor .md-underline[data-style="double"] {
+  border-bottom-style: double;
+}
+.tiptap-editor .md-underline[data-style="dashed"] {
+  border-bottom-style: dashed;
+}
+.tiptap-editor .md-underline[data-style="dotted"] {
+  border-bottom-style: dotted;
+}
+/* 波浪没有 border-style，只能退回 text-decoration（长注音时会有小缺口） */
+.tiptap-editor .md-underline[data-style="wavy"] {
+  border-bottom: none;
+  padding-bottom: 0;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: none;
+}
+
+/**
  * 平假名注音 {{Ruby|漢字|かんじ}}
  *
  * DOM 刻意是**单个 span + 单个文本节点**，注音放在 data-rt 属性里、由 ::after 画到上方。

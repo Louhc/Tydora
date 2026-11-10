@@ -2171,6 +2171,8 @@ function ShortcutsSettingsContent() {
     "quick-open": t("settings.shortcuts.labels.quick-open"),
     "command-palette": t("settings.shortcuts.labels.command-palette"),
     "open-settings": t("settings.shortcuts.labels.open-settings"),
+    find: t("settings.shortcuts.labels.find"),
+    replace: t("settings.shortcuts.labels.replace"),
   };
   const filteredShortcuts = shortcuts.filter((s) => {
     const query = search.toLowerCase();
@@ -2257,7 +2259,8 @@ function ShortcutsSettingsContent() {
   };
 
   const saveShortcut = () => {
-    if (editingId === null || editingKeys.length === 0) return;
+    // 允许编辑态下保存"空键位" ✓ —— 这就是「不设置快捷键」选项 ✓
+    if (editingId === null) return;
 
     setShortcuts((prev) =>
       prev.map((s) => (s.id === editingId ? { ...s, keys: [...editingKeys] } : s))
@@ -2273,6 +2276,13 @@ function ShortcutsSettingsContent() {
         prev.map((s) => (s.id === id ? { ...s, keys: [...defaultShortcut.keys] } : s))
       );
     }
+  };
+
+  /** 「不设置快捷键」✓：把该条目的键位清空（空数组在 matchShortcut 里恒不匹配 ✓） */
+  const clearShortcut = (id: string) => {
+    setShortcuts((prev) => prev.map((s) => (s.id === id ? { ...s, keys: [] } : s)));
+    setEditingId(null);
+    setEditingKeys([]);
   };
 
   const resetAll = () => {
@@ -2339,6 +2349,16 @@ function ShortcutsSettingsContent() {
                         ) : (
                           <span className="settings-shortcut-hint">{t("settings.shortcuts.pressKeys")}</span>
                         )}
+                        <button
+                          className="settings-shortcut-clear"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            clearShortcut(shortcut.id);
+                          }}
+                          title={t("settings.shortcuts.clearTitle")}
+                        >
+                          ⊘
+                        </button>
                         <button className="settings-shortcut-save" onClick={(e) => { e.stopPropagation(); saveShortcut(); }}>
                           ✓
                         </button>
