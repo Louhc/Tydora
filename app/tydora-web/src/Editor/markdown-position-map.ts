@@ -163,14 +163,39 @@ class TrackingMarkdownSerializerState extends MarkdownSerializerState {
      * 注意此刻块分隔符（`\n\n`）尚未输出（由下一次 flushClose 写），所以这里记到的
      * md 偏移正好是节点输出的末尾，与下一条 marker 的 md 不同，不会被去重掉。
      */
-    if (node.isInline && node.isLeaf && !node.isText) {
+    if (node.isInline && !node.isText && (node.isLeaf || node.type.name === "ruby")) {
+      // ruby 现在带文本内容（本体是子文本，非 leaf），但它的 Markdown 字面量
+      // 仍比 PM 宽度长（多出 `{{Ruby|` 与 `|rt}}`）——不补结束 marker 的话，
+      // 读音段的偏移会被压进本体区间，搜索命中落到本体上（实测搜「する」跳到「更加」）。
       this.addMarker((pos ?? this.currentNodePos) + node.nodeSize);
     }
     this.currentNode = prevNode;
     this.currentNodePos = prevPos;
   }
 
-  override text(text: string, escape?: boolean) {
+  /**
+   * ruby 的序列化是**一次性 state.write 整段字面量**（不走 renderContent），
+   * 本体子文本不会经过 render() → 映射表缺「本体起 / 本体止」marker，
+   * 本体与读音的偏移会被一起吸附到节点右边界（搜「更加」也整块高亮 ✗）。
+   * 这里把这一次 write 拆成 前缀 / 本体 / 尾巴 三段，在两个切点补 marker：
+   * 本体段 1:1 精确映射，读音段（尾巴）吸附到节点右边界再整块兜底。
+   */
+  override write(text?: string) {
+    const node = this.currentNode;
+    if (node && node.type?.name === "ruby" && typeof text === "string" && text.startsWith("{{Ruby|")) {
+      const prefixLen = text.indexOf("|") + 1;
+      const baseLen = (node.textContent ?? "").length;
+      super.write(text.slice(0, prefixLen));
+      this.addMarker(this.currentNodePos + 1);
+      super.write(text.slice(prefixLen, prefixLen + baseLen));
+      this.addMarker(this.currentNodePos + 1 + baseLen);
+      super.write(text.slice(prefixLen + baseLen));
+      return;
+    }
+    super.write(text);
+  }
+
+  override text(text: string, escape = true) {
     const node = this.currentNode;
     const isPlainTextBlock =
       !!node && !escape && PLAIN_TEXT_BLOCK_NODES.has(node.type?.name);
@@ -179,7 +204,36 @@ class TrackingMarkdownSerializerState extends MarkdownSerializerState {
       // 块级文本从“节点起始位置 + 1”开始（围栏/分隔线已由 state.write 输出）
       this.addMarker(this.currentNodePos + 1);
     }
-    super.text(text, escape);
+    /**
+     * ⚠️ 不能直接 super.text：基类逐行循环里先 `this.write()` —— 列表续行的
+     * 缩进（delim，如有序列表硬换行后的 4 空格）在那一步才写进 out，而 render()
+     * 加的「文本起始」marker 早于它 → 列表项里每段文本的 md 起点偏小一个缩进宽，
+     * 硬换行后的搜索命中整体错位到相邻注音本体上（实测笔记 182 行搜「する」落到「更加」）。
+     * 这里复刻基类循环，在缩进落定**之后**补行内文本的起 / 止 marker。
+     * 被转义的行（ rendered 长度 ≠ 原文长度）不补 marker，避免 1:1 假设失效。
+     */
+    const markInline = !!node && node.isText && !isPlainTextBlock;
+    const lines = text.split("\n");
+    let pm = this.currentNodePos;
+    for (let i = 0; i < lines.length; i++) {
+      this.write();
+      // 与基类一致：链接前的感叹号转义
+      if (!escape && lines[i][0] == "[" && /(^|[^\\])\!$/.test(this.out)) {
+        this.out = this.out.slice(0, this.out.length - 1) + "\\!";
+      }
+      const rendered = escape
+        ? this.esc(lines[i], (this as unknown as { atBlockStart: boolean }).atBlockStart)
+        : lines[i];
+      const exact = rendered.length === lines[i].length;
+      if (markInline && exact) this.addMarker(pm);
+      this.out += rendered;
+      if (markInline && exact) this.addMarker(pm + lines[i].length);
+      pm += lines[i].length;
+      if (i != lines.length - 1) {
+        this.out += "\n";
+        pm += 1;
+      }
+    }
     if (isPlainTextBlock) {
       this.addMarker(this.currentNodePos + 1 + text.length);
     }
@@ -318,12 +372,14 @@ export function inlineLeafRangeAt(
 ): { from: number; to: number } | null {
   const size = docSize ?? doc.content.size;
   const p = Math.max(0, Math.min(pmPos, size));
+  // ruby 带文本内容（非 leaf），但读音段在 PM 里同样没有可落位坐标 → 一并整块处理
+  const isWholeBlockNode = (n: any) => !!n && n.isInline && (n.isLeaf || n.type.name === "ruby");
   try {
     const $pos = doc.resolve(p);
     const before = $pos.nodeBefore;
-    if (before && before.isInline && before.isLeaf) return { from: p - before.nodeSize, to: p };
+    if (isWholeBlockNode(before)) return { from: p - before.nodeSize, to: p };
     const after = $pos.nodeAfter;
-    if (after && after.isInline && after.isLeaf) return { from: p, to: p + after.nodeSize };
+    if (isWholeBlockNode(after)) return { from: p, to: p + after.nodeSize };
   } catch {
     /* 位置不合法时忽略 */
   }

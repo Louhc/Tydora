@@ -65,7 +65,7 @@ import { TableFloatingToolbar } from "./extensions/table-floating-toolbar";
 import { BulletListMindmap } from "./extensions/bullet-list-mindmap";
 import { HardBreakCleanup } from "./extensions/hardbreak-cleanup";
 import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFloatingToolbar";
-import { deleteCurrentLine, executeCommand, insertClipboardHtml, pasteFromClipboard } from "./extensions/custom-commands";
+import { deleteCurrentLine, executeCommand, insertClipboardHtml, insertPlainText, pasteFromClipboard, pastePlainTextFromClipboard } from "./extensions/custom-commands";
 import { normalizePathKey } from "../utils/fileName";
 import { Math as MathExtension } from "./extensions/math";
 import { installImageWordMarkRule, installEmptyParagraphRule } from "./extensions/markdown-setup";
@@ -491,9 +491,12 @@ function applyLineJumpToView(
  */
 function leafRangeStart(editor: Editor, from: number, to: number): number | null {
   if (!isEditorAlive(editor)) return null;
-  if (to !== from + 1) return null; // 行内叶子节点的 nodeSize 恒为 1
   const node = editor.state.doc.nodeAt(from);
-  if (!node || !node.isInline || !node.isLeaf || node.isText) return null;
+  if (!node || !node.isInline || node.isText) return null;
+  // 行内叶子节点 nodeSize 恒为 1；ruby 带本体文本（nodeSize = base.length + 2），
+  // 整块命中时同样折叠光标到它左侧让注音展开
+  const whole = node.isLeaf ? to === from + 1 : node.type.name === "ruby" && to === from + node.nodeSize;
+  if (!whole) return null;
   return from;
 }
 
@@ -2482,21 +2485,15 @@ const md = getMarkdownSafe(ed);
             const text = (event.clipboardData?.getData("text/plain") ?? "").replace(/\r?\n$/, "");
             event.preventDefault();
             if (text) {
-              const lines = text.split(/\r?\n/);
-              if (lines.length === 1) {
-                // 单行：以**文本**插入（不是段落节点）。
-                // 插段落会在光标处劈开当前段落并在末尾多出一个空段落，
-                // 在行末粘贴就表现为"自动换行"。insertText 是字面插入，同样不解析。
-                const view = getEditorView(editor);
-                if (view) view.dispatch(view.state.tr.insertText(text));
-              } else {
-                const content = lines.map((line) =>
-                  line
-                    ? { type: "paragraph", content: [{ type: "text", text: line }] }
-                    : { type: "paragraph" },
-                );
-                liveEditor.chain().focus().insertContent(content).run();
-              }
+              // 单行 insertText / 多行拆段落，与右键「粘贴为纯文本」同一实现
+              insertPlainText(liveEditor, text);
+            } else {
+              /**
+               * ⚠️ WebView2 下 paste 事件的 clipboardData 实测可能为空（Ctrl+V 分支
+               * 早已因此回落系统剪贴板）——纯文本分支若不回落就会"按了没反应"，
+               * 而右键菜单走 Tauri 读系统剪贴板所以正常。这里补齐同一条回落。
+               */
+              void pastePlainTextFromClipboard(liveEditor);
             }
             return true;
           }
@@ -3702,6 +3699,18 @@ const md = getMarkdownSafe(ed);
       const keys = loadShortcuts().find((s) => s.id === "paste-plain")?.keys ?? ["Ctrl", "Shift", "V"];
       if (!keys || !matchShortcut(e, keys)) return;
       plainPasteRef.current = true;
+      /**
+       * ⚠️ WebView2 可能**根本不派发 paste 事件**（浏览器加速器/native 编辑命令抢走）：
+       * 标记若 150ms 内没被 handlePaste 消费，就直接走与右键菜单完全相同的
+       * 「Tauri 读系统剪贴板 → 纯文本插入」，保证快捷键不会"按了没反应"。
+       * paste 正常到达时标记已被消费，这里不会重复插入。
+       */
+      window.setTimeout(() => {
+        if (!plainPasteRef.current) return;
+        plainPasteRef.current = false;
+        const ed = editorLiveRef.current;
+        if (isEditorAlive(ed) && ed.view.hasFocus()) void pastePlainTextFromClipboard(ed);
+      }, 150);
       window.setTimeout(() => {
         plainPasteRef.current = false;
       }, 1000);
@@ -4319,19 +4328,51 @@ const md = getMarkdownSafe(ed);
       if (mode === "sv") return;
       const el = containerRef.current;
       if (!el) return;
+      const isDefinedEditorTarget = (view: any, target: EventTarget | null, x: number, y: number): boolean => {
+        if (!(target instanceof Element) || !view.dom.contains(target) || target === view.dom) return false;
+        // gapcursor / trailingBreak 是 ProseMirror 的占位 DOM，不是用户可编辑内容。
+        if (target.closest(".ProseMirror-gapcursor, .ProseMirror-trailingBreak")) return false;
+        const block = target.closest(".ProseMirror > *") as HTMLElement | null;
+        if (!block) return false;
+        // 只接受实际落在内容块盒子内的坐标，排除编辑器底部留白及块外空白。
+        const rect = block.getBoundingClientRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      };
       const onMouseDownCapture = (e: MouseEvent) => {
         if (e.button !== 2) return;
-        // 只在编辑区正文里右键才弹菜单：顶栏、侧栏、正文外的留白等"无意义区域"不该弹
-        //（监听挂在整个容器上，不判就会在这些地方也弹出格式菜单）
         const v = getEditorView(editor);
-        if (!v || !v.dom.contains(e.target as Node)) return;
+        if (!v) return;
+        // 正文外的居中留白 / 滚动容器：同样屏蔽原生菜单并收起已开菜单。
+        if (!v.dom.contains(e.target as Node)) {
+          if (el.contains(e.target as Node)) {
+            e.preventDefault();
+            setContextMenuPos(null);
+          }
+          return;
+        }
+        // 编辑器范围内一律屏蔽原生右键菜单；空白处只关菜单、不开新菜单。
         e.preventDefault();
+        if (!isDefinedEditorTarget(v, e.target, e.clientX, e.clientY)) {
+          setContextMenuPos(null);
+          return;
+        }
         openContextMenuAt(e.clientX, e.clientY);
       };
       const onContextMenuCapture = (e: MouseEvent) => {
         const v = getEditorView(editor);
-        if (!v || !v.dom.contains(e.target as Node)) return;
+        if (!v) return;
+        if (!v.dom.contains(e.target as Node)) {
+          if (el.contains(e.target as Node)) {
+            e.preventDefault();
+            setContextMenuPos(null);
+          }
+          return;
+        }
         e.preventDefault();
+        if (!isDefinedEditorTarget(v, e.target, e.clientX, e.clientY)) {
+          setContextMenuPos(null);
+          return;
+        }
         openContextMenuAt(e.clientX, e.clientY);
       };
       /**

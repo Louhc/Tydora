@@ -734,7 +734,7 @@ export const Ruby = Node.create({
       // 输入 {{Ruby|漢字|かんじ}} / {{Ruby | 漢字 | かんじ}}（空格可选）→ 立即转成注音节点。
       // 输入阶段不涉及表格切分（那只在解析 Markdown 时发生），所以竖线写法在这里没问题。
       new InputRule({
-        find: /\{\{Ruby\s*[|:]\s*([^|{}:]+?)\s*[|:]\s*([^|{}:]+?)\}\}$/,
+        find: /\{\{Ruby\s*[|:]\s*([^|{}:\n]+?)\s*[|:]\s*([^|{}:\n]+?)\}\}$/,
         handler: ({ range, match, commands, state }) => {
           const base = match[1]?.trim();
           const rt = match[2]?.trim();

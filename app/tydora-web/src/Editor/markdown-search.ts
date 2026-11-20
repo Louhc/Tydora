@@ -94,28 +94,19 @@ export function findMarkdownMatches(markdown: string, query: string): MarkdownMa
   // ② 注音展开后再匹配一次（只在含模板时才做 ✓）
   if (markdown.includes("{{Ruby")) {
     for (const mode of ["base", "rt"] as const) {
-      const { text, map, spans } = expandRubyTemplates(markdown, mode);
+      const { text, map } = expandRubyTemplates(markdown, mode);
       for (const [s, e] of findAllRanges(text.toLowerCase(), needle)) {
         const from = map[s];
         const to = map[e - 1];
         if (from == null || to == null) continue;
         /**
-         * ⚠️ 把范围**对齐到整个注音模板** ✓。
-         *
-         * 展开后的命中可能只覆盖模板内部的几个字（例如命中 `A|X}}` 这一段 ✓），
-         * 这样的偏移拿去映射 PM 位置会**落到模板语法内部** ✗ —— 实测会抛
-         * `RangeError: Position 95 out of range` ✗。
-         * 所以只要命中与某个模板**有交集**，就把整段模板包含进来 ✓（高亮覆盖整个注音 ✓）。
+         * 保留**精确**的原文区间（不再对齐到整个模板）：
+         * 映射侧（markdown-position-map）已给 ruby 补了结束 marker，读音段偏移
+         * 会吸附到节点右边界、再由 inlineLeafRangeAt 兜底整块高亮；展开成字面量后
+         * 同一区间又能 1:1 落在读音那几个字上（搜「する」只黄「する」✓）。
+         * 越界风险由映射侧的钳制兜底，不会抛 RangeError。
          */
-        let mdFrom = from;
-        let mdTo = to + 1;
-        for (const [ts, te] of spans) {
-          if (ts < mdTo && te > mdFrom) {
-            mdFrom = Math.min(mdFrom, ts);
-            mdTo = Math.max(mdTo, te);
-          }
-        }
-        out.push({ mdFrom, mdTo });
+        out.push({ mdFrom: from, mdTo: to + 1 });
       }
     }
   }

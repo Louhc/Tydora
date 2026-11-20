@@ -315,6 +315,32 @@ function createSubmenuItems(t: (key: string) => string): SubmenuItem[] {
   ];
 }
 
+function createTableMenuItems(t: (key: string) => string): Array<SubmenuEntry | { divider: true; label: string }> {
+  const item = (name: string, key: string): SubmenuEntry => ({
+    name,
+    label: t(`editor.tableToolbar.${key}`),
+    shortcutId: null,
+    icon: ICONS.table,
+  });
+  return [
+    item("table-row-above", "insertRowAbove"),
+    item("table-row-below", "insertRowBelow"),
+    item("table-col-left", "insertColLeft"),
+    item("table-col-right", "insertColRight"),
+    { divider: true, label: "" },
+    item("table-row-delete", "deleteRow"),
+    item("table-col-delete", "deleteCol"),
+    item("table-delete", "deleteTable"),
+    { divider: true, label: "" },
+    item("table-merge", "mergeCells"),
+    item("table-split", "splitCell"),
+    { divider: true, label: "" },
+    item("table-align-left", "alignLeft"),
+    item("table-align-center", "alignCenter"),
+    item("table-align-right", "alignRight"),
+  ];
+}
+
 function getShortcutLabel(shortcutId: string | null, shortcuts: ShortcutItem[]): string {
   if (!shortcutId) return "";
   const item = shortcuts.find((s) => s.id === shortcutId);
@@ -388,12 +414,63 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null);
   const [submenuPos, setSubmenuPos] = useState<{ x: number; y: number } | null>(null);
   const [shortcuts, setShortcuts] = useState<ShortcutItem[]>([]);
+  const [lastTextColor, setLastTextColor] = useState(TEXT_COLORS[0]?.color ?? "#1c7ed6");
+  const [lastUnderlineStyle, setLastUnderlineStyle] = useState<
+    "straight" | "wavy" | "double" | "dashed" | "dotted"
+  >("straight");
 
   // 荧光笔的当前颜色 / 模式与编辑器共用同一份模块级状态（Editor/highlighter.ts）
   const highlighterColor = useSyncExternalStore(subscribeHighlighter, getHighlighterColor);
   const highlighterMode = useSyncExternalStore(subscribeHighlighter, getHighlighterMode);
 
-  const iconRows = createIconRows(t);
+  // 表格操作菜单适用于：表格内折叠光标，或 CellSelection 选中的多个单元格。
+  // 普通文本选区（即使文本位于表格单元格内）仍保留原来的文本格式菜单。
+  const selection = editor?.state.selection;
+  const isCellSelection = !!selection && (
+    "$anchorCell" in selection || selection.constructor.name === "CellSelection"
+  );
+  const inTable = !!editor && !!selection && (
+    isCellSelection || (
+      selection.empty && (editor.isActive("tableCell") || editor.isActive("tableHeader"))
+    )
+  );
+  const underlineLastIcon = {
+    straight: ICONS.underline,
+    wavy: ICONS.underlineWavy,
+    double: ICONS.underlineDouble,
+    dashed: ICONS.underlineDashed,
+    dotted: ICONS.underlineDotted,
+  }[lastUnderlineStyle];
+  const iconRows = useMemo(() => {
+    const rows = createIconRows(t);
+    const [bold, italic, strike, inlineCode, ruby, link] = rows[1];
+    const textColor = {
+      name: "text-color-last",
+      label: t("editor.contextMenu.textColor"),
+      shortcutId: null,
+      icon: ICONS.textColor,
+    };
+    const underline = {
+      name: "underline-last",
+      label: t("editor.contextMenu.underline"),
+      shortcutId: null,
+      icon: underlineLastIcon,
+    };
+    // 共 18 个按钮严格分成 3 行，每行 6 个；相关操作仍保持连续。
+    const allItems = [
+      ...rows[0],
+      bold,
+      italic,
+      strike,
+      inlineCode,
+      link,
+      ruby,
+      textColor,
+      underline,
+      ...rows[2],
+    ];
+    return [allItems.slice(0, 6), allItems.slice(6, 12), allItems.slice(12, 18)];
+  }, [t, underlineLastIcon]);
 
   // 「高亮/ 荧光笔」子菜单：模式开关+ 6 色调色板（带勾选态）+ 清除
   const highlightSubmenu = useMemo<SubmenuItem>(() => ({
@@ -481,6 +558,7 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     };
   }, [t]);
 
+  const tableMenuItems = useMemo(() => createTableMenuItems(t), [t]);
   const submenuItems = useMemo(
     () => [...createSubmenuItems(t), highlightSubmenu, textColorSubmenu, underlineSubmenu],
     [t, highlightSubmenu, textColorSubmenu, underlineSubmenu],
@@ -491,6 +569,18 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       setShortcuts(loadShortcuts());
     }
   }, [position]);
+
+  // 键盘快捷键、工具栏等其他入口改变下划线样式时，同步顶部快捷按钮图标。
+  useEffect(() => {
+    const handleUnderlineStyleChanged = (event: Event) => {
+      const style = (event as CustomEvent<{ style?: string }>).detail?.style;
+      if (["straight", "wavy", "double", "dashed", "dotted"].includes(style ?? "")) {
+        setLastUnderlineStyle(style as typeof lastUnderlineStyle);
+      }
+    };
+    window.addEventListener("underline-style-changed", handleUnderlineStyleChanged);
+    return () => window.removeEventListener("underline-style-changed", handleUnderlineStyleChanged);
+  }, []);
 
   // 子菜单渲染后校正位置
   useEffect(() => {
@@ -613,7 +703,25 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
 
   const handleItemClick = (name: string) => {
     if (!editor) return;
-    executeCommand(name, editor);
+    if (name === "text-color-last") {
+      handleTextColor(lastTextColor);
+      return;
+    }
+    if (name === "underline-last") {
+      handleItemClick(`underline-${lastUnderlineStyle}`);
+      return;
+    }
+    if (name.startsWith("underline-") &&
+      ["straight", "wavy", "double", "dashed", "dotted"].includes(name.slice("underline-".length))) {
+      setLastUnderlineStyle(name.slice("underline-".length) as typeof lastUnderlineStyle);
+    }
+    if (name === "table-merge") {
+      editor.chain().focus().mergeCells().run();
+    } else if (name === "table-split") {
+      editor.chain().focus().splitCell().run();
+    } else {
+      executeCommand(name, editor);
+    }
     onClose();
     setActiveSubmenu(null);
   };
@@ -657,6 +765,7 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
    * 同样在上色后收掉选区，否则看不到颜色效果。
    */
   const handleTextColor = (color: string) => {
+    setLastTextColor(color);
     if (editor) {
       editor.chain().focus().setTextColor(color).run();
     }
@@ -760,8 +869,8 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       }}
       style={{ left: position.x, top: position.y }}
     >
-      {/* 三行图标按钮 */}
-      {iconRows.map((row, rowIdx) => (
+      {/* 表格右键菜单专注于表格编辑；普通编辑器右键菜单保留剪贴板/格式按钮。 */}
+      {!inTable && iconRows.map((row, rowIdx) => (
         <div key={`row-${rowIdx}`} className="context-menu-icon-row">
           {row.map((item) => {
             const shortcutLabel = getShortcutLabel(item.shortcutId, shortcuts);
@@ -795,10 +904,30 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
         </div>
       ))}
 
-      <div className="context-menu-divider" />
+      {!inTable && <div className="context-menu-divider" />}
+
+      {inTable && tableMenuItems.map((sub, subIdx) => {
+        if ("divider" in sub && sub.divider) {
+          return <div key={`table-div-${subIdx}`} className="context-menu-divider" />;
+        }
+        const tableItem = sub as SubmenuEntry;
+        return (
+          <button
+            key={tableItem.name}
+            className="context-menu-item"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              if (tableItem.name) handleItemClick(tableItem.name);
+            }}
+          >
+            <span className="context-menu-icon">{tableItem.icon}</span>
+            <span className="context-menu-label">{tableItem.label}</span>
+          </button>
+        );
+      })}
 
       {/* 标题和插入子菜单 */}
-      {submenuItems.map((item) => (
+      {!inTable && submenuItems.map((item) => (
         <div
           key={item.name}
           className="context-menu-item-wrapper"

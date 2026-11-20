@@ -58,6 +58,13 @@ if (
   window.addEventListener("blur", clear);
 })();
 
+// 屏蔽 WebView2 / 浏览器原生右键菜单（返回 / 刷新 / 另存为 / 检查…）。
+// Tydora 的右键行为全部由自定义菜单承担（编辑器、文件树、终端、白板等）；
+// 「未定义右键行为的区域」右键应当什么都不弹，而不是弹浏览器默认菜单。
+// 捕获阶段 preventDefault 只取消默认菜单、不阻断传播，
+// 各自定义菜单自己的 contextmenu 监听仍会正常打开。
+document.addEventListener("contextmenu", (e) => e.preventDefault(), true);
+
 // 开始接收 Rust boot-timing 事件（异步：不阻塞当前模块解析）
 connectRustBootTiming();
 bootStamp("rust_boot_listener_registered");

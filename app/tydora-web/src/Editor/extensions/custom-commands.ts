@@ -255,6 +255,55 @@ export function insertClipboardHtml(editor: Editor, html: string): boolean {
 }
 
 /**
+ * 纯文本插入（右键「粘贴为纯文本」与 Ctrl+Shift+V 共用）。
+ *
+ * 单行用 insertText（字面插入、不劈段落、不会在行末多出空行）；
+ * 多行按段落节点插入（文本节点里不能有换行）。两者都不解析 Markdown。
+ */
+export function insertPlainText(editor: Editor, text: string): void {
+  if (!editor || editor.isDestroyed || !text) return;
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 1) {
+    const view = editor.view;
+    view.dispatch(view.state.tr.insertText(text));
+    return;
+  }
+  const content = lines.map((line) =>
+    line
+      ? { type: "paragraph", content: [{ type: "text", text: line }] }
+      : { type: "paragraph" },
+  );
+  editor.chain().focus().insertContent(content).run();
+}
+
+/**
+ * 读**系统剪贴板**的纯文本并插入（右键「粘贴为纯文本」入口）。
+ *
+ * 读剪切板优先用 Tauri 的 clipboard 插件：它走 Rust 侧，**不会触发浏览器的
+ * 剪贴板读取权限弹窗** —— navigator.clipboard.readText 与 execCommand("paste")
+ * 都会弹权限窗（这正是"右键点粘贴会请求权限"的来源），所以它们只作兜底。
+ *
+ * Ctrl+Shift+V 的 paste 事件分支在 `clipboardData` 为空时（WebView2 实测可能为空）
+ * 也回落到本函数，保证与右键菜单行为一致。
+ */
+export async function pastePlainTextFromClipboard(editor: Editor): Promise<void> {
+  if (!editor || editor.isDestroyed) return;
+  let text = "";
+  try {
+    const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+    text = (await readText()) ?? "";
+  } catch (err) {
+    console.warn("[paste-plain] Tauri 剪贴板读取失败，回退 navigator.clipboard:", err);
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      text = "";
+    }
+  }
+  insertPlainText(editor, text);
+}
+
+/**
  * 从**系统剪贴板**粘贴（右键「粘贴」与 Ctrl+V 共用）。
  *
  * ⚠️ 为什么不用 paste 事件里的 `clipboardData`：WebView2 下 Ctrl+V 的事件里
@@ -459,6 +508,7 @@ export function executeCommand(name: string, editor: Editor | null) {
     case "underline-dashed":
     case "underline-dotted": {
       const ulStyle = name.replace("underline-", "");
+      window.dispatchEvent(new CustomEvent("underline-style-changed", { detail: { style: ulStyle } }));
       /**
        * 同一样式再点一次 = 取消；换成另一种样式 = **替换**（不是叠加）。
        * ProseMirror 的 mark 同一类型只能有一个，所以 setMark 天然覆盖旧的 ✓；
@@ -580,38 +630,17 @@ export function executeCommand(name: string, editor: Editor | null) {
     case "table-col-delete":
       chain.deleteColumn().run();
       break;
+    case "table-delete":
+      chain.deleteTable().run();
+      break;
     case "table-align-left":
-      editor.chain().focus().command(({ tr, state }) => {
-        const { $from } = state.selection;
-        const cell = $from.node(-1);
-        if (cell && (cell.type.name === "tableCell" || cell.type.name === "tableHeader")) {
-          tr.setNodeMarkup($from.before(-1), undefined, { ...cell.attrs, textAlign: "left" });
-          return true;
-        }
-        return false;
-      }).run();
+      editor.chain().focus().setCellAttribute("align", "left").run();
       break;
     case "table-align-center":
-      editor.chain().focus().command(({ tr, state }) => {
-        const { $from } = state.selection;
-        const cell = $from.node(-1);
-        if (cell && (cell.type.name === "tableCell" || cell.type.name === "tableHeader")) {
-          tr.setNodeMarkup($from.before(-1), undefined, { ...cell.attrs, textAlign: "center" });
-          return true;
-        }
-        return false;
-      }).run();
+      editor.chain().focus().setCellAttribute("align", "center").run();
       break;
     case "table-align-right":
-      editor.chain().focus().command(({ tr, state }) => {
-        const { $from } = state.selection;
-        const cell = $from.node(-1);
-        if (cell && (cell.type.name === "tableCell" || cell.type.name === "tableHeader")) {
-          tr.setNodeMarkup($from.before(-1), undefined, { ...cell.attrs, textAlign: "right" });
-          return true;
-        }
-        return false;
-      }).run();
+      editor.chain().focus().setCellAttribute("align", "right").run();
       break;
 
     // 内容目录：插入 [TOC] 节点（IR 模式下由 toc 扩展的 NodeView 渲染真实目录）
@@ -690,42 +719,9 @@ export function executeCommand(name: string, editor: Editor | null) {
     case "paste-plain": {
       /**
        * 粘贴为纯文本（Ctrl+Shift+V 与右键菜单的「粘贴为纯文本」）。
-       *
-       * 读剪切板优先用 Tauri 的 clipboard 插件：它走 Rust 侧，**不会触发浏览器的
-       * 剪贴板读取权限弹窗** —— navigator.clipboard.readText 与 execCommand("paste")
-       * 都会弹权限窗（这正是"右键点粘贴会请求权限"的来源），所以它们只作兜底。
-       *
-       * 插入方式：单行用 insertText（字面插入、不劈段落、不会在行末多出空行）；
-       * 多行按段落节点插入（文本节点里不能有换行）。两者都不解析 Markdown。
+       * 读剪贴板 + 插入的统一实现见 pastePlainTextFromClipboard / insertPlainText。
        */
-      void (async () => {
-        if (!editor || editor.isDestroyed) return;
-        let text = "";
-        try {
-          const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
-          text = (await readText()) ?? "";
-        } catch (err) {
-          console.warn("[paste-plain] Tauri 剪贴板读取失败，回退 navigator.clipboard:", err);
-          try {
-            text = await navigator.clipboard.readText();
-          } catch {
-            text = "";
-          }
-        }
-        if (!text) return;
-        const lines = text.split(/\r?\n/);
-        if (lines.length === 1) {
-          const view = editor.view;
-          view.dispatch(view.state.tr.insertText(text));
-          return;
-        }
-        const content = lines.map((line) =>
-          line
-            ? { type: "paragraph", content: [{ type: "text", text: line }] }
-            : { type: "paragraph" },
-        );
-        editor.chain().focus().insertContent(content).run();
-      })();
+      void pastePlainTextFromClipboard(editor);
       break;
     }
     case "delete":

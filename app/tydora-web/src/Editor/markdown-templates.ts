@@ -65,10 +65,11 @@ export function matchTemplateAt(text: string, pos: number): TemplateMatch | null
   if (!SEPARATORS.includes(text[i] ?? "")) return null;
   i++;
 
-  // 从第一个分隔符之后开始，配平扫描到与本模板配对的 `}}`
+  // Ruby 是严格单行语法；换行后不能继续寻找配对的 `}}`。
   const innerStart = i;
   let depth = 0;
   while (i < text.length) {
+    if (name === "Ruby" && text[i] === "\n") return null;
     if (text.charCodeAt(i) === 123 && text.charCodeAt(i + 1) === 123) {
       depth++;
       i += 2;
@@ -248,7 +249,10 @@ function matchTemplateErrorAt(text: string, pos: number): { html: string; end: n
   const head = /^\{\{\s*(Ruby|Color|Hilite|Straight|Wavy|Double|Dashed|Dotted)\b/.exec(text.slice(pos));
   if (!head) return null;
   const closeIdx = text.indexOf("}}", pos);
-  const end = closeIdx >= 0 ? closeIdx + 2 : text.length;
+  const newlineIdx = text.indexOf("\n", pos);
+  // Ruby 不跨行：错误块只覆盖当前行，下一行仍可独立编辑。
+  const endsAtNewline = newlineIdx >= 0 && (closeIdx < 0 || newlineIdx < closeIdx);
+  const end = endsAtNewline ? newlineIdx : closeIdx >= 0 ? closeIdx + 2 : text.length;
   const raw = text.slice(pos, end);
   // 注音本体/读音里出现嵌套模板是最常见的一种；其余给通用文案
   const reason =
