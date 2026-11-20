@@ -24,6 +24,7 @@ export const TEMPLATE_NAMES = [
   "Ruby",
   "Color",
   "Hilite",
+  "Font",
   "Straight",
   "Wavy",
   "Double",
@@ -246,7 +247,7 @@ function flipRubyBaseTemplate(m: TemplateMatch): string | null {
  */
 function matchTemplateErrorAt(text: string, pos: number): { html: string; end: number } | null {
   if (text.charCodeAt(pos) !== 123 || text.charCodeAt(pos + 1) !== 123) return null;
-  const head = /^\{\{\s*(Ruby|Color|Hilite|Straight|Wavy|Double|Dashed|Dotted)\b/.exec(text.slice(pos));
+  const head = /^\{\{\s*(Ruby|Color|Hilite|Font|Straight|Wavy|Double|Dashed|Dotted)\b/.exec(text.slice(pos));
   if (!head) return null;
   const closeIdx = text.indexOf("}}", pos);
   const newlineIdx = text.indexOf("\n", pos);
@@ -342,6 +343,34 @@ export function registerTemplateRenderer(
   render: (match: TemplateMatch, rewrittenInner: string) => string | null,
 ): void {
   renderers.set(name, render);
+}
+
+/**
+ * 用已注册渲染器转换一个模板（mark 类：Color / Hilite / Font / 下划线）。
+ * 未注册（Ruby / 未知模板）返回 null —— 调用方原样保留。
+ * 供「输入 / 粘贴即时渲染」插件复用，保证与 Markdown 解析同一条转换路径。
+ */
+export function renderRegisteredTemplate(
+  match: TemplateMatch,
+  rewrittenInner: string,
+): string | null {
+  return renderers.get(match.name)?.(match, rewrittenInner) ?? null;
+}
+
+/** 「看着像模板但解析不了」的错误块 HTML（与 rewriteTemplates 内同一判据/文案） */
+export function templateErrorHtml(raw: string, name: TemplateName): string {
+  const reason = name === "Ruby" ? "⚠ 错误：本体里不能再放模板" : "⚠ 错误：模板写法无法解析";
+  const safe = raw.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  return `<span data-template-error data-reason="${reason}">${safe}</span>`;
+}
+
+/**
+ * 即时渲染插件用：pos 处若是"看着像模板但不配平"的开头，返回错误块应覆盖的终点
+ * （与 matchTemplateErrorAt 同判据）；否则 null。插件据此**整段跳过**，
+ * 避免把坏模板内部的嵌套模板单独转换掉（那会与刷新后的错误块判据不一致）。
+ */
+export function templateErrorEndAt(text: string, pos: number): number | null {
+  return matchTemplateErrorAt(text, pos)?.end ?? null;
 }
 
 /**
@@ -447,6 +476,33 @@ export function hiliteHtmlTags(color: string | null | undefined, palette: Palett
 /** `Hilite`（高亮）的 mark HTML：与 Highlight 的渲染一致（`data-color` + 背景色 + 继承前景） */
 export function hiliteTemplateHtml(color: string, inner: string): string {
   return `<mark data-color="${escAttr(color)}">${inner}</mark>`;
+}
+
+/**
+ * 字体族参数白名单：字母 / 数字 / 中日韩文字 / 空格 / 连字符 / 下划线 / 逗号 / 引号
+ * （带空格的字体名需要引号，如 `"Segoe UI"`）。
+ * 拒绝 `;` `:` `{}` `()` `<>` `\` 等 —— 参数会被拼进生成的 HTML / style，防注入。
+ */
+const FONT_FAMILY_PARAM_RE = /^[\p{L}\p{N} _\-'",]+$/u;
+
+/** 模板参数 → 字体族：trim 后过白名单；不合法返回 null（调用方原样留作文本）。 */
+export function decodeFontParam(param: string): string | null {
+  const p = String(param ?? "").trim();
+  if (!p || !FONT_FAMILY_PARAM_RE.test(p)) return null;
+  return p;
+}
+
+/** `Font`（字体族）的 mark HTML：与 font-family.ts 的 renderHTML 一致（`data-font` 优先） */
+export function fontTemplateHtml(family: string, inner: string): string {
+  return `<span data-font="${escAttr(family)}">${inner}</span>`;
+}
+
+/**
+ * 字体族的 HTML 开/闭标签（内容不能写成模板时用）。
+ * 只写 `data-font`、不写 style —— 理由同 colorHtmlTags（避免行内 style 被 `#标签` 规则劈开）。
+ */
+export function fontHtmlTags(family: string | null | undefined): [string, string] {
+  return [family ? `<span data-font="${escAttr(family)}">` : "<span>", "</span>"];
 }
 
 /** 下划线样式（模板名 → data-style） */

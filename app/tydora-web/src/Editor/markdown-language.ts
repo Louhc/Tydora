@@ -18,7 +18,7 @@ export const templateShorthandTag = Tag.define();
 export const templateErrorShorthandTag = Tag.define();
 
 const TEMPLATE_NAMES = new Set([
-  "Ruby", "Color", "Hilite", "Straight", "Wavy", "Double", "Dashed", "Dotted",
+  "Ruby", "Color", "Hilite", "Font", "Straight", "Wavy", "Double", "Dashed", "Dotted",
 ]);
 
 /** 从一处 `{{` 开始扫描同层配对的 `}}`；未闭合时返回当前行尾并标记错误。 */
@@ -58,7 +58,7 @@ function isValidTemplate(text: string): boolean {
   const m = /^\{\{\s*([A-Za-z]+)\s*/.exec(text);
   if (!m || !TEMPLATE_NAMES.has(m[1])) return false;
   const separators = topLevelSeparatorCount(text.slice(m[0].length));
-  const required = m[1] === "Ruby" || m[1] === "Color" || m[1] === "Hilite" ? 2 : 3;
+  const required = m[1] === "Ruby" || m[1] === "Color" || m[1] === "Hilite" || m[1] === "Font" ? 2 : 3;
   if (separators < required) return false;
 
   // 嵌套模板也必须各自合法：不能因为外层配平，就把错误的内层吞掉。

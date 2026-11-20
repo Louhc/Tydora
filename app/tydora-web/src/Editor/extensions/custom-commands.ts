@@ -36,22 +36,8 @@ function selectionHasMark(editor: Editor, markName: string): boolean {
   return seen && all;
 }
 
-/**
- * 收掉选区（折叠到原选区 head）。
- * 颜色 / 高亮是直接改变文字外观的操作，选区留着的话浏览器会用蓝色覆盖层盖住效果，
- * 等于「点了没反应」。只处理非折叠选区：折叠选区不能动，
- * 否则会清掉 setMark 记进 storedMarks 的待用颜色。
- */
-function collapseSelection(editor: Editor) {
-  if (!editor.isEditable) return;
-  const { selection } = editor.state;
-  if (selection.empty) return;
-  try {
-    editor.commands.setTextSelection(selection.head);
-  } catch {
-    /* 表格单元格等特殊选区取不到合法文本位置：保持原样 */
-  }
-}
+// 颜色 / 高亮 / 下划线 / 字体等改文字属性的操作与加粗同款：**保持选区**，
+// 方便连着套多个格式（用户明确要求）；故此处不再提供收选区的 helper。
 
 /**
  * 收集一个块里所有「换行」的位置（相对块起点的偏移）。
@@ -258,7 +244,9 @@ export function insertClipboardHtml(editor: Editor, html: string): boolean {
  * 纯文本插入（右键「粘贴为纯文本」与 Ctrl+Shift+V 共用）。
  *
  * 单行用 insertText（字面插入、不劈段落、不会在行末多出空行）；
- * 多行按段落节点插入（文本节点里不能有换行）。两者都不解析 Markdown。
+ * 多行按段落节点插入（文本节点里不能有换行）。两者都不解析 Markdown 格式。
+ * 但 `{{…}}` 模板字面量由 template-live 插件即时渲染（与逐字输入等价，用户要求）；
+ * 「纯」只针对 Markdown 格式与 HTML 结构，不针对 Tydora 自己的行内语法。
  */
 export function insertPlainText(editor: Editor, text: string): void {
   if (!editor || editor.isDestroyed || !text) return;
@@ -491,16 +479,17 @@ export function executeCommand(name: string, editor: Editor | null) {
       chain.toggleHighlight({ color: hlColor }).run();
       // 注音这类**带内容的行内节点**不会被 setMark 带上 mark ✗ → 单独补一次 ✓
       applyMarkToInlineNodes(editor, "highlight", { color: hlColor });
-      collapseSelection(editor);
+      // 与加粗同款：套完格式保持选区，方便连着套多个格式（用户要求）
       break;
     case "highlight-clear":
       chain.unsetHighlight().run();
       applyMarkToInlineNodes(editor, "highlight", null);
-      collapseSelection(editor);
       break;
     case "text-color-clear":
       chain.unsetTextColor().run();
-      collapseSelection(editor);
+      break;
+    case "font-family-clear":
+      chain.unsetFontFamily().run();
       break;
     case "underline-straight":
     case "underline-wavy":
@@ -523,13 +512,12 @@ export function executeCommand(name: string, editor: Editor | null) {
         // 注音这类带内容的行内节点也要带上（与高亮同一处理）
         applyMarkToInlineNodes(editor, "underline", attrs);
       }
-      collapseSelection(editor);
+      // 与加粗同款：套完下划线保持选区（用户要求）
       break;
     }
     case "underline-clear":
       chain.unsetMark("underline").run();
       applyMarkToInlineNodes(editor, "underline", null);
-      collapseSelection(editor);
       break;
     case "highlighter-mode":
       // 荧光笔模式（划选即上色）由 Editor/highlighter.ts 的模块级状态驱动，

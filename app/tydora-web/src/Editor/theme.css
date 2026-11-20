@@ -3082,6 +3082,67 @@ html:not([data-code-block-toolbar="classic"]) .code-block-content {
   padding: 4px 0;
 }
 
+/* 字体子菜单：系统字体可达数百项 → 限高滚动；顶部留搜索框。
+   padding-top 归零：避免 sticky 工具条上方留一条会滚出内容的缝。 */
+.context-menu-submenu-font {
+  max-height: 400px;
+  overflow-y: auto;
+  min-width: 220px;
+  padding-top: 0;
+}
+
+/* 字体子菜单顶部工具条：左语言下拉 + 右搜索框（语言收进下拉，不铺芯片）。
+   sticky 顶住滚动容器：滚动字体列表时工具条不动，只有下面列表滚。 */
+.context-menu-font-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 6px;
+  /* 不透明：先取主题色，再用相对颜色语法把 alpha 强制为 1，
+     即使自定义主题给了半透明 --bg-primary 也不会透出下面滚动的字体列表 */
+  background: var(--bg-primary, #fff);
+  background: rgb(from var(--bg-primary, #fff) r g b / 1);
+  border-bottom: 1px solid var(--border, #e0e0e0);
+}
+
+.context-menu-font-lang-select {
+  flex: 0 0 auto;
+  max-width: 96px;
+  padding: 4px 4px;
+  font-size: 12px;
+  color: var(--text-primary, #333);
+  background: var(--bg-secondary, #f5f5f5);
+  background: rgb(from var(--bg-secondary, #f5f5f5) r g b / 1);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+}
+
+.context-menu-font-lang-select:focus {
+  border-color: var(--accent, #4c6ef5);
+}
+
+.context-menu-font-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-primary, #333);
+  background: var(--bg-secondary, #f5f5f5);
+  background: rgb(from var(--bg-secondary, #f5f5f5) r g b / 1);
+  border: 1px solid var(--border, #e0e0e0);
+  border-radius: 6px;
+  outline: none;
+}
+
+.context-menu-font-filter:focus {
+  border-color: var(--accent, #4c6ef5);
+}
+
 /* 表格浮动工具栏 */
 .table-floating-toolbar {
   display: flex;

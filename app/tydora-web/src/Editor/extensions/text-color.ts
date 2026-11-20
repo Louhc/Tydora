@@ -67,6 +67,10 @@ export const TextColor = Mark.create({
         // 保存时白白多出一对 `<span>`。
         getAttrs: (element) => {
           const el = element as HTMLElement;
+          // 下划线 span 也带 data-color（那是下划线颜色，不是文字颜色）。
+          // 本规则 tag 是裸 span、排在 span.md-underline 之前，会先匹配并把
+          // 下划线吃成文字颜色 mark（丢线型/粗细）——这里显式让位。
+          if (el.classList.contains("md-underline")) return false;
           const color =
             el.getAttribute("data-color")
             || getStyleProperty(el, "color")

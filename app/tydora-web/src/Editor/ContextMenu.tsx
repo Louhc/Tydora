@@ -13,6 +13,7 @@ import {
   subscribeHighlighter,
 } from "./highlighter";
 import { TEXT_COLORS } from "./extensions/text-color";
+import { listSystemFonts, type SystemFontInfo } from "../utils/systemFonts";
 
 interface ContextMenuProps {
   editor: Editor | null;
@@ -41,6 +42,8 @@ interface SubmenuEntry {
   swatch?: string;
   /** 勾选态（当前荧光笔颜色/ 模式开关） */
   checked?: boolean;
+  /** 字体预览：标签用该字体族渲染（字体子菜单用） */
+  previewFont?: string;
 }
 
 interface SubmenuItem {
@@ -55,6 +58,29 @@ const HIGHLIGHT_COLOR_PREFIX = "highlight-color:";
 
 /** 文字颜色调色板选项的name 前缀（同上）。*/
 const TEXT_COLOR_PREFIX = "text-color:";
+
+/** 字体子菜单选项的 name 前缀（同上，点击时直接 setFontFamily）。 */
+const FONT_FAMILY_PREFIX = "font-family:";
+
+/** 系统字体列表不可用时（纯 Web / 读取失败）的兜底常用族（附经验覆盖） */
+const FALLBACK_FONTS: Array<{ family: string; scripts: string[] }> = [
+  { family: "Microsoft YaHei", scripts: ["han", "latin"] },
+  { family: "SimSun", scripts: ["han", "latin"] },
+  { family: "SimHei", scripts: ["han", "latin"] },
+  { family: "KaiTi", scripts: ["han", "latin"] },
+  { family: "Segoe UI", scripts: ["latin", "cyrillic", "greek"] },
+  { family: "Arial", scripts: ["latin", "cyrillic", "greek"] },
+  { family: "Consolas", scripts: ["latin", "cyrillic"] },
+  { family: "Courier New", scripts: ["latin", "cyrillic"] },
+];
+
+/** 语言筛选芯片的固定顺序（与后端 SCRIPT_ORDER 一致） */
+const FONT_LANG_ORDER = [
+  "han", "kana", "hangul", "latin", "cyrillic", "greek", "arabic", "hebrew", "devanagari", "thai",
+];
+
+/** 字体子菜单面板最大高度（系统字体可达数百，必须滚动） */
+const FONT_SUBMENU_MAX_HEIGHT = 400;
 
 const ICONS = {
   cut: (
@@ -77,6 +103,13 @@ const ICONS = {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
       <path d="M9 12h6M12 12v6" />
+    </svg>
+  ),
+  // 字体：大小两个字母 Aa（与设置里字体选择同一意象）
+  fontFamily: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <text x="7" y="17" textAnchor="middle" fontSize="14" fill="currentColor" stroke="none">A</text>
+      <text x="16" y="17" textAnchor="middle" fontSize="10" fill="currentColor" stroke="none">a</text>
     </svg>
   ),
   // 注音（Ruby）：汉字上方一条小横线（表示读音）+ 「あ」本体 —— 18px 下也一眼可辨
@@ -415,6 +448,11 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   const [submenuPos, setSubmenuPos] = useState<{ x: number; y: number } | null>(null);
   const [shortcuts, setShortcuts] = useState<ShortcutItem[]>([]);
   const [lastTextColor, setLastTextColor] = useState(TEXT_COLORS[0]?.color ?? "#1c7ed6");
+  // 字体子菜单：系统字体列表（模块级缓存）+ 面板内过滤词
+  const [systemFonts, setSystemFonts] = useState<SystemFontInfo[]>([]);
+  const [fontFilter, setFontFilter] = useState("");
+  // 语言筛选（"all" = 不筛）；芯片仅在后端给出 scripts 时显示
+  const [fontLang, setFontLang] = useState("all");
   const [lastUnderlineStyle, setLastUnderlineStyle] = useState<
     "straight" | "wavy" | "double" | "dashed" | "dotted"
   >("straight");
@@ -558,11 +596,69 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     };
   }, [t]);
 
+  // 当前选区的字体族（用于字体子菜单勾选态）
+  const activeFamily = (editor?.getAttributes("fontFamily")?.family as string | undefined) ?? "";
+
+  // 「字体」子菜单：默认字体（清除）+ 语言筛选芯片 + 搜索框 + 系统字体（标签以该字体预览）。
+  // 语言覆盖来自后端 cmap 实测（scripts）；旧后端无 scripts 时不显示芯片（不能误筛）。
+  // 系统字体可达数百项 → 面板限高滚动（见 theme.css .context-menu-submenu-font）。
+  const fontSource = useMemo(
+    () => (systemFonts.length > 0 ? systemFonts : FALLBACK_FONTS),
+    [systemFonts],
+  );
+  const fontLangs = useMemo(() => {
+    const present = new Set<string>();
+    for (const f of fontSource) for (const s of f.scripts ?? []) present.add(s);
+    return FONT_LANG_ORDER.filter((s) => present.has(s));
+  }, [fontSource]);
+  const fontSubmenu = useMemo<SubmenuItem>(() => {
+    const q = fontFilter.trim().toLowerCase();
+    const byLang =
+      fontLang === "all" || fontLangs.length === 0
+        ? fontSource
+        : fontSource.filter((f) => (f.scripts ?? []).includes(fontLang));
+    const families = q ? byLang.filter((f) => f.family.toLowerCase().includes(q)) : byLang;
+    const items: Array<SubmenuEntry | { divider: true; label: string }> = [
+      {
+        name: "font-family-clear",
+        label: t("editor.contextMenu.fontDefault"),
+        shortcutId: null,
+        icon: ICONS.eraser,
+        checked: !activeFamily,
+      },
+      { divider: true, label: "" },
+      ...families.map((f) => ({
+        name: `${FONT_FAMILY_PREFIX}${f.family}`,
+        label: f.family,
+        shortcutId: null,
+        previewFont: f.family,
+        checked: f.family === activeFamily,
+      })),
+    ];
+    return {
+      name: "font-family",
+      label: t("editor.contextMenu.font"),
+      icon: ICONS.fontFamily,
+      submenu: items,
+    };
+  }, [t, fontSource, fontLangs, fontLang, fontFilter, activeFamily]);
+
   const tableMenuItems = useMemo(() => createTableMenuItems(t), [t]);
   const submenuItems = useMemo(
-    () => [...createSubmenuItems(t), highlightSubmenu, textColorSubmenu, underlineSubmenu],
-    [t, highlightSubmenu, textColorSubmenu, underlineSubmenu],
+    () => [...createSubmenuItems(t), highlightSubmenu, textColorSubmenu, fontSubmenu, underlineSubmenu],
+    [t, highlightSubmenu, textColorSubmenu, fontSubmenu, underlineSubmenu],
   );
+
+  // 字体列表只在菜单首次挂载时拉一次（listSystemFonts 内部有模块级缓存）
+  useEffect(() => {
+    let alive = true;
+    void listSystemFonts().then((fonts) => {
+      if (alive) setSystemFonts(fonts);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (position) {
@@ -745,8 +841,8 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
    * 荧光笔调色板：选中颜色即设为「当前颜色」，并在有选区时立刻给选区内文字上色。
    * 没有选区时只记住颜色，配合「荧光笔模式」使用。
    *
-   * 上完色要顺手收掉选区：浏览器用蓝色覆盖层画选中区域，选区还在就看不见刚上的颜色。
-   * （加粗 / 斜体这类不遮内容，所以那类操作保持选中，方便连着套多个格式。）
+   * 上完色**保持选区**（与加粗同款，用户要求）：方便连着套多个格式；
+   * 选中覆盖层虽会暂时盖住颜色，取消选择即可见，不再自动收选区。
    */
   const handleHighlightColor = (color: string) => {
     setHighlighterColor(color);
@@ -754,7 +850,6 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       editor.chain().focus().setHighlight({ color }).run();
       applyMarkToInlineNodes(editor, "highlight", { color });
     }
-    collapseSelection();
     onClose();
     setActiveSubmenu(null);
   };
@@ -762,14 +857,25 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
   /**
    * 文字颜色：直接给选区上色。
    * 没有选区时 setMark 会记进 storedMarks，接着输入的文字就用这个颜色（符合预期）。
-   * 同样在上色后收掉选区，否则看不到颜色效果。
+   * 上色后**保持选区**（与加粗同款，用户要求），不再自动收选区。
    */
   const handleTextColor = (color: string) => {
     setLastTextColor(color);
     if (editor) {
       editor.chain().focus().setTextColor(color).run();
     }
-    collapseSelection();
+    onClose();
+    setActiveSubmenu(null);
+  };
+
+  /**
+   * 字体：给选区设字体族（无选区时进 storedMarks，续输沿用）。
+   * 与文字颜色同款「保持选区」（与加粗一致，用户要求），不再自动收选区。
+   */
+  const handleFontFamily = (family: string) => {
+    if (editor) {
+      editor.chain().focus().setFontFamily(family).run();
+    }
     onClose();
     setActiveSubmenu(null);
   };
@@ -799,7 +905,11 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
 
     const GAP = 4;
     const submenuWidth = 200;
-    const submenuHeight = item.submenu.length * 32 + 8;
+    // 字体子菜单限高滚动：估高不能用「项数 × 行高」（数百项会算出屏外）
+    const submenuHeight =
+      item.name === "font-family"
+        ? FONT_SUBMENU_MAX_HEIGHT
+        : item.submenu.length * 32 + 8;
 
     let x = rect.right + GAP;
     let y = rect.top;
@@ -943,11 +1053,45 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
           {activeSubmenu === item.name && submenuPos && (
             <div
               ref={submenuRef}
-              className="context-menu-submenu"
+              className={
+                item.name === "font-family"
+                  ? "context-menu-submenu context-menu-submenu-font"
+                  : "context-menu-submenu"
+              }
               style={{ left: submenuPos.x, top: submenuPos.y }}
               onMouseEnter={handleSubmenuPanelEnter}
               onMouseLeave={handleSubmenuPanelLeave}
             >
+              {item.name === "font-family" && (
+                <div className="context-menu-font-toolbar" onMouseDown={(e) => e.stopPropagation()}>
+                  {fontLangs.length > 0 && (
+                    <select
+                      className="context-menu-font-lang-select"
+                      value={fontLang}
+                      aria-label={t("editor.contextMenu.font")}
+                      onChange={(e) => setFontLang(e.target.value)}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      <option value="all">{t("editor.contextMenu.fontLang.all")}</option>
+                      {fontLangs.map((lang) => (
+                        <option key={lang} value={lang}>
+                          {t(`editor.contextMenu.fontLang.${lang}`)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <input
+                    className="context-menu-font-filter"
+                    value={fontFilter}
+                    autoFocus
+                    placeholder={t("editor.contextMenu.fontSearch")}
+                    onChange={(e) => setFontFilter(e.target.value)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  />
+                </div>
+              )}
               {item.submenu!.map((sub, subIdx: number) => {
                 if ('divider' in sub && sub.divider) {
                   return <div key={`sub-div-${subIdx}`} className="context-menu-divider" />;
@@ -967,11 +1111,18 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
                         handleTextColor(subItem.name.slice(TEXT_COLOR_PREFIX.length));
                         return;
                       }
-                      // 「清除高亮 / 默认色」也直接作用在文字外观上：
-                      // 清完同样收掉选区，否则蓝色覆盖层还盖着，看不出已经清掉
-                      if (subItem.name === "highlight-clear" || subItem.name === "text-color-clear") {
+                      if (subItem.name?.startsWith(FONT_FAMILY_PREFIX)) {
+                        handleFontFamily(subItem.name.slice(FONT_FAMILY_PREFIX.length));
+                        return;
+                      }
+                      // 「清除高亮 / 默认色 / 默认字体」也直接作用在文字外观上：
+                      // 清完保持选区（与加粗同款，用户要求），不再自动收选区
+                      if (
+                        subItem.name === "highlight-clear" ||
+                        subItem.name === "text-color-clear" ||
+                        subItem.name === "font-family-clear"
+                      ) {
                         handleItemClick(subItem.name);
-                        collapseSelection();
                         return;
                       }
                       if (subItem.name) handleItemClick(subItem.name);
@@ -982,7 +1133,16 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
                     ) : subItem.icon ? (
                       <span className="context-menu-icon">{subItem.icon}</span>
                     ) : null}
-                    <span className="context-menu-label">{subItem.label}</span>
+                    <span
+                      className="context-menu-label"
+                      style={
+                        subItem.previewFont
+                          ? { fontFamily: `"${subItem.previewFont}", sans-serif` }
+                          : undefined
+                      }
+                    >
+                      {subItem.label}
+                    </span>
                     {subItem.checked && <span className="context-menu-check">{ICONS.check}</span>}
                     {getShortcutLabel(subItem.shortcutId, shortcuts) && (
                       <span className="context-menu-shortcut">

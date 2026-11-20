@@ -52,12 +52,14 @@ import {
 } from "./highlighter";
 import i18n from "../i18n";
 import { TextColor } from "./extensions/text-color";
+import { FontFamily } from "./extensions/font-family";
 import { Underline } from "./extensions/underline";
 import { TydoraHighlight } from "./extensions/highlight-ext";
 import { CaretHistory, caretBeforeChangeKey } from "./extensions/caret-history";
 import { RubyMeasure } from "./ruby-measure";
 
 import { TemplateError, TemplateErrorExpand } from "./extensions/template-error";
+import { TemplateLive } from "./extensions/template-live";
 
 import { HeadingHighlight } from "./extensions/heading-highlight";
 import { CodeBlockToolbar } from "./extensions/code-block-toolbar";
@@ -2022,8 +2024,12 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
         RubyMeasure,
         // 文字颜色（渲染成 <span style="color: …">，见 extensions/text-color.ts）
         TextColor,
+        // 字体族（{{Font|FontFamily|Text}}，见 extensions/font-family.ts）
+        FontFamily,
         // 直线 / 波浪下划线（{{Straight|…}} / {{Wavy|…}}，见 extensions/underline.ts）
         Underline,
+        // 模板输入 / 粘贴即时渲染（输入法合成、纯文本剪贴板也覆盖），见 extensions/template-live.ts
+        TemplateLive,
         Typography,
         Markdown.configure({
           html: true,

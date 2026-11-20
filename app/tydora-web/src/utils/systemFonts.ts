@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface SystemFontInfo {
   family: string;
   monospaced: boolean;
+  /** cmap 实测覆盖的文字体系（han/kana/hangul/latin/…）；旧版后端可能缺省 */
+  scripts?: string[];
 }
 
 export const SYSTEM_FONT_SENTINEL = "system";
