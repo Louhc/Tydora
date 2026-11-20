@@ -5,3 +5,4 @@ pub mod file_commands;
 pub mod clipboard_commands;
 pub mod terminal_commands;
 pub mod font_commands;
+pub mod font_scripts;

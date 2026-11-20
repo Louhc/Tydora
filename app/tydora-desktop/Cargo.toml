@@ -40,6 +40,9 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 url = "2"
 fontdb = "0.23"
+# 解析 cmap 以判定字体覆盖的文字体系（中文/日文/韩文/拉丁…），供右键字体菜单按语言筛选。
+# 版本与 fontdb 内部所用一致（0.25），不会引入第二份。
+ttf-parser = "0.25"
 
 # Windows：「在资源管理器中打开并选中文件」用 Shell API 实现（见 lib.rs 的 open_file_location）。
 # 版本与 workspace 里已有的 windows-sys 一致（tydora-cli 在用同一个 0.59），无需联网解析。
