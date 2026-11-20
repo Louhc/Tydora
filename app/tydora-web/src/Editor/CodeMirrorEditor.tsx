@@ -3,7 +3,7 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import { EditorState, Compartment, RangeSetBuilder } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { tydoraMarkdownLanguage, rubyShorthandTag, templateErrorShorthandTag } from "./markdown-language";
+import { tydoraMarkdownLanguage, templateShorthandTag, templateErrorShorthandTag } from "./markdown-language";
 import { javascript } from "@codemirror/lang-javascript";
 import { python } from "@codemirror/lang-python";
 import { html } from "@codemirror/lang-html";
@@ -164,13 +164,21 @@ const markdownTheme = EditorView.theme({
     color: "var(--text-secondary, #666)",
   },
   // LaTeX 数学高亮
+  // 行内公式常态无底色，仅 hover 主题色淡底（与块级同理）
   ".cm-math-inline": {
-    backgroundColor: "var(--bg-math, rgba(74, 158, 255, 0.08))",
+    backgroundColor: "transparent",
     borderRadius: "3px",
   },
+  ".cm-math-inline:hover": {
+    backgroundColor: "rgba(var(--accent-rgb, 74, 158, 255), 0.06)",
+  },
+  // 块级公式常态无底色，仅 hover 淡底（与 IR 的 div.tiptap-mathematics-render 一致）
   ".cm-math-block": {
-    backgroundColor: "var(--bg-math, rgba(74, 158, 255, 0.06))",
+    backgroundColor: "transparent",
     borderRadius: "3px",
+  },
+  ".cm-math-block:hover": {
+    backgroundColor: "rgba(var(--accent-rgb, 74, 158, 255), 0.06)",
   },
   ".cm-math-dollars": {
     color: "var(--text-math-delim, #7a5af5)",
@@ -233,11 +241,12 @@ const markdownHighlighting = syntaxHighlighting(
     { tag: tags.processingInstruction, color: "var(--hljs-keyword, #cf222e)" },
     { tag: tags.special(tags.string), color: "var(--hljs-string, #0a3069)" },
     { tag: tags.contentSeparator, color: "var(--text-secondary, #999)" },
-    // Tydora 的注音简写 {{Ruby|本体|读音}}：专用 tag（见 markdown-language.ts）。
-    // 颜色可用 --text-ruby 单独调，默认跟随代码配色的字符串色。
-    { tag: templateErrorShorthandTag, color: "var(--warning-ink, #b42318)", textDecoration: "underline wavy" },
-            { tag: rubyShorthandTag, color: "var(--text-ruby, var(--hljs-string, #a31515))" },
-    { tag: tags.meta, color: "var(--hljs-comment, #6e7781)" },
+     // Tydora 的 {{...}} 模板：Ruby / Color / Hilite / 五种下划线模板均整体匹配。
+     // 结构错误的模板也整体覆盖，并使用警示色。
+     { tag: templateErrorShorthandTag, color: "var(--warning-ink, #b42318)", textDecoration: "underline wavy" },
+     { tag: templateShorthandTag, color: "var(--text-ruby, var(--hljs-string, #a31515))" },
+     { tag: tags.meta, color: "var(--hljs-comment, #6e7781)" },
+
   ])
 );
 

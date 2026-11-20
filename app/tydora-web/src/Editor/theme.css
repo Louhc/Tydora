@@ -325,81 +325,55 @@
   padding-top: 0.5em;
 }
 
-/* ── 标题层级（重新设计） ──
-   原来六级标题只有一条统一的 padding-top，字号全走浏览器默认，所以既单一又难区分。
-   这里用四个维度拉开层级：**字号 / 字重 / 颜色 / 装饰**，
-   并按编辑排版惯例把 H1–H6 分成三档气质：
-     H1–H2 章节级（大字号 + 装饰标识）
-     H3–H4 小节级（只靠字号与字重，保持安静）
-     H5–H6 标签级（小号大写 + 字间距 + 次要色，越深越弱）
-   上间距随层级递减，让"章 → 节 → 条"的节奏自然下沉。 */
+/* ── 标题层级：Notion 风格 ──
+   特点：无边框、无背景、字号层级清晰，标题与正文保持紧凑的垂直节奏。 */
 .tiptap-editor .tiptap h1,
 .tiptap-editor .tiptap h2,
 .tiptap-editor .tiptap h3,
 .tiptap-editor .tiptap h4,
 .tiptap-editor .tiptap h5,
 .tiptap-editor .tiptap h6 {
-  padding-top: 0;
-  line-height: 1.25;
-  /* 上下间距用 rem 而不是 em：em 按元素**自身**字号算，H2（1.5em 字号）的
-     1.5em margin 会变成 36px，比 H3 的同名间距大一截，正好制造出
-     "标题越大、离上文越远、把分隔线的下边距顶宽"的不协调。 */
-  margin: 1.5rem 0 0.5rem;
+  padding: 0;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
 }
 
-/* H1 文首大标题：最大字号 + 最重 + 整行细下划线（"文档标题"的仪式感）
-   与 H2 拉开更大的字号差（2.2 : 1.5 ≈ 1.47，原来 1.9 : 1.5 ≈ 1.27），层级一眼可辨 */
 .tiptap-editor .tiptap h1 {
-  font-size: 2.2em;
+  margin: 1.2rem 0 0.35rem;
+  font-size: 1.875em;
   font-weight: 700;
-  letter-spacing: -0.011em;
-  /* H1 是文档标题，常常就是文首第一块，不需要大的上间距 */
-  margin-top: 0.6rem;
-  padding-bottom: 0.35em;
-  border-bottom: 1px solid var(--border);
 }
 
-/* H2 章节标题：次大字号 + 短主题色下划线（用背景渐变画，只占约 2.5em，不与行号栏冲突） */
 .tiptap-editor .tiptap h2 {
+  margin: 1rem 0 0.25rem;
   font-size: 1.5em;
   font-weight: 700;
-  letter-spacing: -0.006em;
-  padding-bottom: 0.28em;
-  background-image: linear-gradient(var(--accent, #0969da), var(--accent, #0969da));
-  background-repeat: no-repeat;
-  background-position: left bottom;
-  background-size: 2.5em 2px;
 }
 
-/* H3 小节：安静一档 —— 只靠字号与字重 */
 .tiptap-editor .tiptap h3 {
+  margin: 0.8rem 0 0.2rem;
   font-size: 1.25em;
   font-weight: 600;
 }
 
-/* H4：正文级强调，比正文略大 */
 .tiptap-editor .tiptap h4 {
-  font-size: 1.08em;
+  margin: 0.65rem 0 0.15rem;
+  font-size: 1.1em;
   font-weight: 600;
 }
 
-/* H5：转为"标签感" —— 小号大写 + 字间距 + 次要色 */
 .tiptap-editor .tiptap h5 {
-  font-size: 0.95em;
+  margin: 0.55rem 0 0.1rem;
+  font-size: 1em;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-secondary);
 }
 
-/* H6：最弱一级 */
 .tiptap-editor .tiptap h6 {
-  font-size: 0.88em;
+  margin: 0.5rem 0 0.1rem;
+  font-size: 0.9em;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
   color: var(--text-secondary);
-  opacity: 0.85;
 }
 
 /* macOS WebKit：独立合成层，减轻 contenteditable 选区/光标鬼影 */
@@ -489,6 +463,47 @@ html.platform-macos .tiptap-editor .tiptap {
   margin: 0;
   font-weight: 600;
 }
+
+/**
+ * 标题左侧的「#」级别标记（IR 模式装饰，纯显示层）。
+ *
+ * ⚠️ 绝对定位挂在标题盒**左侧外**（right: 100%），不占布局 ——
+ * 标题文字位置一个像素都不动（用户要求）；多级 # 串右对齐成一列。
+ * ::before 已被右侧行号占用，故用 ::after。
+ * 字号用 em（相对标题自身字号）→ 随标题级别缩放（用户要求）。
+ */
+.tiptap-editor .tiptap h1::after,
+.tiptap-editor .tiptap h2::after,
+.tiptap-editor .tiptap h3::after,
+.tiptap-editor .tiptap h4::after,
+.tiptap-editor .tiptap h5::after,
+.tiptap-editor .tiptap h6::after {
+  position: absolute;
+  right: 100%;
+  margin-right: 0.5rem;
+  top: 0;
+  /* 高度 = 标题首行行盒（级别 × 行高 × 编辑器字号），flex 垂直居中 →
+     多行标题时标记也对齐首行，且跟随编辑器字号 / 行高设置 */
+  height: calc(var(--hl, 1) * var(--editor-line-height, 1.6) * var(--editor-font-size, 16px));
+  display: flex;
+  align-items: center;
+  line-height: 1;
+  color: var(--text-secondary);
+  opacity: 0.55;
+  /* em 相对标题字号：h1 的 # 大、h6 的 # 小，与标题同级缩放 */
+  font-size: 0.75em;
+  font-weight: 400;
+  font-family: var(--editor-font, "JetBrains Mono", "Fira Code", monospace);
+  user-select: none;
+  pointer-events: none;
+}
+
+.tiptap-editor .tiptap h1::after { --hl: 2; content: "#"; }
+.tiptap-editor .tiptap h2::after { --hl: 1.5; content: "##"; }
+.tiptap-editor .tiptap h3::after { --hl: 1.25; content: "###"; }
+.tiptap-editor .tiptap h4::after { --hl: 1.1; content: "####"; }
+.tiptap-editor .tiptap h5::after { --hl: 1; content: "#####"; }
+.tiptap-editor .tiptap h6::after { --hl: 0.9; content: "######"; }
 
 /* 段落 */
 .tiptap-editor p {
@@ -1817,6 +1832,9 @@ html.platform-macos .tiptap-editor .frontmatter-node {
  * 若在叶子节点里嵌 <rt> 等子元素，选区边界解析会不稳定（拖选闪烁、无法以它为选区边界）。
  */
 .tiptap-editor .md-ruby {
+  /* Ruby 是一个不可拆分的行内单元，禁止本体在两行之间断开。 */
+  display: inline-block;
+  white-space: nowrap;
   position: relative;
   cursor: pointer;
   border-radius: 3px;
@@ -3265,13 +3283,14 @@ html:not([data-code-block-toolbar="classic"]) .code-block-content {
   padding: 1px 4px;
   margin: 0 1px;
   border-radius: 4px;
-  background: var(--bg-math, rgba(74, 158, 255, 0.08));
+  /* 常态无底色，仅 hover 主题色淡底（与块级公式同理） */
+  background: none;
   transition: background 0.15s ease;
   line-height: 1.4;
 }
 
 .tiptap-editor span.tiptap-mathematics-render:hover {
-  background: var(--bg-math-hover, rgba(74, 158, 255, 0.16));
+  background: rgba(var(--accent-rgb, 74, 158, 255), 0.06);
 }
 
 .tiptap-editor span.tiptap-mathematics-render.ProseMirror-selectednode {
@@ -3287,19 +3306,20 @@ html:not([data-code-block-toolbar="classic"]) .code-block-content {
   vertical-align: middle;
 }
 
-/* 块级公式 */
+/* 块级公式：常态无底色，仅 hover 时淡底提示可点（用户要求），选中时描边 */
 .tiptap-editor div.tiptap-mathematics-render {
   margin: 12px 0;
-  padding: 14px 12px;
+  padding: 4px 0;
   border-radius: 8px;
-  background: var(--bg-math, rgba(74, 158, 255, 0.06));
-  border: 1px solid var(--border, transparent);
+  background: none;
+  border: 1px solid transparent;
   transition: background 0.15s ease, border-color 0.15s ease;
   text-align: center;
 }
 
 .tiptap-editor div.tiptap-mathematics-render:hover {
-  background: var(--bg-math-hover, rgba(74, 158, 255, 0.1));
+  /* 主题色淡底（--accent-rgb 由各主题定义），比原来的固定蓝更淡 */
+  background: rgba(var(--accent-rgb, 74, 158, 255), 0.06);
 }
 
 .tiptap-editor div.tiptap-mathematics-render.ProseMirror-selectednode {
