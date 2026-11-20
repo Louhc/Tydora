@@ -1,5 +1,24 @@
 import { CODE_THEMES } from "./codeThemes";
-import { BUILTIN_THEMES, type BuiltinThemeName } from "./ThemeManager";
+import { BUILTIN_THEMES, PROMOTED_CUSTOM_THEMES, type BuiltinThemeName } from "./ThemeManager";
+
+/** 旧偏好里已提升为内置的自定义主题 id → 新内置 id；其余原样保留 */
+function migrateThemeId(id: string): string {
+  return PROMOTED_CUSTOM_THEMES[id] ?? id;
+}
+
+function migratePair(pair: ThemePair): ThemePair {
+  const fix = (id: string, fallback: string) => {
+    const promoted = migrateThemeId(id);
+    if (promoted !== id) return promoted;
+    // 已删除的内置主题 id 回落到默认槽，避免指向不存在的 CSS
+    if ((BUILTIN_THEMES as readonly string[]).includes(id) || id.startsWith("custom-")) return id;
+    return fallback;
+  };
+  return {
+    light: fix(pair.light, DEFAULT_APP_THEME_PAIR.light),
+    dark: fix(pair.dark, DEFAULT_APP_THEME_PAIR.dark),
+  };
+}
 
 export type AppearanceMode = "system" | "light" | "dark";
 export type ResolvedAppearance = "light" | "dark";
@@ -17,7 +36,7 @@ export interface AppearanceState {
 
 export const DEFAULT_APP_THEME_PAIR: ThemePair = {
   light: "white",
-  dark: "mint-dark",
+  dark: "black-yellow",
 };
 
 export const DEFAULT_CODE_THEME_PAIR: ThemePair = {
@@ -28,15 +47,7 @@ export const DEFAULT_CODE_THEME_PAIR: ThemePair = {
 /** Catalog hint for built-in themes (preview / legacy migration only — not used for selection). */
 export const BUILTIN_THEME_IS_DARK: Record<BuiltinThemeName, boolean> = {
   white: false,
-  mint: false,
-  "mint-dark": true,
-  "modern-dark": true,
-  "claude-code": false,
-  purple: false,
-  hermes: false,
-  next: false,
-  slate: false,
-  ocean: false,
+  "black-yellow": true,
 };
 
 export const APPEARANCE_MODE_KEY = "zmd-appearance-mode";
@@ -125,21 +136,25 @@ export function loadAppearanceState(): AppearanceState {
   try {
     const existingMode = parseMode(localStorage.getItem(APPEARANCE_MODE_KEY));
     if (existingMode) {
-      return {
+      const state: AppearanceState = {
         appearanceMode: existingMode,
-        preferredAppTheme: parsePair(
-          localStorage.getItem(PREFERRED_APP_THEME_KEY),
-          DEFAULT_APP_THEME_PAIR,
+        preferredAppTheme: migratePair(
+          parsePair(localStorage.getItem(PREFERRED_APP_THEME_KEY), DEFAULT_APP_THEME_PAIR),
         ),
         preferredCodeTheme: parsePair(
           localStorage.getItem(PREFERRED_CODE_THEME_KEY),
           DEFAULT_CODE_THEME_PAIR,
         ),
       };
+      // 提升迁移（custom-8cmdpx91 → black-yellow）落盘一次，旧 id 不再残留
+      persistAppearanceState(state);
+      return state;
     }
 
     // ── Migrate from legacy keys ──
-    const oldTheme = localStorage.getItem(LEGACY_THEME_KEY) || DEFAULT_APP_THEME_PAIR.light;
+    const oldTheme = migrateThemeId(
+      localStorage.getItem(LEGACY_THEME_KEY) || DEFAULT_APP_THEME_PAIR.light,
+    );
     const oldCode = localStorage.getItem(LEGACY_CODE_THEME_KEY) || "auto";
     const oldAppDark = inferThemeIdIsDark(oldTheme);
 

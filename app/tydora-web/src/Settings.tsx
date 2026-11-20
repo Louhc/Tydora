@@ -1141,15 +1141,7 @@ function ThemeSettingsContent() {
 
   const builtinThemes: { value: ThemeName; label: string; colors: string[] }[] = [
     { value: "white", label: t("settings.theme.white"), colors: ["#ffffff", "#2563eb", "#1e293b", "#d1d9e6"] },
-    { value: "mint", label: "Mint", colors: ["#ffffff", "#4eb289", "#1e293b", "#a5cfc0"] },
-    { value: "mint-dark", label: "Mint Dark", colors: ["#272729", "#4eb289", "#cccccc", "#39393a"] },
-    { value: "modern-dark", label: "Modern Dark", colors: ["#1e222d", "#74a7fe", "#d7dae2", "#3a4152"] },
-    { value: "claude-code", label: "Claude Code", colors: ["#faf8f5", "#c47a2a", "#1a1a1a", "#ddd6cc"] },
-    { value: "purple", label: "Purple", colors: ["#faf5ff", "#7c3aed", "#1e1b2e", "#ddd6ee"] },
-    { value: "hermes", label: "Hermes", colors: ["#f0f1ff", "#0000f2", "#1a1a4e", "rgba(0,0,242,0.12)"] },
-    { value: "next", label: "NexT", colors: ["#fffef8", "#00796b", "#4a4a4a", "#e0ddd6"] },
-    { value: "slate", label: "Slate", colors: ["#f8fafc", "#475569", "#0f172a", "#e2e8f0"] },
-    { value: "ocean", label: "Ocean", colors: ["#f0f9ff", "#0891b2", "#0c4a6e", "#a5f3fc"] },
+    { value: "black-yellow", label: t("settings.theme.blackYellow"), colors: ["#272729", "#f6d679", "#cccccc", "#39393a"] },
   ];
 
   const renderThemeSlotLabel = (id: string, pair: ThemePair) => {
@@ -1262,7 +1254,7 @@ function ThemeSettingsContent() {
 
   const openEditor = useCallback((manifest: ThemeManifest, variables: ThemeVariable[]) => {
     const merged = syncAccentRgb(
-      mergeWithSchema(variables, getBuiltinColorMap("mint") ?? undefined),
+      mergeWithSchema(variables, getBuiltinColorMap("white") ?? undefined),
     ) as ThemeVariable[];
     setEditVariables(merged);
     updateEditPreview(merged);

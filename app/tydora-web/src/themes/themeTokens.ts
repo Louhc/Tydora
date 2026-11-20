@@ -2,7 +2,7 @@ import type { ThemeVariable } from "./CustomThemeManager";
 import type { BuiltinThemeName } from "./ThemeManager";
 import { BUILTIN_THEMES } from "./ThemeManager";
 
-/** 主题编辑器分组：按编辑器/界面元素分类 */
+/** 涓婚缂栬緫鍣ㄥ垎缁勶細鎸夌紪杈戝櫒/鐣岄潰鍏冪礌鍒嗙被 */
 export type ThemeEditorSectionId =
   | "chrome"
   | "body"
@@ -14,7 +14,7 @@ export type ThemeEditorSectionId =
   | "tag"
   | "scrollbar";
 
-/** @deprecated 使用 ThemeEditorSectionId；保留别名以免外部引用断裂 */
+/** @deprecated 浣跨敤 ThemeEditorSectionId锛涗繚鐣欏埆鍚嶄互鍏嶅閮ㄥ紩鐢ㄦ柇瑁?*/
 export type ThemeColorGroup = ThemeEditorSectionId;
 
 export interface ThemeColorToken {
@@ -34,12 +34,10 @@ export interface ThemeSizeToken {
   min: number;
   max: number;
   step?: number;
-  /** CSS 单位；默认 `px`。空字符串表示无单位（如 0–1 不透明度） */
+  /** CSS 鍗曚綅锛涢粯璁?`px`銆傜┖瀛楃涓茶〃绀烘棤鍗曚綅锛堝 0鈥? 涓嶉€忔槑搴︼級 */
   unit?: "px" | "";
   /**
-   * 编辑器按 0–100% 显示，但 CSS 存 0–1（仅 unit 为 "" 时有效）。
-   * min/max/step 仍按百分比刻度填写（如 0–100）。
-   */
+   * 缂栬緫鍣ㄦ寜 0鈥?00% 鏄剧ず锛屼絾 CSS 瀛?0鈥?锛堜粎 unit 涓?"" 鏃舵湁鏁堬級銆?   * min/max/step 浠嶆寜鐧惧垎姣斿埢搴﹀～鍐欙紙濡?0鈥?00锛夈€?   */
   asPercent?: boolean;
 }
 
@@ -49,7 +47,7 @@ export interface ThemeEditorSectionDef {
   titleKey: string;
 }
 
-/** 编辑器 UI 分组顺序 */
+/** 缂栬緫鍣?UI 鍒嗙粍椤哄簭 */
 export const THEME_EDITOR_SECTIONS: ThemeEditorSectionDef[] = [
   { id: "chrome", titleKey: "groupChrome" },
   { id: "body", titleKey: "groupBody" },
@@ -62,12 +60,12 @@ export const THEME_EDITOR_SECTIONS: ThemeEditorSectionDef[] = [
   { id: "scrollbar", titleKey: "groupScrollbar" },
 ];
 
-/** @deprecated 使用 THEME_EDITOR_SECTIONS */
+/** @deprecated 浣跨敤 THEME_EDITOR_SECTIONS */
 export const THEME_COLOR_GROUPS: ThemeEditorSectionId[] = THEME_EDITOR_SECTIONS.map((s) => s.id);
 
 /** Canonical editable color tokens for the theme editor. */
 export const THEME_COLOR_SCHEMA: ThemeColorToken[] = [
-  // 界面
+  // 鐣岄潰
   { name: "--bg-secondary", section: "chrome", labelKey: "bgSecondary" },
   { name: "--bg-surface", section: "chrome", labelKey: "bgSurface" },
   { name: "--bg-hover", section: "chrome", labelKey: "bgHover" },
@@ -78,33 +76,30 @@ export const THEME_COLOR_SCHEMA: ThemeColorToken[] = [
   { name: "--accent-hover", section: "chrome", labelKey: "accentHover" },
   { name: "--accent-rgb", section: "chrome", labelKey: "accentRgb", hidden: true },
   { name: "--danger", section: "chrome", labelKey: "danger" },
-  // 正文
+  // 姝ｆ枃
   { name: "--bg-primary", section: "body", labelKey: "bgPrimary" },
   { name: "--text-primary", section: "body", labelKey: "textPrimary" },
   { name: "--text-secondary", section: "body", labelKey: "textSecondary" },
   { name: "--text-tertiary", section: "body", labelKey: "textTertiary" },
   { name: "--text-strong", section: "body", labelKey: "textStrong" },
-  // 代码块
-  { name: "--bg-code", section: "codeBlock", labelKey: "bgCode" },
-  // 行内代码
+  // 浠ｇ爜鍧?  { name: "--bg-code", section: "codeBlock", labelKey: "bgCode" },
+  // 琛屽唴浠ｇ爜
   { name: "--bg-code-inline", section: "codeInline", labelKey: "bgCodeInline" },
   { name: "--text-code", section: "codeInline", labelKey: "textCode" },
-  // 引用块
-  { name: "--blockquote-border", section: "blockquote", labelKey: "blockquoteBorder" },
+  // 寮曠敤鍧?  { name: "--blockquote-border", section: "blockquote", labelKey: "blockquoteBorder" },
   { name: "--blockquote-bg", section: "blockquote", labelKey: "blockquoteBg" },
   { name: "--blockquote-text", section: "blockquote", labelKey: "blockquoteText" },
   // Metadata
   { name: "--metadata-bg", section: "metadata", labelKey: "metadataBg" },
   { name: "--metadata-border", section: "metadata", labelKey: "metadataBorder" },
-  // 表格
+  // 琛ㄦ牸
   { name: "--table-header-bg", section: "table", labelKey: "tableHeaderBg" },
   { name: "--table-cell-bg", section: "table", labelKey: "tableCellBg" },
-  // 标签
+  // 鏍囩
   { name: "--tag-bg", section: "tag", labelKey: "tagBg" },
   { name: "--tag-text", section: "tag", labelKey: "tagText" },
   { name: "--tag-border", section: "tag", labelKey: "tagBorder" },
-  // 滚动条
-  { name: "--scrollbar-thumb", section: "scrollbar", labelKey: "scrollbarThumb" },
+  // 婊氬姩鏉?  { name: "--scrollbar-thumb", section: "scrollbar", labelKey: "scrollbarThumb" },
   { name: "--scrollbar-thumb-hover", section: "scrollbar", labelKey: "scrollbarThumbHover" },
   { name: "--scrollbar-track", section: "scrollbar", labelKey: "scrollbarTrack" },
 ];
@@ -205,40 +200,6 @@ const LIGHT_DEFAULTS: Record<string, string> = {
   "--tag-border": "rgba(78, 178, 137, 0.2)",
 };
 
-const DARK_DEFAULTS: Record<string, string> = {
-  "--bg-primary": "#272729",
-  "--bg-secondary": "#232325",
-  "--bg-surface": "#333336",
-  "--bg-hover": "rgba(255, 255, 255, 0.08)",
-  "--bg-tertiary": "#2e2e31",
-  "--bg-code": "#2d2d30",
-  "--bg-code-inline": "rgba(78, 178, 137, 0.12)",
-  "--bg-input": "#272729",
-  "--text-primary": "#cccccc",
-  "--text-secondary": "#818286",
-  "--text-tertiary": "#5c5e63",
-  "--text-strong": "#bd387d",
-  "--text-code": "#f5c2e7",
-  "--accent": "#4eb289",
-  "--accent-rgb": "78, 178, 137",
-  "--accent-hover": "#5fc99e",
-  "--danger": "#e06c75",
-  "--border": "#39393a",
-  "--scrollbar-thumb": "#39393a",
-  "--scrollbar-thumb-hover": "#818286",
-  "--scrollbar-track": "transparent",
-  "--metadata-bg": "#232325",
-  "--metadata-border": "#39393a",
-  "--blockquote-border": "#39393a",
-  "--blockquote-bg": "transparent",
-  "--blockquote-text": "#818286",
-  "--table-header-bg": "#232325",
-  "--table-cell-bg": "transparent",
-  "--tag-bg": "rgba(78, 178, 137, 0.18)",
-  "--tag-text": "#4eb289",
-  "--tag-border": "rgba(78, 178, 137, 0.25)",
-};
-
 /** Full color maps for each built-in theme (for fork). Keep in sync with themes.css. */
 export const BUILTIN_THEME_COLORS: Record<BuiltinThemeName, Record<string, string>> = {
   white: {
@@ -261,164 +222,39 @@ export const BUILTIN_THEME_COLORS: Record<BuiltinThemeName, Record<string, strin
     "--danger": "#dc2626",
     "--border": "#d1d9e6",
   },
-  mint: { ...LIGHT_DEFAULTS },
-  "mint-dark": { ...DARK_DEFAULTS },
-  "modern-dark": {
-    // 层次自低到高：secondary(侧栏) < primary(主区) < code/metadata < surface(卡片) < tertiary/code-inline
-    // 与 themes.css [data-theme="modern-dark"] 保持同步
-    "--bg-primary": "#1e222d",
-    "--bg-secondary": "#141821",
-    "--bg-surface": "#273044",
-    "--bg-hover": "rgba(255, 255, 255, 0.07)",
-    "--bg-tertiary": "#303a52",
-    "--bg-code": "#273044",
-    "--bg-code-inline": "#303951",
-    "--bg-input": "#273044",
-    "--text-primary": "#d7dae2",
-    "--text-secondary": "#a9afbb",
-    "--text-tertiary": "#7e8595",
-    "--text-strong": "#ffffff",
-    "--text-code": "#e8ebf2",
-    "--accent": "#74a7fe",
-    "--accent-rgb": "116, 167, 254",
-    "--accent-hover": "#8db9ff",
+  "black-yellow": {
+    "--bg-primary": "#272729",
+    "--bg-secondary": "#232325",
+    "--bg-surface": "#333336",
+    "--bg-hover": "rgba(255, 255, 255, 0.08)",
+    "--bg-tertiary": "#2e2e31",
+    "--bg-code": "#2d2d30",
+    "--bg-code-inline": "rgba(78, 178, 137, 0.12)",
+    "--bg-input": "#272729",
+    "--text-primary": "#cccccc",
+    "--text-secondary": "#818286",
+    "--text-tertiary": "#5c5e63",
+    "--text-strong": "#f6d679",
+    "--text-code": "#f5c2e7",
+    "--accent": "#f6d679",
+    "--accent-rgb": "246, 214, 121",
+    "--accent-hover": "#f6d679",
     "--danger": "#e06c75",
-    "--border": "rgba(148, 163, 184, 0.28)",
-    "--blockquote-border": "rgba(116, 167, 254, 0.5)",
-    "--blockquote-bg": "#273044",
-    "--blockquote-text": "#aab1bd",
-    "--metadata-bg": "#232a3a",
-    "--metadata-border": "rgba(148, 163, 184, 0.3)",
-    "--table-header-bg": "#273044",
-    "--table-cell-bg": "#232a3a",
-    "--tag-bg": "rgba(116, 167, 254, 0.15)",
-    "--tag-text": "#8ab5ff",
-    "--tag-border": "rgba(116, 167, 254, 0.4)",
-    "--scrollbar-thumb": "#8a90a0",
-    "--scrollbar-thumb-hover": "#5f6674",
+    "--border": "#39393a",
+    "--blockquote-border": "#39393a",
+    "--blockquote-bg": "transparent",
+    "--blockquote-text": "#818286",
+    "--metadata-bg": "#232325",
+    "--metadata-border": "#39393a",
+    "--table-header-bg": "#232325",
+    "--table-cell-bg": "transparent",
+    "--tag-bg": "rgba(78, 178, 137, 0.18)",
+    "--tag-text": "#f6d679",
+    "--tag-border": "rgba(78, 178, 137, 0.25)",
+    "--scrollbar-thumb": "#39393a",
+    "--scrollbar-thumb-hover": "#818286",
     "--scrollbar-track": "transparent",
-  },
-  "claude-code": {
-    "--bg-primary": "#faf8f5",
-    "--bg-secondary": "#f0ece6",
-    "--bg-surface": "#f5f1eb",
-    "--bg-hover": "rgba(196, 122, 42, 0.1)",
-    "--bg-tertiary": "#e8e2d8",
-    "--bg-code": "#f0ece6",
-    "--bg-code-inline": "rgba(196, 122, 42, 0.08)",
-    "--bg-input": "#faf8f5",
-    "--text-primary": "#1a1a1a",
-    "--text-secondary": "#6b6560",
-    "--text-tertiary": "#9a948c",
-    "--text-strong": "#bd387d",
-    "--text-code": "#c47a2a",
-    "--accent": "#c47a2a",
-    "--accent-rgb": "196, 122, 42",
-    "--accent-hover": "#a86420",
-    "--danger": "#c94432",
-    "--border": "#ddd6cc",
-  },
-  purple: {
-    "--bg-primary": "#faf5ff",
-    "--bg-secondary": "#f3e8ff",
-    "--bg-surface": "#f5f0ff",
-    "--bg-hover": "rgba(124, 58, 237, 0.1)",
-    "--bg-tertiary": "#ebe0ff",
-    "--bg-code": "#f3f0ff",
-    "--bg-code-inline": "rgba(124, 58, 237, 0.08)",
-    "--bg-input": "#faf5ff",
-    "--text-primary": "#1e1b2e",
-    "--text-secondary": "#6b6580",
-    "--text-tertiary": "#9b95b0",
-    "--text-strong": "#bd387d",
-    "--text-code": "#7c3aed",
-    "--accent": "#7c3aed",
-    "--accent-rgb": "124, 58, 237",
-    "--accent-hover": "#6d28d9",
-    "--danger": "#dc2626",
-    "--border": "#ddd6ee",
-  },
-  hermes: {
-    "--bg-primary": "#f0f1ff",
-    "--bg-secondary": "#e4e6ff",
-    "--bg-surface": "#eaeaFF",
-    "--bg-hover": "rgba(0, 0, 242, 0.08)",
-    "--bg-tertiary": "#d8dbff",
-    "--bg-code": "#eaeaFF",
-    "--bg-code-inline": "rgba(0, 0, 242, 0.08)",
-    "--bg-input": "#f0f1ff",
-    "--text-primary": "#1a1a4e",
-    "--text-secondary": "#5a5a8a",
-    "--text-tertiary": "#8a8ab0",
-    "--text-strong": "#bd387d",
-    "--text-code": "#0000f2",
-    "--accent": "#0000f2",
-    "--accent-rgb": "0, 0, 242",
-    "--accent-hover": "#2020ff",
-    "--danger": "#dc2626",
-    "--border": "rgba(0, 0, 242, 0.12)",
-  },
-  next: {
-    "--bg-primary": "#fffef8",
-    "--bg-secondary": "#f8f7f2",
-    "--bg-surface": "#f3f2ed",
-    "--bg-hover": "rgba(0, 121, 107, 0.08)",
-    "--bg-tertiary": "#ebeae4",
-    "--bg-code": "#f3f2ed",
-    "--bg-code-inline": "rgba(0, 121, 107, 0.08)",
-    "--bg-input": "#fffef8",
-    "--text-primary": "#4a4a4a",
-    "--text-secondary": "#8a8a8a",
-    "--text-tertiary": "#b0b0b0",
-    "--text-strong": "#bd387d",
-    "--text-code": "#00796b",
-    "--accent": "#00796b",
-    "--accent-rgb": "0, 121, 107",
-    "--accent-hover": "#00695c",
-    "--danger": "#d32f2f",
-    "--border": "#e0ddd6",
-  },
-  slate: {
-    "--bg-primary": "#f8fafc",
-    "--bg-secondary": "#f1f5f9",
-    "--bg-surface": "#f8fafc",
-    "--bg-hover": "rgba(71, 85, 105, 0.08)",
-    "--bg-tertiary": "#e2e8f0",
-    "--bg-code": "#f1f5f9",
-    "--bg-code-inline": "rgba(100, 116, 139, 0.08)",
-    "--bg-input": "#f8fafc",
-    "--text-primary": "#0f172a",
-    "--text-secondary": "#64748b",
-    "--text-tertiary": "#94a3b8",
-    "--text-strong": "#bd387d",
-    "--text-code": "#e83e8c",
-    "--accent": "#475569",
-    "--accent-rgb": "71, 85, 105",
-    "--accent-hover": "#334155",
-    "--danger": "#dc2626",
-    "--border": "#e2e8f0",
-  },
-  ocean: {
-    "--bg-primary": "#f0f9ff",
-    "--bg-secondary": "#e0f2fe",
-    "--bg-surface": "#f0f9ff",
-    "--bg-hover": "rgba(8, 145, 178, 0.1)",
-    "--bg-tertiary": "#bae6fd",
-    "--bg-code": "#f0f9ff",
-    "--bg-code-inline": "rgba(8, 145, 178, 0.08)",
-    "--bg-input": "#f0f9ff",
-    "--text-primary": "#0c4a6e",
-    "--text-secondary": "#64748b",
-    "--text-tertiary": "#94a3b8",
-    "--text-strong": "#bd387d",
-    "--text-code": "#0891b2",
-    "--accent": "#0891b2",
-    "--accent-rgb": "8, 145, 178",
-    "--accent-hover": "#0e7490",
-    "--danger": "#dc2626",
-    "--border": "#a5f3fc",
-  },
-};
+  },};
 
 const DEFAULT_FONTS: ThemeVariable[] = [
   {
@@ -510,7 +346,8 @@ export function getBuiltinThemeVariables(builtinId: string): ThemeVariable[] | n
 }
 
 export function getTemplateVariables(kind: "light" | "dark"): ThemeVariable[] {
-  const colors = kind === "dark" ? DARK_DEFAULTS : LIGHT_DEFAULTS;
+  // 新建自定义主题的模板与仅存的两套内置主题对齐（云白 / 黑黄）
+  const colors = BUILTIN_THEME_COLORS[kind === "dark" ? "black-yellow" : "white"];
   return [...colorMapToVariables(colors), ...DEFAULT_FONTS, ...DEFAULT_SIZES];
 }
 
@@ -594,7 +431,7 @@ export function getEditableColorVariables(variables: ThemeVariable[]): ThemeVari
   return variables.filter((v) => schemaNames.has(v.name) && !hidden.has(v.name));
 }
 
-/** 按编辑器元素分组，颜色与尺寸字段穿插在同一 section 内 */
+/** 鎸夌紪杈戝櫒鍏冪礌鍒嗙粍锛岄鑹蹭笌灏哄瀛楁绌挎彃鍦ㄥ悓涓€ section 鍐?*/
 export function buildThemeEditorSections(variables: ThemeVariable[]): ThemeEditorSectionView[] {
   const byName = new Map(variables.map((v) => [v.name, v]));
 
@@ -639,7 +476,7 @@ export function buildThemeEditorSections(variables: ThemeVariable[]): ThemeEdito
   }).filter((s) => s.fields.length > 0);
 }
 
-/** @deprecated 使用 buildThemeEditorSections */
+/** @deprecated 浣跨敤 buildThemeEditorSections */
 export function groupEditableColors(
   variables: ThemeVariable[],
 ): Record<ThemeEditorSectionId, ThemeVariable[]> {

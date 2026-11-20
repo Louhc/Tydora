@@ -150,12 +150,13 @@ Release 由 `release-please` 驱动（见 `release-please-config.json`），变�
 
 主题采用「**外观模式（system / light / dark）+ 明暗主题对**」模型，而非单一切换：
 
-- `ThemeManager.ts` — **10 种内置主题**：`white`、`mint`、`mint-dark`、`modern-dark`、
-  `claude-code`、`purple`、`hermes`、`next`、`slate`、`ocean`；
-  仅 `mint-dark` 与 `modern-dark` 是暗色主题（见 `appearance.ts` 的 `BUILTIN_THEME_IS_DARK`）
+- `ThemeManager.ts` — **2 种内置主题**（用户要求只保留两套）：`white`（云白，浅）、
+  `black-yellow`（黑黄，深，由用户自定义主题 `custom-8cmdpx91` 提升而来）；
+  暗色判定见 `appearance.ts` 的 `BUILTIN_THEME_IS_DARK`；
+  `PROMOTED_CUSTOM_THEMES` 负责旧自定义 id → 新内置 id 的偏好迁移
 - `appearance.ts` — 外观核心逻辑：
   - `zmd-appearance-mode`（`system` / `light` / `dark`）
-  - 默认主题对：亮 `white` / 暗 `mint-dark`（`DEFAULT_APP_THEME_PAIR`）
+  - 默认主题对：亮 `white` / 暗 `black-yellow`（`DEFAULT_APP_THEME_PAIR`）
   - 默认代码配色对：亮 `github-light` / 暗 `github-dark`
   - 旧键 `zmd-theme` / `zmd-code-theme` 仍作为"已解析的当前主题 id"写入（兼容迁移）
 - `CustomThemeManager.ts` — 自定义主题导入 / 导出 / 管理，存于 Tauri `appDataDir`（id 前缀 `custom-`）
@@ -822,7 +823,7 @@ app/tydora-web/src/
 ├── boot-timing.ts                 # 启动耗时打点
 ├── analytics.ts
 ├── themes/
-│   ├── ThemeManager.ts            # 10 种内置主题
+│   ├── ThemeManager.ts            # 2 种内置主题（云白 / 黑黄）
 │   ├── CustomThemeManager.ts      # 自定义主题
 │   ├── ThemeContext.tsx           # 主题 Context
 │   ├── themeTokens.ts / themePack.ts / appearance.ts

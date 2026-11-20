@@ -6,7 +6,8 @@
       (function() {
         try {
           var theme = localStorage.getItem('zmd-theme');
-          var builtins = ['white','mint','mint-dark','liquid-glass','claude-code','purple','hermes','next'];
+          if (theme === 'custom-8cmdpx91') theme = 'black-yellow';
+          var builtins = ['white','black-yellow'];
           if (theme && builtins.indexOf(theme) !== -1) {
             document.documentElement.dataset.theme = theme;
           }

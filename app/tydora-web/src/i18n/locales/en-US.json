@@ -290,6 +290,7 @@
       "slotLabelDark": "Dark",
       "slotLabelBoth": "Light · Dark",
       "white": "Cloud White",
+      "blackYellow": "Black Yellow",
       "customThemes": "Custom Themes",
       "edit": "Edit Theme",
       "delete": "Delete Theme",
