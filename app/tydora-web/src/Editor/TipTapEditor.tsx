@@ -810,6 +810,17 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     const onChangeRef = useRef(onChange);
     const onWordCountRef = useRef(onWordCount);
     const isInternalRef = useRef(false);
+    /**
+     * 当前**存活**的 TipTap 实例。
+     *
+     * ⚠️ 异步回调 / editorProps 闭包里**绝不能**直接用 `editor`：
+     * 模式切换（IR↔SV）会重建编辑器，旧闭包持有的是**已销毁**的实例 ——
+     * 它的 `commandManager` 已被置空，`editor.chain()` 直接抛
+     * "Cannot read properties of null (reading 'chain')" ✗。
+     * 实测后果：粘贴图片时文件已经写盘，但 `setImage` 抛异常被 catch 吞掉，
+     * 图片既没进文档、也没进 markdown（用户实测：贴完没反应）。
+     */
+    const editorLiveRef = useRef<Editor | null>(null);
     const mountingRef = useRef(true);
     const currentFilePathRef = useRef(currentFilePath);
     const prevFilePathRef = useRef(currentFilePath);
@@ -1234,7 +1245,16 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
             return {
               markdown: {
                 serialize(state: any, node: any) {
-                  if (!node.textContent.trim()) {
+                  /**
+                   * ⚠️ 判空**不能只看 `textContent`**：段落里若只有一个**行内原子节点**
+                   *（图片 `![](…)`、行内公式等），它的 `textContent` 也是空串 ——
+                   * 只看文本就会把"图片段落"当成空段落写掉 ✗
+                   *（用户实测：贴图后图能显示，但 markdown 里没有 `![](…)`，
+                   * 一切源码模式图片就消失）。
+                   * 判据改成：没有任何"非文本行内内容"**且**文本也全是空白，才算空段落。
+                   */
+                  const hasInlineAtom = node.content.content.some((child: any) => !child.isText);
+                  if (!hasInlineAtom && !node.textContent.trim()) {
                     /**
                      * 空段落 = **一个空行**（两个换行）✓。
                      *
@@ -2437,6 +2457,8 @@ const md = getMarkdownSafe(ed);
           },
         },
         handlePaste: (_view: any, event: ClipboardEvent) => {
+          // ⚠️ 用存活实例（模式切换会给闭包里的 editor 换成已销毁的旧实例）
+          const liveEditor = editorLiveRef.current;
           /**
            * 无格式粘贴（Ctrl+Shift+V，或右键菜单「粘贴为纯文本」）：
            * 只取 text/plain，按行切成段落原样插入 —— 不解析 Markdown、不带 HTML 结构。
@@ -2447,7 +2469,7 @@ const md = getMarkdownSafe(ed);
             plainPasteRef.current = false;
             // 编辑器尚未就绪或已销毁时不处理：否则下面 editor.chain() 会抛
             // "Cannot read properties of null (reading 'chain')" 这类未捕获异常
-            if (!editor || editor.isDestroyed) return false;
+            if (!isEditorAlive(liveEditor)) return false;
             /**
              * ⚠️ 去掉**末尾单个换行** ✓。
              *
@@ -2473,7 +2495,7 @@ const md = getMarkdownSafe(ed);
                     ? { type: "paragraph", content: [{ type: "text", text: line }] }
                     : { type: "paragraph" },
                 );
-                editor.chain().focus().insertContent(content).run();
+                liveEditor.chain().focus().insertContent(content).run();
               }
             }
             return true;
@@ -2502,14 +2524,14 @@ const md = getMarkdownSafe(ed);
               }
             }
           }
-          if (!editor || editor.isDestroyed) return false;
+          if (!isEditorAlive(liveEditor)) return false;
           /**
            * ★ 普通 Ctrl+V：**用事件里带来的 HTML 走与右键完全相同的插入逻辑** ✓。
            *
            * 事件里有 HTML 时直接用（同步、无 IO ✓）。
            */
           const pasteHtml = event.clipboardData?.getData("text/html") ?? "";
-          if (pasteHtml && insertClipboardHtml(editor, pasteHtml)) {
+          if (pasteHtml && insertClipboardHtml(liveEditor, pasteHtml)) {
             event.preventDefault();
             return true;
           }
@@ -2527,7 +2549,7 @@ const md = getMarkdownSafe(ed);
           // 抢过来反而会把它吞掉。
           if ((event.clipboardData?.files?.length ?? 0) > 0) return false;
           event.preventDefault();
-          void pasteFromClipboard(editor);
+          void pasteFromClipboard(liveEditor);
           return true;
         },
         handleDrop: (_view: any, event: DragEvent) => {
@@ -2564,7 +2586,10 @@ const md = getMarkdownSafe(ed);
 
     // 图片处理
     const handleImageFile = useCallback(async (file: File) => {
-      if (!editor) return;
+      // ⚠️ 必须取**存活**实例：模式切换会重建编辑器，闭包里的 editor 可能已销毁
+      // （销毁后 commandManager 为 null，editor.chain() 直接抛 TypeError）
+      const ed = editorLiveRef.current;
+      if (!isEditorAlive(ed)) return;
 
       // 存储设置以 localStorage 为准实时读取（设置弹框内改完立即生效），
       // props 快照仅作为兜底，避免使用到启动时的旧配置
@@ -2581,7 +2606,7 @@ const md = getMarkdownSafe(ed);
           activeVaultPathRef.current ?? null
         );
 
-        editor.chain().focus().setImage({
+        ed.chain().focus().setImage({
           src: result.markdownRef,
           alt: file.name,
           "data-abs-path": result.savedPath,
@@ -2874,6 +2899,7 @@ const md = getMarkdownSafe(ed);
 
     const vimEditorRef = useRef<Editor | null>(editor);
     vimEditorRef.current = editor;
+    editorLiveRef.current = editor;
 
     // leader.ts 的 editor.* ID 与 TipTap executeCommand 名称的映射差异
     const tipTapActionMap: Record<string, string> = {
