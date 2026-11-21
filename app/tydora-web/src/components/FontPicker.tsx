@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import {
   BUILTIN_EDITOR_FONTS,
   listSystemFonts,
+  pickFontDisplayName,
   resolveCodeFont,
   resolveEditorFont,
   SYSTEM_FONT_SENTINEL,
@@ -34,7 +35,7 @@ interface DropdownPos {
 }
 
 export function FontPicker({ mode, value, onChange }: FontPickerProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -134,7 +135,8 @@ export function FontPicker({ mode, value, onChange }: FontPickerProps) {
     const pushFamily = (f: SystemFontInfo, group: "mono" | "system") => {
       result.push({
         value: f.family,
-        label: f.family,
+        // 显示名按界面语言取本地化族名（zh → 微软雅黑）；value 仍为规范名
+        label: pickFontDisplayName(f, i18n.language),
         previewFamily: `"${f.family.replace(/"/g, '\\"')}"`,
         group,
       });
@@ -148,7 +150,7 @@ export function FontPicker({ mode, value, onChange }: FontPickerProps) {
     }
 
     return result;
-  }, [fonts, mode, t]);
+  }, [fonts, mode, t, i18n.language]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

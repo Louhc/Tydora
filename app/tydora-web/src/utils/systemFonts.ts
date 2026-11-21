@@ -5,6 +5,21 @@ export interface SystemFontInfo {
   monospaced: boolean;
   /** cmap 实测覆盖的文字体系（han/kana/hangul/latin/…）；旧版后端可能缺省 */
   scripts?: string[];
+  /** 本地化族名（lang 为 BCP47 主_subtag：zh/en/ja/ko…）；旧版后端可能缺省 */
+  names?: { lang: string; family: string }[];
+}
+
+/**
+ * 按界面语言取字体显示名：zh 界面显示「微软雅黑」而非 Microsoft YaHei（用户要求）。
+ * 匹配不到对应语言时回退规范族名。mark 属性 / 序列化仍用规范 family，不受影响。
+ */
+export function pickFontDisplayName(
+  font: { family: string; names?: { lang: string; family: string }[] },
+  uiLang: string | undefined | null,
+): string {
+  const primary = (uiLang || "zh-CN").split("-")[0].toLowerCase();
+  const hit = font.names?.find((n) => n.lang === primary);
+  return hit?.family || font.family;
 }
 
 export const SYSTEM_FONT_SENTINEL = "system";

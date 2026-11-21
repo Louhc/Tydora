@@ -7,13 +7,47 @@ use std::collections::{BTreeSet, HashSet};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemFontInfo {
-    /// CSS font-family 可用的族名
+    /// CSS font-family 可用的族名（规范名，mark 属性与序列化用它）
     pub family: String,
     /// 是否为等宽字体（用于代码字体优先展示）
     pub monospaced: bool,
     /// 覆盖的文字体系（cmap 实测）：han / kana / hangul / latin / cyrillic /
     /// greek / arabic / hebrew / devanagari / thai。供右键字体菜单按语言筛选。
     pub scripts: Vec<String>,
+    /// 本地化族名（name 表）：lang 为 BCP47 主_subtag（zh/en/ja/ko…）。
+    /// 菜单按界面语言取对应名字显示（如 zh 显示「微软雅黑」而非 Microsoft YaHei）。
+    pub names: Vec<FontLocalName>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontLocalName {
+    pub lang: String,
+    pub family: String,
+}
+
+/// fontdb/ttf-parser 的 Language → BCP47 主_subtag（界面语言匹配用）。
+fn lang_tag(lang: &fontdb::Language) -> String {
+    match lang.primary_language() {
+        "Chinese" => "zh".to_string(),
+        "English" => "en".to_string(),
+        "Japanese" => "ja".to_string(),
+        "Korean" => "ko".to_string(),
+        other => other.to_lowercase(),
+    }
+}
+
+/// 收集一个 face 的本地化族名（每语言取第一条）。
+fn face_names(face: &fontdb::FaceInfo) -> Vec<FontLocalName> {
+    let mut out: Vec<FontLocalName> = Vec::new();
+    for (name, lang) in &face.families {
+        let tag = lang_tag(lang);
+        if name.is_empty() || out.iter().any(|n| n.lang == tag) {
+            continue;
+        }
+        out.push(FontLocalName { lang: tag, family: name.clone() });
+    }
+    out
 }
 
 /// 各文字体系的判定样本码点：**全部**都有字形才算覆盖。
@@ -203,7 +237,8 @@ pub fn compute() -> Vec<SystemFontInfo> {
             continue;
         }
         let scripts = face_scripts(&db, face.id);
-        // 同一族名只保留一条；monospaced 与 scripts 取各 face 的并集
+        let names = face_names(face);
+        // 同一族名只保留一条；monospaced 与 scripts 取各 face 的并集；本地化名每语言取首见
         if !seen.insert(name.clone()) {
             if let Some(existing) = fonts.iter_mut().find(|f| f.family == *name) {
                 if face.monospaced {
@@ -212,6 +247,11 @@ pub fn compute() -> Vec<SystemFontInfo> {
                 let mut merged: BTreeSet<String> = existing.scripts.iter().cloned().collect();
                 merged.extend(scripts);
                 existing.scripts = ordered(&merged);
+                for n in names {
+                    if !existing.names.iter().any(|x| x.lang == n.lang) {
+                        existing.names.push(n);
+                    }
+                }
             }
             continue;
         }
@@ -219,6 +259,7 @@ pub fn compute() -> Vec<SystemFontInfo> {
             family: name.clone(),
             monospaced: face.monospaced,
             scripts: ordered(&scripts),
+            names,
         });
     }
 

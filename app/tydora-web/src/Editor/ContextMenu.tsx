@@ -13,7 +13,7 @@ import {
   subscribeHighlighter,
 } from "./highlighter";
 import { TEXT_COLORS } from "./extensions/text-color";
-import { listSystemFonts, type SystemFontInfo } from "../utils/systemFonts";
+import { listSystemFonts, pickFontDisplayName, type SystemFontInfo } from "../utils/systemFonts";
 
 interface ContextMenuProps {
   editor: Editor | null;
@@ -63,11 +63,11 @@ const TEXT_COLOR_PREFIX = "text-color:";
 const FONT_FAMILY_PREFIX = "font-family:";
 
 /** 系统字体列表不可用时（纯 Web / 读取失败）的兜底常用族（附经验覆盖） */
-const FALLBACK_FONTS: Array<{ family: string; scripts: string[] }> = [
-  { family: "Microsoft YaHei", scripts: ["han", "latin"] },
-  { family: "SimSun", scripts: ["han", "latin"] },
-  { family: "SimHei", scripts: ["han", "latin"] },
-  { family: "KaiTi", scripts: ["han", "latin"] },
+const FALLBACK_FONTS: Array<{ family: string; scripts: string[]; names?: { lang: string; family: string }[] }> = [
+  { family: "Microsoft YaHei", scripts: ["han", "latin"], names: [{ lang: "zh", family: "微软雅黑" }, { lang: "en", family: "Microsoft YaHei" }] },
+  { family: "SimSun", scripts: ["han", "latin"], names: [{ lang: "zh", family: "宋体" }, { lang: "en", family: "SimSun" }] },
+  { family: "SimHei", scripts: ["han", "latin"], names: [{ lang: "zh", family: "黑体" }, { lang: "en", family: "SimHei" }] },
+  { family: "KaiTi", scripts: ["han", "latin"], names: [{ lang: "zh", family: "楷体" }, { lang: "en", family: "KaiTi" }] },
   { family: "Segoe UI", scripts: ["latin", "cyrillic", "greek"] },
   { family: "Arial", scripts: ["latin", "cyrillic", "greek"] },
   { family: "Consolas", scripts: ["latin", "cyrillic"] },
@@ -440,7 +440,7 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
     };
   }, [position, requestClose]);
 
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const submenuRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -617,7 +617,13 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       fontLang === "all" || fontLangs.length === 0
         ? fontSource
         : fontSource.filter((f) => (f.scripts ?? []).includes(fontLang));
-    const families = q ? byLang.filter((f) => f.family.toLowerCase().includes(q)) : byLang;
+    // 显示名按界面语言取本地化族名（zh → 微软雅黑）；搜索同时匹配显示名与规范名
+    const families = q
+      ? byLang.filter((f) => {
+          const display = pickFontDisplayName(f, i18n.language).toLowerCase();
+          return display.includes(q) || f.family.toLowerCase().includes(q);
+        })
+      : byLang;
     const items: Array<SubmenuEntry | { divider: true; label: string }> = [
       {
         name: "font-family-clear",
@@ -629,7 +635,7 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       { divider: true, label: "" },
       ...families.map((f) => ({
         name: `${FONT_FAMILY_PREFIX}${f.family}`,
-        label: f.family,
+        label: pickFontDisplayName(f, i18n.language),
         shortcutId: null,
         previewFont: f.family,
         checked: f.family === activeFamily,
@@ -641,7 +647,7 @@ export function ContextMenu({ editor, position, onClose }: ContextMenuProps) {
       icon: ICONS.fontFamily,
       submenu: items,
     };
-  }, [t, fontSource, fontLangs, fontLang, fontFilter, activeFamily]);
+  }, [t, i18n.language, fontSource, fontLangs, fontLang, fontFilter, activeFamily]);
 
   const tableMenuItems = useMemo(() => createTableMenuItems(t), [t]);
   const submenuItems = useMemo(
