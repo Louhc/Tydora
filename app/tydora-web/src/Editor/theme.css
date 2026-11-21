@@ -5,6 +5,9 @@
   overflow-y: auto;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
+  /* 窄栏自适应的查询容器：分屏窄栏时井号标记隐藏、左槽收回（见标题井号规则） */
+  container-type: inline-size;
+  container-name: tydora-editor;
 }
 
 /* 编辑器滚动条：必须在同一元素上写全套伪元素，
@@ -296,6 +299,10 @@
   font-size: var(--editor-font-size, 16px);
   line-height: var(--editor-line-height, 1.6);
   padding: 2rem 3rem;
+  /* 左槽随字号自适应：H3 井号串最宽 = 3 字 × 0.62 等宽advance × 1em（与手打同大）× 1.25 级 ≈ 2.33em，取 2.4；
+     再加 1.75rem 呼吸间距 —— 任何字号下井号都不越出左槽被左栏盖住（用户实测 H3 起被盖）。
+     全体块统一右移，标题与正文的相对对齐不变。 */
+  padding-left: calc(2.4 * var(--editor-font-size, 16px) + 1.75rem);
   /* 文末留白：允许滚动到文末后继续下滚，把最后一行放到窗口中间附近 */
   padding-bottom: calc(2rem + var(--editor-end-scroll-space, 0px));
   min-height: 100%;
@@ -471,29 +478,31 @@ html.platform-macos .tiptap-editor .tiptap {
  * 标题文字位置一个像素都不动（用户要求）；多级 # 串右对齐成一列。
  * ::before 已被右侧行号占用，故用 ::after。
  * 字号用 em（相对标题自身字号）→ 随标题级别缩放（用户要求）。
+ * 仅 H1–H3 保留井号（用户定：H4–H6 不再显示）；左槽宽度见 .tiptap 的
+ * padding-left calc（随字号自适应，H3 串最宽）；窄栏由容器查询隐藏并收回左槽。
  */
 .tiptap-editor .tiptap h1::after,
 .tiptap-editor .tiptap h2::after,
-.tiptap-editor .tiptap h3::after,
-.tiptap-editor .tiptap h4::after,
-.tiptap-editor .tiptap h5::after,
-.tiptap-editor .tiptap h6::after {
+.tiptap-editor .tiptap h3::after {
   position: absolute;
   right: 100%;
-  margin-right: 0.5rem;
+  margin-right: 0.75rem;
   top: 0;
-  /* 高度 = 标题首行行盒（级别 × 行高 × 编辑器字号），flex 垂直居中 →
-     多行标题时标记也对齐首行，且跟随编辑器字号 / 行高设置 */
+  /* 与手打井号同基线（用户要求"位置也要一样，不要偏下"）：
+     padding-top 继承标题（顶层标题 0.5em、嵌套 0），line-height 继承标题行高 ——
+     同字体同字号同字重同行高同起点 ⇒ 标记行盒与标题首行盒逐字重合，不再 flex 居中猜偏移。 */
+  padding-top: inherit;
+  line-height: inherit;
+  /* 高度 = 标题首行行盒（级别 × 行高 × 编辑器字号），多行标题时标记也对齐首行 */
   height: calc(var(--hl, 1) * var(--editor-line-height, 1.6) * var(--editor-font-size, 16px));
-  display: flex;
-  align-items: center;
-  line-height: 1;
   color: var(--text-secondary);
   opacity: 0.55;
-  /* em 相对标题字号：h1 的 # 大、h6 的 # 小，与标题同级缩放 */
-  font-size: 0.75em;
-  font-weight: 400;
-  font-family: var(--editor-font, "JetBrains Mono", "Fira Code", monospace);
+  /* em 相对标题字号：h1 的 # 大、h6 的 # 小，与标题同级缩放。
+     1em + inherit 字重 = 与直接打出来的井号同大同粗（用户要求）；仅以灰度区分装饰。 */
+  font-size: 1em;
+  font-weight: inherit;
+  /* 字体族亦继承标题：与手打井号完全同字（用户要求"和直接打出来一样"） */
+  font-family: inherit;
   user-select: none;
   pointer-events: none;
 }
@@ -501,9 +510,19 @@ html.platform-macos .tiptap-editor .tiptap {
 .tiptap-editor .tiptap h1::after { --hl: 2; content: "#"; }
 .tiptap-editor .tiptap h2::after { --hl: 1.5; content: "##"; }
 .tiptap-editor .tiptap h3::after { --hl: 1.25; content: "###"; }
-.tiptap-editor .tiptap h4::after { --hl: 1.1; content: "####"; }
-.tiptap-editor .tiptap h5::after { --hl: 1; content: "#####"; }
-.tiptap-editor .tiptap h6::after { --hl: 0.9; content: "######"; }
+
+/* 窄栏自适应（分屏）：栏宽不足 28rem 时井号隐藏、左槽收回 1.25rem，
+   把宽度还给正文；级别仍由标题字号层级表达（Notion 式）。 */
+@container tydora-editor (max-width: 28rem) {
+  .tiptap-editor .tiptap {
+    padding-left: 1.25rem;
+  }
+  .tiptap-editor .tiptap h1::after,
+  .tiptap-editor .tiptap h2::after,
+  .tiptap-editor .tiptap h3::after {
+    display: none;
+  }
+}
 
 /* 段落 */
 .tiptap-editor p {
