@@ -1,6 +1,271 @@
-import { Extension } from "@tiptap/core";
+import { Extension, type CommandProps } from "@tiptap/core";
 import { BlockMath, InlineMath } from "@tiptap/extension-mathematics";
+import { Fragment } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
 import type MarkdownIt from "markdown-it";
+
+// ============================================================================
+// \[ ... \] 显式转换（右键「插入 → 公式块」触发，不做自动解析）
+// 序列化会把字面方括号转义成 \[ \]，自动认 \[ 为公式必误伤旧笔记；
+// 故仅在用户主动唤出公式块时，识别选区/光标所及的 \[...\] 并忽略分隔符。
+// ============================================================================
+
+declare module "@tiptap/core" {
+  interface Commands<ReturnType> {
+    math: {
+      /** 把 \[...\] / 回车分隔符区间替换为 blockMath（保留前后文字与 marks） */
+      replaceRangeWithBlockMath: (opts: { from: number; to: number; latex: string }) => ReturnType;
+    };
+  }
+}
+
+/**
+ * 粘贴文本预处理：把 \[...\] 包裹之公式块改写为 $$...$$（用户要求粘贴即转）。
+ * 跨段形（独占行的 \[ / \]，含裸形）与同行转义形皆改；代码围栏内不动；
+ * 同行裸 [x] 或为散文括號，不动。改写发生在 markdown 解析之前，故反斜杠尚在。
+ */
+export function rewriteBracketMathInText(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  let fenceChar = "";
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trim = line.trim();
+    const fence = /^(```+|~~~+)/.exec(trim);
+    if (fence) {
+      if (!inFence) {
+        inFence = true;
+        fenceChar = fence[1][0];
+      } else if (fence[1][0] === fenceChar && trim.replace(/[`~]/g, "") === "") {
+        inFence = false;
+      }
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+    if (trim === "\\[" || trim === "[") {
+      let j = i + 1;
+      let close = -1;
+      const inner: string[] = [];
+      for (; j < lines.length; j++) {
+        const t2 = lines[j].trim();
+        if (t2 === "\\]" || t2 === "]") {
+          close = j;
+          break;
+        }
+        if (t2 === "\\[" || t2 === "[" || /^(```|~~~)/.test(t2)) break;
+        inner.push(lines[j]);
+      }
+      if (close >= 0 && inner.some((s) => s.trim() !== "")) {
+        const indent = line.slice(0, line.length - trim.length);
+        const cline = lines[close];
+        out.push(indent + "$$");
+        out.push(...inner);
+        out.push(cline.slice(0, cline.length - cline.trim().length) + "$$");
+        i = close;
+        continue;
+      }
+    }
+    out.push(line.replace(/\\\[([^\]\n]+?)\\\]/g, (_m, inner: string) => "$$" + inner + "$$"));
+  }
+  return out.join("\n");
+}
+
+/**
+ * 粘贴 HTML 预处理：把 \[...\] 包裹之公式块改写为 $$...$$（网页复制走 HTML 通道，
+ * 不经 transformPastedText，故须在此改）。跨段形按「叶块」序配对（独占块之 \[ / \]，含裸形）；
+ * 同行转义形逐文本节点改；pre/code 内不动。改写后交 PM 解析，$$ 再由 template-live 收拢。
+ */
+export function rewriteBracketMathInHtml(html: string): string {
+  if (!html.includes("[") && !html.includes("data-math-source")) return html;
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inCode = (el: Element | null): boolean => {
+    let p = el;
+    while (p) {
+      if (p.tagName === "PRE" || p.tagName === "CODE") return true;
+      p = p.parentElement;
+    }
+    return false;
+  };
+  // 块级 latex 拆成 $$ / 本体逐行 / $$ 三段（文本节点不能含换行，PM 解析会折叠）；
+  // 单行则 $$latex$$ 一段，交 template-live 收拢
+  const blockHtml = (latex: string): string => {
+    const lines = latex.split("\n");
+    if (lines.length === 1) return `<p>$$${esc(latex)}$$</p>`;
+    return `<p>$$</p>${lines.map((l) => `<p>${esc(l)}</p>`).join("")}<p>$$</p>`;
+  };
+  // ChatGPT 等网页复制带 data-math-source（权威纯 latex）→ 直接取之，免解析分隔符
+  for (const el of Array.from(parsed.body.querySelectorAll("[data-math-source]"))) {
+    if (inCode(el)) continue;
+    const latex = el.getAttribute("data-math-source") || "";
+    if (!latex.trim()) continue;
+    const display = el.getAttribute("data-math-display") !== "false";
+    if (display) {
+      el.insertAdjacentHTML("afterend", blockHtml(latex));
+      el.remove();
+    } else {
+      // 行内：原地换文本节点，保住所在段落之上下文
+      el.replaceWith(parsed.createTextNode("$" + latex + "$"));
+    }
+  }
+  const BLOCK = "p,div,li,h1,h2,h3,h4,h5,h6,blockquote";
+  const leaves = Array.from(parsed.body.querySelectorAll(BLOCK)).filter(
+    (el) => !el.querySelector(BLOCK),
+  );
+  let open = -1;
+  for (let i = 0; i < leaves.length; i++) {
+    const t = (leaves[i].textContent || "").trim();
+    // 单个文本节点内跨行之 \[...\]（ChatGPT 之 div>span 即此形，无 data-math-source 时亦收）
+    const wrapped =
+      (t.startsWith("\\[") && t.endsWith("\\]") && t.length > 4) ||
+      (t.startsWith("[") && t.endsWith("]") && t.length > 2);
+    if (wrapped && t.includes("\n") && !inCode(leaves[i])) {
+      const inner = t.slice(t.startsWith("\\[") ? 2 : 1, t.endsWith("\\]") ? -2 : -1).trim();
+      if (inner) {
+        leaves[i].insertAdjacentHTML("afterend", blockHtml(inner));
+        leaves[i].remove();
+        open = -1;
+        continue;
+      }
+    }
+    if (t === "\\[" || t === "[") {
+      open = i;
+    } else if ((t === "\\]" || t === "]") && open >= 0) {
+      const inner = leaves.slice(open + 1, i);
+      if (inner.length > 0 && inner.some((el) => (el.textContent || "").trim() !== "")) {
+        leaves[open].textContent = "$$";
+        leaves[i].textContent = "$$";
+      }
+      open = -1;
+    }
+  }
+  // 4 = NodeFilter.SHOW_TEXT（jsdom 全局无 NodeFilter，用字面量免 ReferenceError）
+  const walker = parsed.createTreeWalker(parsed.body, 4);
+  const texts: Text[] = [];
+  while (walker.nextNode()) texts.push(walker.currentNode as Text);
+  for (const tn of texts) {
+    if (inCode(tn.parentElement)) continue;
+    const v = tn.nodeValue || "";
+    if (v.includes("\\[")) tn.nodeValue = v.replace(/\\\[([^\]\n]+?)\\\]/g, (_m, inner: string) => "$$" + inner + "$$");
+  }
+  return parsed.body.innerHTML;
+}
+
+/** 削掉latex外层包裹的分隔符（\[ \] / [ ] / $$ / $）：旧版误插的节点自带分隔符，编辑时须还原纯本体 */
+export function stripMathDelimiters(latex: string): string {
+  let s = latex.trim();
+  if (s.startsWith("\\[") && s.endsWith("\\]") && s.length > 4) s = s.slice(2, -2);
+  else if (s.startsWith("[") && s.endsWith("]") && s.length > 2) s = s.slice(1, -1);
+  else if (s.startsWith("$$") && s.endsWith("$$") && s.length > 4) s = s.slice(2, -2);
+  else if (s.startsWith("$") && s.endsWith("$") && s.length > 2) s = s.slice(1, -1);
+  return s.trim();
+}
+
+export interface BracketMathRange {
+  from: number;
+  to: number;
+  latex: string;
+  multiline: boolean;
+}
+
+const BRACKET_SKIP_BLOCKS = new Set(["codeBlock", "code_block", "frontmatter"]);
+
+/** 找选区/光标所及的 \[...\]（选区自带、选区为本体两侧贴分隔符、同段、跨段四形） */
+export function findBracketMathRange(state: any, from: number, to: number): BracketMathRange | null {
+  const doc = state.doc;
+  // 光标贴着/落在「latex 自带分隔符」的旧误插节点上 → 整节点替换为干净公式
+  if (from === to) {
+    const $f = doc.resolve(from);
+    const nb = $f.nodeBefore;
+    const na = $f.nodeAfter;
+    const node = nb && (nb.type.name === "blockMath" || nb.type.name === "inlineMath") ? nb : na && (na.type.name === "blockMath" || na.type.name === "inlineMath") ? na : null;
+    if (node) {
+      const raw = (node.attrs.latex as string) || "";
+      const clean = stripMathDelimiters(raw);
+      if (clean !== raw.trim()) {
+        const nodePos = node === nb ? from - node.nodeSize : from;
+        return { from: nodePos, to: nodePos + node.nodeSize, latex: clean, multiline: /\n/.test(clean) };
+      }
+    }
+  }
+  const selText = from < to ? doc.textBetween(from, to, "\n", "￼") : "";
+  // 选区自带分隔符：\[...\] 或裸 [...]（存盘再读时反斜杠被 CommonMark 转义吃掉，
+  // 显式选区即意图，裸形也收）
+  const openLen = selText.startsWith("\\[") ? 2 : selText.startsWith("[") ? 1 : 0;
+  const closeLen = selText.endsWith("\\]") ? 2 : selText.endsWith("]") ? 1 : 0;
+  if (openLen > 0 && closeLen > 0 && selText.length > openLen + closeLen) {
+    const latex = selText.slice(openLen, selText.length - closeLen);
+    return { from, to, latex, multiline: /\n/.test(latex) };
+  }
+  if (from < to) {
+    // 注意：本模块导出名为 Math 的扩展，模块内 Math 已被遮蔽 → 用 globalThis.Math
+    const b2 = doc.textBetween(globalThis.Math.max(0, from - 2), from);
+    const a2 = doc.textBetween(to, globalThis.Math.min(doc.content.size, to + 2));
+    const ob = b2 === "\\[" ? 2 : b2.endsWith("[") ? 1 : 0;
+    const cb = a2 === "\\]" ? 2 : a2.startsWith("]") ? 1 : 0;
+    if (ob > 0 && cb > 0) {
+      return { from: from - ob, to: to + cb, latex: selText, multiline: /\n/.test(selText) };
+    }
+  }
+  const textish = (n: any): boolean => {
+    let ok = true;
+    n.content.forEach((c: any) => {
+      if (!c.isText && c.type.name !== "hardBreak") ok = false;
+    });
+    return ok;
+  };
+  const blocks: Array<[number, any]> = [];
+  doc.descendants((n: any, pos: number) => {
+    if (n.isTextblock && !BRACKET_SKIP_BLOCKS.has(n.type.name)) blocks.push([pos, n]);
+  });
+  const cands: BracketMathRange[] = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const [pos, n] = blocks[i];
+    const t = n.textContent as string;
+    const isOpen = t.trim() === "\\[" || t.trim() === "[";
+    if (n.type.name === "paragraph" && isOpen && textish(n)) {
+      const inner: string[] = [];
+      let close = -1;
+      let closeSize = 0;
+      let j = i + 1;
+      for (; j < blocks.length; j++) {
+        const [p, m] = blocks[j];
+        if (m.type.name !== "paragraph" || !textish(m)) break;
+        const mt = m.textContent as string;
+        if (mt.trim() === "\\]" || mt.trim() === "]") {
+          close = p;
+          closeSize = m.nodeSize;
+          break;
+        }
+        if (mt.includes("\\[") || mt.trim() === "[") break;
+        inner.push(mt);
+      }
+      if (close >= 0 && inner.length > 0) {
+        cands.push({ from: pos, to: close + closeSize, latex: "\n" + inner.join("\n\n") + "\n\n", multiline: true });
+        i = j;
+        continue;
+      }
+    }
+    const re = /\\\[([^\]\n]+?)\\\]/g;
+    let m2: RegExpExecArray | null;
+    while ((m2 = re.exec(t)) !== null) {
+      const f = pos + 1 + m2.index;
+      const $f = doc.resolve(f);
+      if ($f.marks().some((mk: any) => mk.type.name === "code")) continue;
+      cands.push({ from: f, to: f + m2[0].length, latex: m2[1], multiline: false });
+    }
+  }
+  for (const c of cands) {
+    const touched = from < to ? c.from <= to && c.to >= from : c.from <= from && c.to >= from;
+    if (touched) return c;
+  }
+  return null;
+}
 
 // ============================================================================
 // markdown-it 数学插件
@@ -184,6 +449,53 @@ export const Math = Extension.create<MathOptions>({
   name: "math",
   addOptions() {
     return { onClick: undefined, katexOptions: undefined };
+  },
+  addCommands() {
+    return {
+      /**
+       * 把区间（\[...\] 字面量或回车留下的 $ / $$）替换为 blockMath：
+       * 跨块区间直接整段替换；同段中段者重建为 [段, blockMath, 段]，
+       * 保留前后 marks 与行内节点；光标落到公式之后续输。
+       */
+      replaceRangeWithBlockMath:
+        ({ from, to, latex }: { from: number; to: number; latex: string }) =>
+        ({ tr, dispatch }: CommandProps) => {
+          const schema = this.editor.schema;
+          const node = schema.nodes.blockMath.create({ latex, multiline: /\n/.test(latex) });
+          tr.delete(from, to);
+          let nodePos = from;
+          const $p = tr.doc.resolve(from);
+          const parent = $p.parent;
+          if (!parent.isTextblock) {
+            tr.insert(from, node);
+          } else {
+            const off = $p.parentOffset;
+            const before = parent.content.cut(0, off);
+            const after = parent.content.cut(off, parent.content.size);
+            const pPos = $p.before();
+            if (before.size === 0 && after.size === 0) {
+              tr.replaceWith(pPos, pPos + parent.nodeSize, node);
+              nodePos = pPos;
+            } else {
+              const nodes: any[] = [];
+              if (before.size > 0) {
+                const para = parent.type.create(parent.attrs, before);
+                nodes.push(para);
+                nodePos = pPos + para.nodeSize;
+              } else {
+                nodePos = pPos;
+              }
+              nodes.push(node);
+              if (after.size > 0) nodes.push(parent.type.create(parent.attrs, after));
+              tr.replaceWith(pPos, pPos + parent.nodeSize, Fragment.fromArray(nodes));
+            }
+          }
+          // 公式后可能是块末 gap（无文本块）：gap 光标合法，续输由 PM 自动成段
+          tr.setSelection(TextSelection.create(tr.doc, nodePos + node.nodeSize));
+          if (dispatch) dispatch(tr);
+          return true;
+        },
+    };
   },
   addKeyboardShortcuts() {
     return {

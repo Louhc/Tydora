@@ -69,7 +69,7 @@ import { HardBreakCleanup } from "./extensions/hardbreak-cleanup";
 import { TableFloatingToolbar as TableFloatingToolbarComponent } from "./TableFloatingToolbar";
 import { deleteCurrentLine, executeCommand, insertClipboardHtml, insertPlainText, pasteFromClipboard, pastePlainTextFromClipboard } from "./extensions/custom-commands";
 import { normalizePathKey } from "../utils/fileName";
-import { Math as MathExtension } from "./extensions/math";
+import { Math as MathExtension, stripMathDelimiters, rewriteBracketMathInText } from "./extensions/math";
 import { installImageWordMarkRule, installEmptyParagraphRule } from "./extensions/markdown-setup";
 import { saveImageToLocal, loadImageSettings, resolveRelativePath, dirName, ImageSaveCancelledError, IMAGE_SETTINGS_KEY, readImageAsBlobUrl } from "../services";
 import { loadFileViewPosition, saveFileViewPosition, clearFileViewPosition, type FileViewPosition } from "../services/editorViewPosition";
@@ -2054,7 +2054,8 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
               MathExtension.configure({
                 onClick: (node: any, pos: number) => {
                   setMathDialog({
-                    latex: node.attrs.latex || "",
+                    // 旧版误插的节点 latex 自带 \[ \] / $$ 包裹 → 削掉再编辑，免预览报错
+                    latex: stripMathDelimiters(node.attrs.latex || ""),
                     block: node.type.name === "blockMath",
                     pos,
                   });
@@ -2180,6 +2181,8 @@ const md = getMarkdownSafe(ed);
         });
       },
       editorProps: {
+        // 粘贴之 \[...\] 公式块先改写为 $$...$$ 再交 markdown 解析（代码围栏内不动）
+        transformPastedText: (text: string) => rewriteBracketMathInText(text),
         handleDOMEvents: {
           /**
            * 接管复制：自己写剪贴板的 **text/html** 与 **text/plain**。
@@ -2654,6 +2657,7 @@ const md = getMarkdownSafe(ed);
       const handleMathDialogOpen = (e: Event) => {
         const detail = (e as CustomEvent).detail;
         setMathDialog({
+          // 事件负载之 latex 已是纯本体（跨段形态之首尾换行须保留，不可 trim）
           latex: detail?.latex || "",
           block: detail?.block !== false,
           pos: null,
@@ -2710,28 +2714,22 @@ const md = getMarkdownSafe(ed);
             }
           }
         } else if (dialog?.replace) {
-          // 回车触发：删掉打出的 $ / $$ 分隔符，原位插入公式节点。
-          // 块级：删后若所在文本块已空，整块替换为 blockMath（往空段里 insert 块节点会丢节点）
+          // 回车触发 / 右键公式块识别到 \[...\]：删分隔符原位替换为公式节点。
+          // 块级走 replaceRangeWithBlockMath（空段整块替换、中段重建为段+块+段，免丢节点）
           const { from, to } = dialog.replace;
-          editor
-            .chain()
-            .focus()
-            .deleteRange({ from, to })
-            .command(({ tr }) => {
-              if (block) {
-                const node = editor.schema.nodes.blockMath.create({ latex, multiline: /\n/.test(latex) });
-                const $pos = tr.doc.resolve(from);
-                if ($pos.parent.isTextblock && $pos.parent.content.size === 0) {
-                  tr.replaceWith($pos.before(), $pos.after(), node);
-                } else {
-                  tr.insert(from, node);
-                }
-              } else {
+          if (block) {
+            editor.chain().focus().replaceRangeWithBlockMath({ from, to, latex }).run();
+          } else {
+            editor
+              .chain()
+              .focus()
+              .deleteRange({ from, to })
+              .command(({ tr }) => {
                 tr.insert(from, editor.schema.nodes.inlineMath.create({ latex }));
-              }
-              return true;
-            })
-            .run();
+                return true;
+              })
+              .run();
+          }
         } else {
           // 插入新公式
           const from = editor.state.selection.from;

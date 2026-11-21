@@ -96,6 +96,15 @@ export const TemplateLive = Extension.create({
      * 扫描一段纯文本，把其中可渲染的模板字面量换成 mark / 注音节点。
      * 没有任何转换时返回 null（调用方保留原文本节点）。
      */
+    /** $$ 收拢时略去本体外层的 \[ \] 包裹（用户要求）；无包裹者原样保留（含首尾空行，逐字节一致） */
+    const cleanMathLatex = (latex: string): string => {
+      const t = latex.trim();
+      if (t.startsWith("\\[") && t.endsWith("\\]") && t.length > 4) return t.slice(2, -2).trim();
+      // 裸 [ ] 包裹仅认跨行形（存盘再读反斜杠被转义吃掉）；同行 $$[x]$$ 之括號或为本体，不动
+      if (t.includes("\n") && t.startsWith("[") && t.endsWith("]") && t.length > 2) return t.slice(1, -1).trim();
+      return latex;
+    };
+
     /** 行内 $...$ 字面量（$$ 归块级，不在此处理）；分隔符校验与 markdown-it 同口径 */
     const matchInlineMathAt = (s: string, i: number): { end: number; latex: string } | null => {
       if (s[i] !== "$" || s[i + 1] === "$") return null;
@@ -260,7 +269,11 @@ export const TemplateLive = Extension.create({
             if (closePos < 0 || inner.length === 0) continue;
             // 与 markdown-it mathBlock 跨行解析出的 content 同形（getLines 自带尾换行）：
             // 首补一个 \n（分隔符后空行）、尾补两个 \n（本体后空行 + 行尾），往返逐字节一致
-            crossBlocks.push({ from: openPos, to: closePos + closeSize, latex: "\n" + inner.join("\n\n") + "\n\n" });
+            crossBlocks.push({
+              from: openPos,
+              to: closePos + closeSize,
+              latex: cleanMathLatex("\n" + inner.join("\n\n") + "\n\n"),
+            });
             for (let k = i; k <= j; k++) blocks.delete(ordered[k][0]);
             i = j;
           }
@@ -367,9 +380,10 @@ export const TemplateLive = Extension.create({
                 if (ls < nodeStart + local || le > nodeStart + child.text.length) continue;
                 if (ls > nodeStart + local) pushPiece(child.text.slice(local, ls - nodeStart), child.marks);
                 flushSeg();
+                const latex = cleanMathLatex(lit.latex);
                 const node = schema.nodes.blockMath.create({
-                  latex: lit.latex,
-                  multiline: /\n/.test(lit.latex),
+                  latex,
+                  multiline: /\n/.test(latex),
                 });
                 nodes.push(node);
                 acc += node.nodeSize;
@@ -385,13 +399,13 @@ export const TemplateLive = Extension.create({
             tr = tr.replaceWith(blockPos, blockPos + block.nodeSize, Fragment.fromArray(nodes));
             if (newPos != null) {
               // 不 clamp 进 atom 内部（clamp 到 size-1 会落进 blockMath atom，续输会删节点）；
-              // 块末 gap 位置合法，续输由 PM 自动成段
+              // 块末 gap 位置合法（续输由 PM 自动成段）；near 会落回前段/原子，反失续输位
               tr = tr.setSelection(TextSelection.create(tr.doc, newPos));
             }
           }
           // 跨段 $$ 收拢：整段区间替换为单个 blockMath（自右向左）
           for (const cb of crossBlocks.sort((a, b) => b.from - a.from)) {
-            const node = schema.nodes.blockMath.create({ latex: cb.latex, multiline: true });
+            const node = schema.nodes.blockMath.create({ latex: cb.latex, multiline: /\n/.test(cb.latex) });
             const head = newState.selection.head;
             const from = tr.mapping.map(cb.from);
             const to = tr.mapping.map(cb.to);

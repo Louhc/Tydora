@@ -5,6 +5,7 @@ import { DOMParser as PMDOMParser, type Node } from "prosemirror-model";
 import { invoke } from "@tauri-apps/api/core";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 import { applyMarkToInlineNodes } from "./highlight-ext";
+import { findBracketMathRange, rewriteBracketMathInHtml, rewriteBracketMathInText } from "./math";
 import { suppressRubyAutoExpandOnce } from "./ruby";
 
 /**
@@ -197,7 +198,8 @@ export function deleteCurrentLine(editor: Editor): void {
 export function insertClipboardHtml(editor: Editor, html: string): boolean {
   try {
     const schema = editor.schema;
-    const parsed = new DOMParser().parseFromString(html, "text/html");
+    // 网页复制走 HTML 通道：先把 \[...\] 公式块改写为 $$...$$（pre/code 内不动）
+    const parsed = new DOMParser().parseFromString(rewriteBracketMathInHtml(html), "text/html");
     const parsedDoc = PMDOMParser.fromSchema(schema).parse(parsed.body);
 
     const blocks: any[] = [];
@@ -250,7 +252,11 @@ export function insertClipboardHtml(editor: Editor, html: string): boolean {
  */
 export function insertPlainText(editor: Editor, text: string): void {
   if (!editor || editor.isDestroyed || !text) return;
-  const lines = text.split(/\r?\n/);
+  // 纯文本通道亦转 \[...\] 公式块（用户要求粘贴即转）；$$ 收拢由 template-live 接手
+  text = rewriteBracketMathInText(text);
+  // 空行是 markdown 的段落分隔符，不是空段落：逐行成段时丢掉，免粘出多余空行（用户实测）。
+  // $$ 跨段形之内空行不受影响——收拢时按 "\n\n" 重组本体，序列化自还原。
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
   if (lines.length === 1) {
     const view = editor.view;
     view.dispatch(view.state.tr.insertText(text));
@@ -653,10 +659,18 @@ export function executeCommand(name: string, editor: Editor | null) {
       chain.insertContent("[^1]: ").run();
       break;
     case "math": {
-      // 打开公式编辑弹窗（含实时预览），确认后插入块级公式
+      // 打开公式编辑弹窗（含实时预览），确认后插入块级公式。
+      // 选区/光标所及若有 \[...\]（含跨段形态）→ 忽略分隔符：弹窗预填本体，
+      // 确认时整段替换为公式节点（显式触发，不做自动解析，免误伤字面方括号）
+      const { from, to } = editor.state.selection;
+      const hit = findBracketMathRange(editor.state, from, to);
       window.dispatchEvent(
         new CustomEvent("math-dialog-open", {
-          detail: { latex: "", block: true },
+          detail: {
+            latex: hit?.latex ?? "",
+            block: true,
+            ...(hit ? { replaceFrom: hit.from, replaceTo: hit.to } : {}),
+          },
         })
       );
       break;
