@@ -19,7 +19,11 @@ interface Replacement {
   from: number;
   to: number;
   frag: Fragment;
+  spans: Array<{ from: number; to: number; size: number }>;
 }
+
+/** 自家即时转换事务标记：免二次自扫（见 appendTransaction 开头） */
+const TL_META = "tydoraTemplateLive";
 
 /**
  * 模板「输入 / 粘贴即时渲染」。
@@ -129,8 +133,11 @@ export const TemplateLive = Extension.create({
       outerMarks: readonly any[],
       /** 顶层扫描才给：判断某 Ruby 字面量是否处于「展开编辑中」，是则跳过不收 */
       rubyEditing?: (start: number, end: number) => boolean,
-    ): { frag: Fragment; ruby: boolean } | null => {
+    ): { frag: Fragment; ruby: boolean; spans: Array<{ from: number; to: number; size: number }> } | null => {
       const pieces: any[] = [];
+      // 已转换字面量的原文区间 → 替换后节点尺寸：供调用方语义重置光标
+      //（整文本节点替换会把区间内光标被 PM 自动映射到替换末 = 段末，用户实测光标跳/消失）。
+      const spans: Array<{ from: number; to: number; size: number }> = [];
       let plainStart = 0;
       let changed = false;
       let ruby = false;
@@ -142,6 +149,7 @@ export const TemplateLive = Extension.create({
         if (mm) {
           if (i > plainStart) pieces.push(schema.text(s.slice(plainStart, i), outerMarks as any));
           pieces.push(schema.nodes.inlineMath.create({ latex: mm.latex }, null, outerMarks as any));
+          spans.push({ from: i, to: mm.end, size: pieces[pieces.length - 1].nodeSize });
           changed = true;
           plainStart = mm.end;
           i = mm.end;
@@ -184,6 +192,7 @@ export const TemplateLive = Extension.create({
           if (m.start > plainStart) pieces.push(schema.text(s.slice(plainStart, m.start), outerMarks as any));
           // pieces 必须是**节点**数组：把片段摊平（其子节点已是转换完成的节点）
           for (const child of frag.content as any[]) pieces.push(child);
+          spans.push({ from: m.start, to: m.end, size: frag.size });
           changed = true;
           plainStart = m.end;
         }
@@ -191,13 +200,17 @@ export const TemplateLive = Extension.create({
       }
       if (!changed) return null;
       if (plainStart < s.length) pieces.push(schema.text(s.slice(plainStart), outerMarks as any));
-      return { frag: Fragment.fromArray(pieces), ruby };
+      return { frag: Fragment.fromArray(pieces), ruby, spans };
     };
 
     return [
       new Plugin({
         key: new PluginKey("tydoraTemplateLive"),
         appendTransaction: (trs, oldState, newState) => {
+          // 自家替换 tr 不再自扫：二次 pass 的 invert 映射会把被替区间内的位置
+          // 缩成一点（of >= ot）→ rubyEditingAt 误判「非编辑态」→ 把编辑中的字面量也收掉
+          //（实测：三 ruby 链展后移光标，中间字面量被收、光标兜底段末）。
+          if (trs.some((tr) => tr.getMeta(TL_META))) return null;
           const docChanged = trs.some((tr) => tr.docChanged);
           // 任意时刻（文档改动或光标移动）只要满足配平条件就收起 → 全文扫描。
           // 普通笔记上是亚毫秒级正则遍历（与 ruby 的全文扫描同量级）。
@@ -312,15 +325,42 @@ export const TemplateLive = Extension.create({
                 );
                 if (!conv) return;
                 madeRuby = madeRuby || conv.ruby;
-                replacements.push({ from: pos, to: pos + node.text.length, frag: conv.frag });
+                replacements.push({ from: pos, to: pos + node.text.length, frag: conv.frag, spans: conv.spans });
               },
             );
           }
           if (replacements.length === 0 && blockSplits.length === 0 && crossBlocks.length === 0) return null;
 
           let tr = newState.tr;
+          /**
+           * 语义光标落点：整文本节点替换时 PM 自动映射把**区间内**的光标落到替换末
+           * （= 段末）——用户实测「两 Ruby 间打字光标跳」「字面量右端按左键跳后 ruby 之右」
+           * 「光标消失」皆此。故按 spans 表手工回映射：纯文本 1:1、字面量内/右端 → 节点右端、
+           * 字面量右侧 → 扣除已缩字符数。自右向左处理，左側坐标不漂移。
+           */
+          let ih: number | null = newState.selection.empty ? newState.selection.head : null;
           for (const r of replacements.sort((a, b) => b.from - a.from)) {
             tr = tr.replaceWith(r.from, r.to, r.frag);
+            if (ih == null) continue;
+            if (ih > r.to) {
+              ih = r.from + r.frag.size + (ih - r.to);
+            } else if (ih >= r.from) {
+              const off = ih - r.from;
+              let removed = 0;
+              let placed: number | null = null;
+              for (const sp of r.spans) {
+                if (off < sp.from) break;
+                if (off <= sp.to) {
+                  placed = r.from + (sp.from - removed) + sp.size;
+                  break;
+                }
+                removed += sp.to - sp.from - sp.size;
+              }
+              ih = placed ?? r.from + off - removed;
+            }
+          }
+          if (ih != null && replacements.length > 0) {
+            tr = tr.setSelection(TextSelection.create(tr.doc, ih));
           }
           // 块级拆分：整块重建为 [段, blockMath, 段, …]（自右向左，位置不漂移）。
           // 不用 split/insert：空段会多序列化出空行，且光标映射不可控；
@@ -415,6 +455,7 @@ export const TemplateLive = Extension.create({
             }
           }
           if (madeRuby) suppressRubyAutoExpandOnce();
+          tr.setMeta(TL_META, true);
           return tr;
         },
       }),
