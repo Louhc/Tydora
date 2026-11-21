@@ -1,5 +1,5 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { DOMParser as PMDOMParser, Fragment } from "@tiptap/pm/model";
 import { Mapping } from "@tiptap/pm/transform";
 import {
@@ -96,6 +96,25 @@ export const TemplateLive = Extension.create({
      * 扫描一段纯文本，把其中可渲染的模板字面量换成 mark / 注音节点。
      * 没有任何转换时返回 null（调用方保留原文本节点）。
      */
+    /** 行内 $...$ 字面量（$$ 归块级，不在此处理）；分隔符校验与 markdown-it 同口径 */
+    const matchInlineMathAt = (s: string, i: number): { end: number; latex: string } | null => {
+      if (s[i] !== "$" || s[i + 1] === "$") return null;
+      if (i > 0 && (s[i - 1] === "\\" || s[i - 1] === "$")) return null;
+      const next = s.charCodeAt(i + 1);
+      if (next === 32 || next === 9) return null; // 开头后随空格 → 非数学
+      const m = /^\$([^$\n]+?)\$/.exec(s.slice(i));
+      if (!m) return null;
+      const end = i + m[0].length;
+      if (s[end] === "$") return null; // 紧跟 $ → 属 $$ 块级
+      const prev = s.charCodeAt(end - 2);
+      if (prev === 32 || prev === 9) return null; // 闭合前是空格 → 非数学
+      // 闭合 $ 前是奇数个反斜杠 = 转义过的 $ → 非数学
+      let p = end - 2;
+      while (p >= 0 && s[p] === "\\") p -= 1;
+      if ((end - 2 - p) % 2 === 1) return null;
+      return { end, latex: m[1] };
+    };
+
     const convertText = (
       s: string,
       outerMarks: readonly any[],
@@ -108,6 +127,17 @@ export const TemplateLive = Extension.create({
       let ruby = false;
       let i = 0;
       while (i < s.length) {
+        // 行内数学 $...$：任意时刻配平即收起（先打左 $ 或先打右 $ 皆可；
+        // 数学编辑走 MathDialog，不依赖源码态，故光标在内部也收）
+        const mm = matchInlineMathAt(s, i);
+        if (mm) {
+          if (i > plainStart) pieces.push(schema.text(s.slice(plainStart, i), outerMarks as any));
+          pieces.push(schema.nodes.inlineMath.create({ latex: mm.latex }, null, outerMarks as any));
+          changed = true;
+          plainStart = mm.end;
+          i = mm.end;
+          continue;
+        }
         const m = matchTemplateAt(s, i);
         if (!m) {
           // 坏模板开头 → 整段跳过（内部嵌套不单独转换，与刷新后判据一致）
@@ -159,24 +189,17 @@ export const TemplateLive = Extension.create({
       new Plugin({
         key: new PluginKey("tydoraTemplateLive"),
         appendTransaction: (trs, oldState, newState) => {
-          if (!trs.some((tr) => tr.docChanged)) return null;
+          const docChanged = trs.some((tr) => tr.docChanged);
+          // 任意时刻（文档改动或光标移动）只要满足配平条件就收起 → 全文扫描。
+          // 普通笔记上是亚毫秒级正则遍历（与 ruby 的全文扫描同量级）。
+          const scanAll = docChanged || trs.some((tr) => tr.selectionSet);
+          if (!scanAll) return null;
           // 注音自己的展开/收起交易不参与即时转换（展开出的字面量是编辑态，非新输入）
           if (trs.some((tr) => tr.getMeta(RUBY_TOGGLE_META))) return null;
 
-          // 改动区间（累积映射到最终 state）→ 涉及的文本块
-          const mapping = new Mapping();
+          // 新→旧映射：供 Ruby「展开编辑态」判定回看旧文档
           const invert = new Mapping();
-          const ranges: Array<[number, number]> = [];
-          for (const tr of trs) {
-            for (const step of tr.steps) {
-              const s = step as any;
-              if (typeof s.from !== "number") continue;
-              ranges.push([mapping.map(s.from), mapping.map(s.to ?? s.from)]);
-            }
-            mapping.appendMapping(tr.mapping);
-            invert.appendMapping(tr.mapping.invert());
-          }
-          if (ranges.length === 0) return null;
+          for (const tr of trs) invert.appendMapping(tr.mapping.invert());
 
           /** Ruby 字面量是否「展开编辑中」：光标闭区间贴/含它，且旧文档同位置已是同文 */
           const rubyEditingAt = (from: number, to: number): boolean => {
@@ -199,17 +222,32 @@ export const TemplateLive = Extension.create({
           };
 
           const blocks = new Map<number, any>();
-          for (const [from, to] of ranges) {
-            const lo = Math.max(0, from - 1);
-            const hi = Math.min(newState.doc.content.size, to + 1);
-            newState.doc.nodesBetween(lo, hi, (node: any, pos: number) => {
-              if (node.isTextblock && !SKIP_BLOCK_TYPES.has(node.type.name)) blocks.set(pos, node);
-            });
+          newState.doc.descendants((node: any, pos: number) => {
+            if (node.isTextblock && !SKIP_BLOCK_TYPES.has(node.type.name)) blocks.set(pos, node);
+          });
+
+          // 块级 $$...$$：哪怕写在同一行/段中，也必须是块级公式（用户要求）。
+          // 任意时刻配平即收（先打左 $$ 或先打右 $$ 皆可），整块重建为 [段, blockMath, 段…]。
+          const blockSplits: Array<{ blockPos: number; lits: Array<{ from: number; to: number; latex: string }> }> = [];
+          for (const [blockPos, block] of blocks) {
+            const text = block.textContent as string;
+            const lits: Array<{ from: number; to: number; latex: string }> = [];
+            const re = /\$\$([^$]+?)\$\$/g;
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(text)) !== null) {
+              const from = blockPos + 1 + m.index;
+              const to = from + m[0].length;
+              lits.push({ from, to, latex: m[1] });
+            }
+            if (lits.length > 0) blockSplits.push({ blockPos, lits });
           }
 
           const replacements: Replacement[] = [];
           let madeRuby = false;
+          const splitBlocks = new Set(blockSplits.map((b) => b.blockPos));
           for (const [blockPos, block] of blocks) {
+            // 本 pass 先做块级拆分；拆出的前后文本块下一 pass 再做行内转换
+            if (splitBlocks.has(blockPos)) continue;
             newState.doc.nodesBetween(
               blockPos,
               blockPos + block.nodeSize,
@@ -226,11 +264,60 @@ export const TemplateLive = Extension.create({
               },
             );
           }
-          if (replacements.length === 0) return null;
+          if (replacements.length === 0 && blockSplits.length === 0) return null;
 
           let tr = newState.tr;
           for (const r of replacements.sort((a, b) => b.from - a.from)) {
             tr = tr.replaceWith(r.from, r.to, r.frag);
+          }
+          // 块级拆分：整块重建为 [段, blockMath, 段, …]（自右向左，位置不漂移）。
+          // 不用 split/insert：空段会多序列化出空行，且光标映射不可控；
+          // 这里按段累加 nodeSize 手动重定位光标，确定性强。
+          for (const bs of blockSplits.sort((a, b) => b.blockPos - a.blockPos)) {
+            const block = blocks.get(bs.blockPos);
+            if (!block) continue;
+            const text = block.textContent as string;
+            const lits = bs.lits.sort((a, b) => a.from - b.from);
+            const nodes: any[] = [];
+            let newPos: number | null = null;
+            const headOffset = newState.selection.empty
+              ? newState.selection.head - (bs.blockPos + 1)
+              : -1;
+            let acc = bs.blockPos;
+            let plainStart = 0;
+            const pushText = (seg: string, segStart: number) => {
+              if (seg.length === 0) return;
+              const conv = convertText(seg, []);
+              const content = conv ? conv.frag : Fragment.from(schema.text(seg));
+              const para = block.type.create(block.attrs, content);
+              if (headOffset >= segStart && headOffset <= segStart + seg.length) {
+                newPos = acc + 1 + (headOffset - segStart);
+              }
+              nodes.push(para);
+              acc += para.nodeSize;
+            };
+            for (const lit of lits) {
+              const litStart = lit.from - (bs.blockPos + 1);
+              pushText(text.slice(plainStart, litStart), plainStart);
+              const node = schema.nodes.blockMath.create({
+                latex: lit.latex,
+                multiline: /\n/.test(lit.latex),
+              });
+              nodes.push(node);
+              acc += node.nodeSize;
+              // 光标落在字面量内/边界（含先打右 $$ 再补左 $$ 的情形）→ 落到公式之后续输
+              const litEnd = litStart + (lit.to - lit.from);
+              if (headOffset >= litStart && headOffset <= litEnd) newPos = acc;
+              plainStart = litEnd;
+            }
+            pushText(text.slice(plainStart), plainStart);
+            if (nodes.length === 0) continue;
+            tr = tr.replaceWith(bs.blockPos, bs.blockPos + block.nodeSize, Fragment.fromArray(nodes));
+            if (newPos != null) {
+              // 不 clamp 进 atom 内部（clamp 到 size-1 会落进 blockMath atom，续输会删节点）；
+              // 块末 gap 位置合法，续输由 PM 自动成段
+              tr = tr.setSelection(TextSelection.create(tr.doc, newPos));
+            }
           }
           if (madeRuby) suppressRubyAutoExpandOnce();
           return tr;

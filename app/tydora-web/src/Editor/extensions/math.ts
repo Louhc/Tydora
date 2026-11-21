@@ -41,6 +41,8 @@ function isValidDelim(state: any, pos: number) {
 /** 行内 $...$ */
 function mathInline(state: any, silent: boolean) {
   if (state.src[state.pos] !== "$") return false;
+  // `$$` 一律块级（哪怕写在同一行），行内规则不得接手（用户要求）
+  if (state.src[state.pos + 1] === "$") return false;
 
   const res = isValidDelim(state, state.pos);
   if (!res.canOpen) {
@@ -102,10 +104,12 @@ function mathBlock(state: any, start: number, end: number, silent: boolean) {
   let firstLine = state.src.slice(pos, max);
   if (silent) return true;
 
-  // 起始行直接闭合：$$...$$
+  // 起始行直接闭合：$$...$$（单行形态，content 不补换行，序列化逐字节还原）
+  let singleLine = false;
   if (firstLine.trim().slice(-2) === "$$") {
     firstLine = firstLine.trim().slice(0, -2);
     found = true;
+    singleLine = true;
   }
 
   while (!found) {
@@ -126,7 +130,7 @@ function mathBlock(state: any, start: number, end: number, silent: boolean) {
   const token = state.push("math_block", "math", 0);
   token.block = true;
   token.content =
-    (firstLine && firstLine.trim() ? firstLine + "\n" : "") +
+    (firstLine && firstLine.trim() ? firstLine + (singleLine ? "" : "\n") : "") +
     state.getLines(start + 1, next, state.tShift[start], true) +
     (lastLine && lastLine.trim() ? lastLine : "");
   token.map = [start, state.line];
@@ -151,9 +155,13 @@ export function mathMarkdownItPlugin(md: MarkdownIt, renderer?: MathMarkdownItRe
   md.renderer.rules.math_inline = (tokens: any, idx: number) =>
     renderer?.inline?.(tokens[idx].content) ??
     `<span data-type="inline-math" data-latex="${escapeHtml(tokens[idx].content)}"></span>`;
-  md.renderer.rules.math_block = (tokens: any, idx: number) =>
-    renderer?.block?.(tokens[idx].content) ??
-    `<div data-type="block-math" data-latex="${escapeHtml(tokens[idx].content)}"></div>`;
+  md.renderer.rules.math_block = (tokens: any, idx: number) => {
+    if (renderer?.block) return renderer.block(tokens[idx].content);
+    // 跨行源码记 multiline，序列化时还原多行形态（单行 $$x$$ 保持单行，逐字节一致）
+    const map = tokens[idx].map;
+    const multiline = Array.isArray(map) && map[1] - map[0] > 1;
+    return `<div data-type="block-math" data-latex="${escapeHtml(tokens[idx].content)}"${multiline ? ' data-multiline="1"' : ""}></div>`;
+  };
 }
 
 // ============================================================================
@@ -179,6 +187,11 @@ export const Math = Extension.create<MathOptions>({
         addOptions() {
           return { onClick, katexOptions };
         },
+        // 内置 input rule 会把同一行的 $$x$$ 抢成行内公式 ✗；即时转换统一由
+        // template-live 插件负责（$..$ 行内、$$..$$ 块级），此处禁用内置规则
+        addInputRules() {
+          return [];
+        },
         addStorage() {
           return {
             markdown: {
@@ -199,6 +212,26 @@ export const Math = Extension.create<MathOptions>({
         addOptions() {
           return { onClick, katexOptions };
         },
+        // 同 InlineMath：禁用内置 $$$ input rule，即时转换交给 template-live
+        addInputRules() {
+          return [];
+        },
+        addAttributes() {
+          return {
+            // extend 的 addAttributes 会整体覆盖父级 → latex 须在此重声明
+            latex: {
+              default: "",
+              parseHTML: (el: HTMLElement) => el.getAttribute("data-latex"),
+              renderHTML: (attrs: any) => ({ "data-latex": attrs.latex }),
+            },
+            // 源码是否跨行：单行 $$x$$ 序列化回单行，跨行还原多行（逐字节一致）
+            multiline: {
+              default: false,
+              parseHTML: (el: HTMLElement) => el.getAttribute("data-multiline") === "1",
+              renderHTML: (attrs: any) => (attrs.multiline ? { "data-multiline": "1" } : {}),
+            },
+          };
+        },
         addStorage() {
           return {
             markdown: {
@@ -209,10 +242,14 @@ export const Math = Extension.create<MathOptions>({
               serialize(state: any, node: any) {
                 const latex = (node.attrs.latex as string) || "";
                 state.ensureNewLine();
-                state.write("$$\n");
-                state.text(latex, false);
-                state.ensureNewLine();
-                state.write("$$");
+                if (node.attrs.multiline) {
+                  state.write("$$\n");
+                  state.text(latex, false);
+                  state.ensureNewLine();
+                  state.write("$$");
+                } else {
+                  state.write("$$" + latex + "$$");
+                }
                 state.closeBlock(node);
               },
             },
