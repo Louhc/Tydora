@@ -94,14 +94,18 @@ function adjacentRuby(view: any): number | null {
     if ($from.node(d).type.name === "ruby") return $from.before(d);
   }
   const before = $from.nodeBefore;
-  if (before && before.type.name === "ruby") return selection.from - before.nodeSize;
   const after = $from.nodeAfter;
+  // 边界优先右邻（用户实测：两 ruby 之间点击/打字，期望右侧展开、光标留其间）；
+  // 左优先会把左节点展开、光标推到左字面量末，再触发连锁展开/收起（光标跳）。
   if (after && after.type.name === "ruby") return selection.from;
+  if (before && before.type.name === "ruby") return selection.from - before.nodeSize;
   return null;
 }
 
-/** 展开：注音节点 → 源码字面量 `{{Ruby|本体|读音}}`，光标保持原本所在的那一侧 */
-function expandRubyAt(view: any, pos: number): boolean {
+/** 展开：注音节点 → 源码字面量 `{{Ruby|本体|读音}}`，光标保持原本所在的那一侧。
+ *  纯 tr 构造器：供 appendTransaction 在 state 应用链内返回（DOM 更新前映射选区，
+ *  免 DOMObserver 回读旧 DOM 造成跳光标/双插）；mouseup 等链外路径用下面的 wrapper。 */
+function buildExpandTr(state: any, pos: number): any | null {
   /**
    * ⚠️ pos 通常来自 `view.posAtDOM(el, 0)`，而注音是 `contenteditable="false"` 的行内
    * **原子叶子**：这个调用可能返回"节点**之后**"的位置（off-by-one ✓ 实测会让单击
@@ -109,11 +113,11 @@ function expandRubyAt(view: any, pos: number): boolean {
    * 所以在 pos / pos-1 / pos+1 三个候选里找真正的 ruby ✓，找到后统一用 `at`。
    */
   let at = pos;
-  let node = view.state.doc.nodeAt(at);
+  let node = state.doc.nodeAt(at);
   if (!node || node.type.name !== "ruby") {
     for (const cand of [pos - 1, pos + 1]) {
       if (cand < 0) continue;
-      const n = view.state.doc.nodeAt(cand);
+      const n = state.doc.nodeAt(cand);
       if (n && n.type.name === "ruby") {
         at = cand;
         node = n;
@@ -122,10 +126,10 @@ function expandRubyAt(view: any, pos: number): boolean {
     }
   }
 
-  if (!node || node.type.name !== "ruby") return false;
+  if (!node || node.type.name !== "ruby") return null;
   const base = (node.textContent ?? "").trim();
   const rt = (node.attrs.rt ?? "").trim();
-  if (!base || !rt) return false;
+  if (!base || !rt) return null;
   const literal = `{{Ruby|${base}|${rt}}}`;
   /**
    * ⚠️ 不能只用 `selection.from <= at` 判断"在左边还是右边"。
@@ -137,7 +141,7 @@ function expandRubyAt(view: any, pos: number): boolean {
    *（与"按点击落在左半/右半决定"的原始设计一致 ✓）。
    */
   const nodeEnd = at + node.nodeSize;
-  const selFrom = view.state.selection.from;
+  const selFrom = state.selection.from;
   const wasBefore = selFrom <= at || (selFrom < nodeEnd && selFrom - at <= node.nodeSize / 2);
   /**
    * ⚠️ 只把**合法 Mark 实例**带过去。
@@ -152,15 +156,37 @@ function expandRubyAt(view: any, pos: number): boolean {
   );
   if (safeMarks.length !== rawMarks.length) {
   }
-  const tr = view.state.tr.replaceWith(at, at + node.nodeSize, view.state.schema.text(literal, safeMarks));
+  const tr = state.tr.replaceWith(at, at + node.nodeSize, state.schema.text(literal, safeMarks));
   tr.setSelection(TextSelection.create(tr.doc, wasBefore ? at : at + literal.length));
   tr.setMeta(RUBY_TOGGLE_META, true);
   pendingLiteral = true;
   sawLiteralExpand = true; // 记住"本会话展开过"，此后收起不再依赖 pendingLiteral
-  suppressAutoExpandOnce = true; // 展开动作自身引起的那次更新不参与判断
-  view.dispatch(tr);
+  // 展开动作自身引起的那次更新不参与判断：appendTransaction 见 RUBY_TOGGLE_META 即早退，
+  // 不再靠 suppressAutoExpandOnce（置它会误吞下一次用户选区更新的展开）。
+  return tr;
+}
 
+/** 链外 wrapper（mouseup 等）：立即 dispatch；update 链内一律走 appendTransaction 返回 tr */
+function expandRubyAt(view: any, pos: number): boolean {
+  const tr = buildExpandTr(view.state, pos);
+  if (!tr) return false;
+  view.dispatch(tr);
   return true;
+}
+
+/**
+ * 链式即展：边界点击/移光标时**两侧邻节点一次展尽**（用户实测：先展一边、
+ * 下一帧才展另一边 = 「后面才展开两边」，要求立即）。右邻先展后光标落左节点末，
+ * 再展左邻，光标留两字面量之间；至多二轮（展完光标贴字面量，adjacentRuby 即 null）。
+ */
+function expandAdjacentChain(view: any): boolean {
+  let did = false;
+  for (let i = 0; i < 2; i++) {
+    const near = adjacentRuby(view);
+    if (near === null || !expandRubyAt(view, near)) break;
+    did = true;
+  }
+  return did;
 }
 
 
@@ -175,8 +201,7 @@ function expandRubyAt(view: any, pos: number): boolean {
  * `range` 给出时只扫该区间（打字时扫光标所在块，避免每次敲键遍历全文档）。
  * 返回是否还有"正在编辑中"（被跳过）的字面量。
  */
-function convertLiterals(view: any, range?: { from: number; to: number }): boolean {
-  const { state } = view;
+function buildConvertTr(state: any, range?: { from: number; to: number }): any | null {
   const sel = state.selection;
   const re = /\{\{Ruby\s*[|:]\s*([^|{}:]+?)\s*[|:]\s*([^|{}:]+?)\s*\}\}/g;
   // marks 必须一并带走：字面量上的高亮/颜色等 mark 收起后要落到 ruby 节点上，否则丢失
@@ -211,9 +236,12 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
      */
     if (!range) pendingLiteral = skipped > 0;
     else if (skipped > 0) pendingLiteral = true;
-    return pendingLiteral;
+    return null;
   }
   const tr = state.tr;
+  // 语义光标落点：不依赖 PM 自动映射（实测自动映射会把光标兜底到段末 → 光标跳走/消失）。
+  // 规则：光标在被收字面量右侧 → 保持"超出右端多少字符"的偏移贴到节点右；在区间内 → 节点右端。
+  let intendedHead = sel.head;
   for (let i = hits.length - 1; i >= 0; i--) {
     const h = hits[i];
     const rubyType = state.schema.nodes.ruby;
@@ -227,12 +255,15 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
      * 结果是"空注音 + marks 里混进一个 TextNode" ✓，渲染时报
      * `mark.type.spec.toDOM is not a function` ✗（实测就是这么来的）。
      */
-    tr.replaceWith(h.from, h.to, rubyType.create({ rt: h.rt }, [state.schema.text(h.base)], h.marks));
+    const newNode = rubyType.create({ rt: h.rt }, [state.schema.text(h.base)], h.marks);
+    tr.replaceWith(h.from, h.to, newNode);
+    if (intendedHead > h.to) intendedHead = h.from + newNode.nodeSize + (intendedHead - h.to);
+    else if (intendedHead >= h.from) intendedHead = h.from + newNode.nodeSize;
   }
   if (tr.docChanged) {
-    suppressAutoExpandOnce = true; // 收起是我们自己造成的，那一次不参与判断
+    // 收起是我们自己造成的，那一次不参与判断：appendTransaction 见 RUBY_TOGGLE_META 即早退。
     tr.setMeta(RUBY_TOGGLE_META, true);
-    view.dispatch(tr);
+    tr.setSelection(TextSelection.create(tr.doc, Math.min(intendedHead, tr.doc.content.size - 1)));
   }
   /**
    * 结束后的标志：**只有全文档扫描**才允许把它清零。
@@ -240,6 +271,13 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
    */
   if (!range) pendingLiteral = skipped > 0;
   else if (skipped > 0) pendingLiteral = true;
+  return tr.docChanged ? tr : null;
+}
+
+/** 链外 wrapper（mouseup 等）：立即 dispatch；update 链内一律走 appendTransaction 返回 tr */
+function convertLiterals(view: any, range?: { from: number; to: number }): boolean {
+  const tr = buildConvertTr(view.state, range);
+  if (tr) view.dispatch(tr);
   return pendingLiteral;
 }
 
@@ -247,6 +285,74 @@ function convertLiterals(view: any, range?: { from: number; to: number }): boole
 let pendingLiteral = false;
 /** 一次性抑制：由我们自己的展开/收起引起的那次更新不参与邻近判断 */
 let suppressAutoExpandOnce = false;
+
+/** rAF 同步任务：appendTransaction 只探测，改文档的 dispatch 全在这里（链外、PM flush 之后） */
+let rubySyncRaf = 0;
+let rubySyncJob: { expand: boolean; convert: boolean; docChanged: boolean; empties: boolean } | null = null;
+function scheduleRubySync(
+  view: any,
+  job: { expand: boolean; convert: boolean; docChanged: boolean; empties: boolean },
+): void {
+  if (rubySyncJob) {
+    // expand 取**最近一次 tr** 的资格（选区 tr 紧跟插入 tr 时，旧资格不得泄漏到插入后）；
+    // convert/empties 累积 OR。
+    rubySyncJob.expand = job.expand;
+    rubySyncJob.convert = rubySyncJob.convert || job.convert;
+    rubySyncJob.docChanged = rubySyncJob.docChanged || job.docChanged;
+    rubySyncJob.empties = rubySyncJob.empties || job.empties;
+  } else {
+    rubySyncJob = job;
+  }
+  if (rubySyncRaf) return;
+  rubySyncRaf = requestAnimationFrame(() => {
+    rubySyncRaf = 0;
+    const j = rubySyncJob;
+    rubySyncJob = null;
+    if (!j || !view || view.isDestroyed || composingHere || mouseDown) return;
+    // ① 自动展开（纯选区更新路径；点击另有 mouseup 即时处理）
+    if (j.expand) {
+      if (expandAdjacentChain(view)) return;
+    }
+    if (j.convert) {
+      // ② 文档变化：只扫光标所在块（便宜）
+      if (j.docChanged) {
+        const $from = view.state.selection.$from;
+        convertLiterals(view, { from: $from.start(), to: $from.end() });
+      }
+      /**
+       * ③ 全文档扫描（收起）。
+       * 条件是"还有字面量"**或**"本次会话展开过注音" —— 后者保证标志被误清时
+       * 收起依然有效（日志实测：输入法提交那一刻 pending 为 false，导致不收起）。
+       */
+      if (pendingLiteral || sawLiteralExpand) convertLiterals(view);
+    }
+    /**
+     * 剪掉"本体被删空"的注音节点。
+     *
+     * `content: "text*"` 允许空内容 —— 剪切/删除把本体整段删掉时，节点会**留下来**
+     * 变成 `<span class="md-ruby" data-rt="…"></span>`：宽度为 0 但读音仍由 ::after
+     * 画在原地，于是字删掉了、假名还飘在那里（用户实测：剪 `{{Ruby|心構|こころがま}}え`
+     * 后原地留下一条「こころがま」）。
+     *
+     * 序列化本来就跳过空本体（不会写脏数据），所以这里只负责把显示层一起清掉。
+     * 只在**文档真的变了**的那一次事务后扫一遍，避免每次点击/移动都全篇遍历。
+     */
+    if (j.empties) {
+      const empties: { from: number; to: number }[] = [];
+      view.state.doc.descendants((node: any, pos: number) => {
+        if (node.type.name === "ruby" && node.content.size === 0) {
+          empties.push({ from: pos, to: pos + node.nodeSize });
+        }
+      });
+      if (empties.length) {
+        const tr = view.state.tr;
+        for (let i = empties.length - 1; i >= 0; i--) tr.delete(empties[i].from, empties[i].to);
+        tr.setMeta(RUBY_TOGGLE_META, true);
+        view.dispatch(tr);
+      }
+    }
+  });
+}
 /**
  * 让**紧接着的那次更新**不做"光标邻近注音就展开"。
  *
@@ -532,6 +638,14 @@ export const Ruby = Node.create({
          * 去掉后注音内部可能被光标进入，但 PM 把它当叶子节点，输入仍会被移出边界 ✓。
          * 若出现别的问题，恢复这一行即可（备份在 %TEMP%）。
          */
+        /**
+         * ⚠️ 实验结论：恢复 contenteditable="false"（用户实测四连症）：
+         * 去掉后"PM 把输入移出边界"的假设不成立 —— 节点 content 为 text* 且非 atom，
+         * PM 允许选区进入内部，浏览器光标也落在 span 内文本末 → 在注音右侧打字字符进本体；
+         * 边界处 DOM/PM 选区互纠还引起按左键跳光标、光标消失、打/粘两次。
+         * 恢复后浏览器视其为不可拆分单元，内外一致（拖选吸附闪若复现再另治）。
+         */
+        contenteditable: "false",
       },
       // 0 = 内容孔：本体文字作为节点的子内容渲染 ✓
       0,
@@ -667,7 +781,7 @@ export const Ruby = Node.create({
                 if (!sel.empty || domRange) return;
                 const target = adjacentRuby(v);
                 if (target !== null) {
-                  expandRubyAt(v, target);
+                  expandAdjacentChain(v);
                   return;
                 }
                 /**
@@ -683,62 +797,14 @@ export const Ruby = Node.create({
           },
         },
         /**
-         * 自动展开 / 收起：
+         * 自动展开 / 收起（appendTransaction 探测、rAF 链外 dispatch，见 scheduleRubySync）：
          *
-         * - **邻近判断放在所有早退之前**，所以每次更新都会执行（空闲更新也算）——
+         * - **邻近判断放在所有早退之前**，所以每次事务都会执行（纯选区更新也算）——
          *   这正是"光标在注音左右两侧就展开"。
          * - 文档变化时只扫**光标所在的文本块**，覆盖"把 `}}` 提前打出来"等输入规则未命中的情况。
          * - 光标越出字面量的闭区间即收起（右端仍算在内，见 convertLiterals 的说明）。
-         * - `view.composing` 期间绝不动文档：否则输入法组字被打断会重复出字。
+         * - 组字期间绝不动文档：否则输入法组字被打断会重复出字。
          */
-        view: () => ({
-          update: (view: any, prevState: any) => {
-            /**
-             * ⚠️ 只用**自己跟踪**的组字标志，不与 view.composing 取"与"。
-             *
-             * 取"与"看似更安全，实际会造成卡死：有的输入法（Sogou / Google 日语输入法都遇到过）
-             * 提交后**不发 compositionend**，于是两个标志里总有一个残留为真，守卫永不解除 →
-             * 输完标点后怎么移动光标都不收起。
-             * 自己的标志有多个可靠的解除信号（compositionend / 非组字 keydown / 鼠标 / 失焦），
-             * 所以以它为准。
-             *
-             * 组字期间不动文档的原因：此时 dispatch（展开/收起）会打断输入法的组合并重新提交 →
-             * 表现为"字符重复出现"（打一个「：」出现两个）。
-             */
-            if (composingHere) return;
-            /**
-             * 按住鼠标（拖选中）不做邻近自动展开：从注音边界按下开始拖选时，
-             * 光标最初恰好落在注音旁边，会自动展开成字面量 ✗ → 拖选就变成选字面量了。
-             */
-            if (mouseDown) return;
-
-            const docChanged = !view.state.doc.eq(prevState.doc);
-            const selChanged = !view.state.selection.eq(prevState.selection);
-            const internal = suppressAutoExpandOnce;
-            suppressAutoExpandOnce = false;
-
-            // ① 自动展开：每次更新都判断
-            if (!internal) {
-              const near = adjacentRuby(view);
-              if (near !== null && expandRubyAt(view, near)) return;
-            }
-
-            if (!docChanged && !selChanged && !pendingLiteral) return;
-
-            // ② 文档变化：只扫光标所在块（便宜）
-            if (docChanged) {
-              const $from = view.state.selection.$from;
-              convertLiterals(view, { from: $from.start(), to: $from.end() });
-            }
-
-            /**
-             * ③ 全文档扫描（收起）。
-             * 条件是"还有字面量"**或**"本次会话展开过注音" —— 后者保证标志被误清时
-             * 收起依然有效（日志实测：输入法提交那一刻 pending 为 false，导致不收起）。
-             */
-            if (pendingLiteral || sawLiteralExpand) convertLiterals(view);
-          },
-        }),
         /**
          * 剪掉"本体被删空"的注音节点。
          *
@@ -750,19 +816,60 @@ export const Ruby = Node.create({
          * 序列化本来就跳过空本体（不会写脏数据），所以这里只负责把显示层一起清掉。
          * 只在**文档真的变了**的那一次事务后扫一遍，避免每次点击/移动都全篇遍历。
          */
-        appendTransaction: (trs: readonly any[], _oldState: any, newState: any) => {
-          if (!trs.some((t: any) => t.docChanged)) return null;
-          const empties: { from: number; to: number }[] = [];
-          newState.doc.descendants((node: any, pos: number) => {
-            if (node.type.name === "ruby" && node.content.size === 0) {
-              empties.push({ from: pos, to: pos + node.nodeSize });
-            }
+        appendTransaction: (trs: readonly any[], oldState: any, newState: any) => {
+          // 自家展开/收起/清空 tr 带 RUBY_TOGGLE_META：早退免自循环。
+          if (trs.some((t: any) => t.getMeta(RUBY_TOGGLE_META))) return null;
+          /**
+           * ⚠️ 只用**自己跟踪**的组字标志，不与 view.composing 取"与"。
+           *
+           * 取"与"看似更安全，实际会造成卡死：有的输入法（Sogou / Google 日语输入法都遇到过）
+           * 提交后**不发 compositionend**，于是两个标志里总有一个残留为真，守卫永不解除 →
+           * 输完标点后怎么移动光标都不收起。
+           * 自己的标志有多个可靠的解除信号（compositionend / 非组字 keydown / 鼠标 / 失焦），
+           * 所以以它为准。
+           *
+           * 组字期间不动文档的原因：此时 dispatch（展开/收起）会打断输入法的组合并重新提交 →
+           * 表现为"字符重复出现"（打一个「：」出现两个）。
+           */
+          if (composingHere) return null;
+          /**
+           * 按住鼠标（拖选中）不做邻近自动展开：从注音边界按下开始拖选时，
+           * 光标最初恰好落在注音旁边，会自动展开成字面量 ✗ → 拖选就变成选字面量了。
+           */
+          if (mouseDown) return null;
+
+          const docChanged = trs.some((t: any) => t.docChanged);
+          // 插入型文档变化（打字/粘贴）才跳过展开；删除型（退格/剪切）光标贴边仍按旧行为展开
+          //（用户实测：删 ruby 右侧字符后不展开 = 回归）。
+          const inserted = trs.some((t: any) => t.steps.some((s: any) => s.slice && s.slice.size > 0));
+          const selChanged = !newState.selection.eq(oldState.selection);
+          const internal = suppressAutoExpandOnce;
+          suppressAutoExpandOnce = false;
+
+          // ① 自动展开：只在**纯选区更新**（点击 / 方向键）时判断。
+          // ⚠️ 插入型文档变化（打字 / 粘贴）不展开（用户实测三连症）：字符插入后光标
+          // 贴着邻侧注音边界，若此时展开，字符已被 PM 插进注音本体 → 展开后光标被
+          // 重映射到字面量端点（"打一个字光标跳走"）。
+          // 删除型 docChanged（退格 / 剪切）不受此限：删后光标贴边仍按旧行为展开。
+          // 收起（convertLiterals）不受"不展开"之限：越出闭区间仍照常收。
+          const wantExpand = !internal && !(docChanged && inserted);
+          const wantConvert = docChanged || selChanged || pendingLiteral;
+          if (!wantExpand && !wantConvert && !docChanged) return null;
+          /**
+           * ⚠️ 这里**只探测、不改文档**：改文档的 dispatch 一律排到 rAF（PM 的 DOMObserver
+           * flush 结束之后）。打字走 PM 的 DOM-mutation 重建路径，若在 state 应用链内
+           * （appendTransaction 返回 tr / 旧版 view.update 里 dispatch）再改 DOM 结构，
+           * 回读会落在已被删的旧文本节点上 → 凭空造出选区 tr（光标跳段末 / 消失 /
+           * 按左键跳到后面 ruby 右边），或把插入读两次（"打或粘两次"）。
+           * rAF 链外 dispatch 与 mouseup 同路，实测安全。
+           */
+          scheduleRubySync(this.editor.view, {
+            expand: wantExpand,
+            convert: wantConvert,
+            docChanged,
+            empties: docChanged,
           });
-          if (!empties.length) return null;
-          const tr = newState.tr;
-          for (let i = empties.length - 1; i >= 0; i--) tr.delete(empties[i].from, empties[i].to);
-          tr.setMeta(RUBY_TOGGLE_META, true);
-          return tr;
+          return null;
         },
       }),
       /**
