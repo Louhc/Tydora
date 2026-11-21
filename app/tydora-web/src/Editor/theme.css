@@ -1860,9 +1860,64 @@ html.platform-macos .tiptap-editor .frontmatter-node {
    * max(0em, …) 保证"读音比本体短"时不留多余空隙。
    */
   /* 两个变量由 ruby-measure.ts **实测**写入（px）：本体用 Range 量、读音用 canvas 按 ::after 字体量 ✓ */
-  padding-inline: calc(
+  --ruby-pad: calc(
     max(0px, var(--ruby-rt-w, 0px) - var(--ruby-base-w, 0px)) / 2
   );
+  padding-inline: var(--ruby-pad);
+}
+
+/**
+ * 选区经过注音时补画两侧 padding 带（class 由 ruby.ts 的 rubySelPadDecorations 加）。
+ *
+ * Chromium 的原生 `::selection` 不画行内盒的 padding（inline / inline-block 皆然），
+ * 于是上面为长读音预留的留白在选区色带里成为暗隙 —— 相邻注音全选时"选中区域未接续"。
+ * 这里用两条渐变带**只画 padding 区域**（宽 = --ruby-pad），本体仍交给原生 ::selection，
+ * 不叠第二层本色；未加 class 时两层皆 none，外观与从前逐像素一致。
+ * 色值与 .tiptap-editor ::selection 同源（--accent-rgb + 0.3）。
+ */
+.tiptap-editor .md-ruby.ruby-sel-left,
+.tiptap-editor .md-ruby.ruby-sel-right {
+  /* 选区期间去圆角：border-radius 会把色带四角裁掉，与直角原生选区相接处
+     形成扇贝状"内凹"边缘（用户实测）；选中时一律直角 ✓ */
+  border-radius: 0;
+  background-image: var(--sel-pad-l, none), var(--sel-pad-r, none);
+  background-position: left center, right center;
+  background-size: var(--ruby-pad) 100%, var(--ruby-pad) 100%;
+  background-repeat: no-repeat, no-repeat;
+}
+.tiptap-editor .md-ruby.ruby-sel-left {
+  --sel-pad-l: linear-gradient(
+    rgba(var(--accent-rgb, 137, 180, 250), 0.3),
+    rgba(var(--accent-rgb, 137, 180, 250), 0.3)
+  );
+}
+.tiptap-editor .md-ruby.ruby-sel-right {
+  --sel-pad-r: linear-gradient(
+    rgba(var(--accent-rgb, 137, 180, 250), 0.3),
+    rgba(var(--accent-rgb, 137, 180, 250), 0.3)
+  );
+}
+/**
+ * 整块被选中时改画**单条整盒色带**（一个 rect），并关掉盒内原生 ::selection：
+ * 两条 padding 带与本体色带是三个独立 rect，宽度含小数（ruby-measure 实测 px）时
+ * Chromium 逐个取整，相邻盒边界会留 1px 暗缝（用户实测"仍有诸多缝隙"）。
+ * 整盒单 rect 内部无缝；相邻整盒共享同一边界坐标，取整一致亦无缝。
+ * 部分选中的边界词仍走上面两条带（只画朝选区内部的一侧）。
+ */
+.tiptap-editor .md-ruby.ruby-sel-left.ruby-sel-right {
+  background-image: linear-gradient(
+    rgba(var(--accent-rgb, 137, 180, 250), 0.3),
+    rgba(var(--accent-rgb, 137, 180, 250), 0.3)
+  );
+  background-position: 0 0;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+}
+/* ⚠️ 不带空格的那条才是**span 自身文本**的选区（本体文本的父元素就是 span）；
+   带空格者覆盖盒内更深层元素（如 mark）。漏了前者会原生+色带双层叠加（用户实测"都有选中重叠"）。 */
+.tiptap-editor .md-ruby.ruby-sel-left.ruby-sel-right::selection,
+.tiptap-editor .md-ruby.ruby-sel-left.ruby-sel-right ::selection {
+  background: transparent;
 }
 
 .tiptap-editor .md-ruby:hover {

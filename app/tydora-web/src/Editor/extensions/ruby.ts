@@ -50,7 +50,8 @@ function rubyWidthEm(text: string, scale: number): string {
   for (const ch of text) width += WIDE_CHAR_RE.test(ch) ? 1 : 0.5;
   return (width * scale).toFixed(2);
 }
-import { Plugin, TextSelection } from "prosemirror-state";
+import { Plugin, PluginKey, TextSelection } from "prosemirror-state";
+import { Decoration, DecorationSet } from "prosemirror-view";
 import {
   installMarkdownRuleOnce,
   installWordMarkCleanup,
@@ -389,6 +390,44 @@ function moveCaretToNextBlock(view: any): boolean {
   }
 }
 
+/**
+ * 选区经过注音时，补画其两侧 padding 带的**显示层装饰**（不改文档、不影响序列化）。
+ *
+ * 为什么需要：Chromium 的原生 `::selection` **不画行内盒的 padding**（inline / inline-block
+ * 皆然，headless 实测像素为证）。注音为长读音预留的 `padding-inline`（见 theme.css 的
+ * `--ruby-pad`）于是成为选区色带里的暗隙 —— 相邻注音全选时看起来"选中区域未接续"（用户实测）。
+ * 同类行为也坑过下划线（见 underline.ts：text-decoration 不画 padding，改 border 解决）。
+ *
+ * 做法：给选区覆盖到的 ruby 节点加 class，由 CSS 用两条 `background-image` 渐变带
+ * 只画左 / 右 padding 区域（`background-size: var(--ruby-pad) 100%`），本体仍交给原生
+ * `::selection` —— 不叠第二层本色，故不会出现"两层高亮"。
+ *
+ * 边界语义（严格不等号，避免越界多画）：
+ * - 左带：仅当选区起点**早于**本体起点（`from < pos+1`）—— 说明左侧另有已画色带需要接续；
+ *   起点恰在本体首字时左侧本无色带，画了反而越界。
+ * - 右带：仅当选区终点**晚于**本体终点（`to > pos+nodeSize-1`），同理。
+ * - 折叠光标不画；部分选中的边界词只画朝选区内部的那一侧。
+ */
+export function rubySelPadDecorations(state: any): DecorationSet | null {
+  const sel = state.selection;
+  if (sel.empty) return null;
+  const { from, to } = sel;
+  const decos: Decoration[] = [];
+  state.doc.nodesBetween(from, to, (node: any, pos: number) => {
+    if (node.type.name !== "ruby") return true;
+    const contentFrom = pos + 1;
+    const contentTo = pos + node.nodeSize - 1;
+    const left = from < contentFrom;
+    const right = to > contentTo;
+    if (!left && !right) return false;
+    const cls =
+      left && right ? "ruby-sel-left ruby-sel-right" : left ? "ruby-sel-left" : "ruby-sel-right";
+    decos.push(Decoration.node(pos, pos + node.nodeSize, { class: cls }));
+    return false;
+  });
+  return decos.length ? DecorationSet.create(state.doc, decos) : null;
+}
+
 export const Ruby = Node.create({
   name: "ruby",
 
@@ -724,6 +763,16 @@ export const Ruby = Node.create({
           for (let i = empties.length - 1; i >= 0; i--) tr.delete(empties[i].from, empties[i].to);
           tr.setMeta(RUBY_TOGGLE_META, true);
           return tr;
+        },
+      }),
+      /**
+       * 选区 padding 带装饰（见 rubySelPadDecorations 的说明）。
+       * 纯显示层：Decoration.node 只给 span 加 class，文档与序列化逐字节不变。
+       */
+      new Plugin({
+        key: new PluginKey("tydoraRubySelPad"),
+        props: {
+          decorations: (state) => rubySelPadDecorations(state),
         },
       }),
     ];
