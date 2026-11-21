@@ -936,7 +936,13 @@ const TipTapEditor = forwardRef<EditorHandle, TipTapEditorProps>(
     const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number; bottom?: number; placement?: "above" } | null>(null);
     const [tableToolbar, setTableToolbar] = useState<{ table: HTMLElement } | null>(null);
     const [linkDialog, setLinkDialog] = useState<{ defaultText: string } | null>(null);
-    const [mathDialog, setMathDialog] = useState<{ latex: string; block: boolean; pos: number | null } | null>(null);
+    const [mathDialog, setMathDialog] = useState<{
+      latex: string;
+      block: boolean;
+      pos: number | null;
+      /** 回车触发时待替换的分隔符区间（确认删除并插公式，取消还原分隔符） */
+      replace?: { from: number; to: number };
+    } | null>(null);
     const mathDialogRef = useRef(mathDialog);
     mathDialogRef.current = mathDialog;
 
@@ -2651,6 +2657,10 @@ const md = getMarkdownSafe(ed);
           latex: detail?.latex || "",
           block: detail?.block !== false,
           pos: null,
+          replace:
+            typeof detail?.replaceFrom === "number" && typeof detail?.replaceTo === "number"
+              ? { from: detail.replaceFrom, to: detail.replaceTo }
+              : undefined,
         });
       };
       window.addEventListener("math-dialog-open", handleMathDialogOpen);
@@ -2699,6 +2709,29 @@ const md = getMarkdownSafe(ed);
               editor.chain().focus().updateInlineMath({ latex, pos: dialog.pos }).run();
             }
           }
+        } else if (dialog?.replace) {
+          // 回车触发：删掉打出的 $ / $$ 分隔符，原位插入公式节点。
+          // 块级：删后若所在文本块已空，整块替换为 blockMath（往空段里 insert 块节点会丢节点）
+          const { from, to } = dialog.replace;
+          editor
+            .chain()
+            .focus()
+            .deleteRange({ from, to })
+            .command(({ tr }) => {
+              if (block) {
+                const node = editor.schema.nodes.blockMath.create({ latex, multiline: /\n/.test(latex) });
+                const $pos = tr.doc.resolve(from);
+                if ($pos.parent.isTextblock && $pos.parent.content.size === 0) {
+                  tr.replaceWith($pos.before(), $pos.after(), node);
+                } else {
+                  tr.insert(from, node);
+                }
+              } else {
+                tr.insert(from, editor.schema.nodes.inlineMath.create({ latex }));
+              }
+              return true;
+            })
+            .run();
         } else {
           // 插入新公式
           const from = editor.state.selection.from;
@@ -2714,7 +2747,7 @@ const md = getMarkdownSafe(ed);
       [editor]
     );
 
-    // 数学公式弹窗取消
+    // 数学公式弹窗取消（回车触发者分隔符本就留在原处，无需还原）
     const handleMathDialogCancel = useCallback(() => {
       setMathDialog(null);
       editor?.commands.focus();
@@ -4556,7 +4589,7 @@ const md = getMarkdownSafe(ed);
           <MathDialog
             latex={mathDialog.latex}
             block={mathDialog.block}
-            lockBlock={mathDialog.pos != null}
+            lockBlock={mathDialog.pos != null || mathDialog.replace != null}
             onConfirm={handleMathDialogConfirm}
             onCancel={handleMathDialogCancel}
           />

@@ -226,6 +226,45 @@ export const TemplateLive = Extension.create({
             if (node.isTextblock && !SKIP_BLOCK_TYPES.has(node.type.name)) blocks.set(pos, node);
           });
 
+          // 跨段形态：独占一段的左 $$ … 独占一段的右 $$（中间若干段为公式本体）→ 块级公式。
+          // 粘贴/源码切回常见此形态；段间空行以 "\n\n" 进 latex，序列化逐字节还原。
+          const onlyTextish = (n: any): boolean => {
+            let ok = true;
+            n.content.forEach((c: any) => {
+              if (!c.isText && c.type.name !== "hardBreak") ok = false;
+            });
+            return ok;
+          };
+          const crossBlocks: Array<{ from: number; to: number; latex: string }> = [];
+          const ordered = [...blocks.entries()];
+          for (let i = 0; i < ordered.length; i++) {
+            const [openPos, openNode] = ordered[i];
+            if (openNode.type.name !== "paragraph" || (openNode.textContent as string).trim() !== "$$") continue;
+            if (!onlyTextish(openNode)) continue;
+            let j = i + 1;
+            const inner: string[] = [];
+            let closePos = -1;
+            let closeSize = 0;
+            for (; j < ordered.length; j++) {
+              const [p, n] = ordered[j];
+              if (n.type.name !== "paragraph" || !onlyTextish(n)) break;
+              const t = n.textContent as string;
+              if (t.trim() === "$$") {
+                closePos = p;
+                closeSize = n.nodeSize;
+                break;
+              }
+              if (t.includes("$$")) break; // 本体里另有 $$ → 不配对，免误收
+              inner.push(t);
+            }
+            if (closePos < 0 || inner.length === 0) continue;
+            // 与 markdown-it mathBlock 跨行解析出的 content 同形（getLines 自带尾换行）：
+            // 首补一个 \n（分隔符后空行）、尾补两个 \n（本体后空行 + 行尾），往返逐字节一致
+            crossBlocks.push({ from: openPos, to: closePos + closeSize, latex: "\n" + inner.join("\n\n") + "\n\n" });
+            for (let k = i; k <= j; k++) blocks.delete(ordered[k][0]);
+            i = j;
+          }
+
           // 块级 $$...$$：哪怕写在同一行/段中，也必须是块级公式（用户要求）。
           // 任意时刻配平即收（先打左 $$ 或先打右 $$ 皆可），整块重建为 [段, blockMath, 段…]。
           const blockSplits: Array<{ blockPos: number; lits: Array<{ from: number; to: number; latex: string }> }> = [];
@@ -264,7 +303,7 @@ export const TemplateLive = Extension.create({
               },
             );
           }
-          if (replacements.length === 0 && blockSplits.length === 0) return null;
+          if (replacements.length === 0 && blockSplits.length === 0 && crossBlocks.length === 0) return null;
 
           let tr = newState.tr;
           for (const r of replacements.sort((a, b) => b.from - a.from)) {
@@ -276,47 +315,89 @@ export const TemplateLive = Extension.create({
           for (const bs of blockSplits.sort((a, b) => b.blockPos - a.blockPos)) {
             const block = blocks.get(bs.blockPos);
             if (!block) continue;
-            const text = block.textContent as string;
-            const lits = bs.lits.sort((a, b) => a.from - b.from);
+            // 前面的行内替换可能已漂移位置 → 经 tr.mapping 映射
+            const blockPos = tr.mapping.map(bs.blockPos);
+            const lits = bs.lits
+              .map((l) => ({ ...l, from: tr.mapping.map(l.from), to: tr.mapping.map(l.to) }))
+              .sort((a, b) => a.from - b.from);
             const nodes: any[] = [];
             let newPos: number | null = null;
             const headOffset = newState.selection.empty
               ? newState.selection.head - (bs.blockPos + 1)
               : -1;
-            let acc = bs.blockPos;
-            let plainStart = 0;
-            const pushText = (seg: string, segStart: number) => {
+            let acc = blockPos;
+            // 按子节点遍历重建（而非 textContent 切片）：保留 marks 与行内节点
+            // （inlineMath/ruby 等），否则段中已有公式会被切片丢掉
+            let seg: any[] = [];
+            let segTextLen = 0;
+            let textOffset = 0;
+            const flushSeg = () => {
               if (seg.length === 0) return;
-              const conv = convertText(seg, []);
-              const content = conv ? conv.frag : Fragment.from(schema.text(seg));
-              const para = block.type.create(block.attrs, content);
-              if (headOffset >= segStart && headOffset <= segStart + seg.length) {
-                newPos = acc + 1 + (headOffset - segStart);
-              }
+              const para = block.type.create(block.attrs, Fragment.fromArray(seg));
               nodes.push(para);
               acc += para.nodeSize;
+              seg = [];
+              segTextLen = 0;
             };
-            for (const lit of lits) {
-              const litStart = lit.from - (bs.blockPos + 1);
-              pushText(text.slice(plainStart, litStart), plainStart);
-              const node = schema.nodes.blockMath.create({
-                latex: lit.latex,
-                multiline: /\n/.test(lit.latex),
-              });
-              nodes.push(node);
-              acc += node.nodeSize;
-              // 光标落在字面量内/边界（含先打右 $$ 再补左 $$ 的情形）→ 落到公式之后续输
-              const litEnd = litStart + (lit.to - lit.from);
-              if (headOffset >= litStart && headOffset <= litEnd) newPos = acc;
-              plainStart = litEnd;
-            }
-            pushText(text.slice(plainStart), plainStart);
+            const pushPiece = (pieceText: string, marks: readonly any[]) => {
+              const len = pieceText.length;
+              if (headOffset >= textOffset && headOffset <= textOffset + len) {
+                newPos = acc + 1 + segTextLen + (headOffset - textOffset);
+              }
+              const conv = convertText(pieceText, marks);
+              if (conv) {
+                for (const child of conv.frag.content as any[]) seg.push(child);
+              } else if (len > 0) {
+                seg.push(schema.text(pieceText, marks as any));
+              }
+              segTextLen += len;
+              textOffset += len;
+            };
+            block.content.forEach((child: any) => {
+              if (!child.isText) {
+                seg.push(child);
+                return;
+              }
+              const nodeStart = textOffset;
+              let local = 0;
+              for (const lit of lits) {
+                const ls = lit.from - (blockPos + 1);
+                const le = lit.to - (blockPos + 1);
+                // 字面量须完整落在本文本节点内才拆（跨 marks 边界的保守跳过）
+                if (ls < nodeStart + local || le > nodeStart + child.text.length) continue;
+                if (ls > nodeStart + local) pushPiece(child.text.slice(local, ls - nodeStart), child.marks);
+                flushSeg();
+                const node = schema.nodes.blockMath.create({
+                  latex: lit.latex,
+                  multiline: /\n/.test(lit.latex),
+                });
+                nodes.push(node);
+                acc += node.nodeSize;
+                // 光标落在字面量内/边界（含先打右 $$ 再补左 $$ 的情形）→ 落到公式之后续输
+                if (headOffset >= ls && headOffset <= le) newPos = acc;
+                textOffset = le;
+                local = le - nodeStart;
+              }
+              if (local < child.text.length) pushPiece(child.text.slice(local), child.marks);
+            });
+            flushSeg();
             if (nodes.length === 0) continue;
-            tr = tr.replaceWith(bs.blockPos, bs.blockPos + block.nodeSize, Fragment.fromArray(nodes));
+            tr = tr.replaceWith(blockPos, blockPos + block.nodeSize, Fragment.fromArray(nodes));
             if (newPos != null) {
               // 不 clamp 进 atom 内部（clamp 到 size-1 会落进 blockMath atom，续输会删节点）；
               // 块末 gap 位置合法，续输由 PM 自动成段
               tr = tr.setSelection(TextSelection.create(tr.doc, newPos));
+            }
+          }
+          // 跨段 $$ 收拢：整段区间替换为单个 blockMath（自右向左）
+          for (const cb of crossBlocks.sort((a, b) => b.from - a.from)) {
+            const node = schema.nodes.blockMath.create({ latex: cb.latex, multiline: true });
+            const head = newState.selection.head;
+            const from = tr.mapping.map(cb.from);
+            const to = tr.mapping.map(cb.to);
+            tr = tr.replaceWith(from, to, Fragment.from(node));
+            if (newState.selection.empty && head >= cb.from && head <= cb.to) {
+              tr = tr.setSelection(TextSelection.create(tr.doc, from + node.nodeSize));
             }
           }
           if (madeRuby) suppressRubyAutoExpandOnce();

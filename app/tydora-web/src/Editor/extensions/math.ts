@@ -41,8 +41,10 @@ function isValidDelim(state: any, pos: number) {
 /** 行内 $...$ */
 function mathInline(state: any, silent: boolean) {
   if (state.src[state.pos] !== "$") return false;
-  // `$$` 一律块级（哪怕写在同一行），行内规则不得接手（用户要求）
+  // `$$` 一律块级（哪怕写在同一行），行内规则不得接手（用户要求）：
+  // 既跳过「左 $ 的右邻是 $」，也跳过「右 $ 的左邻是 $」（否则 $$x$$ 会被拆出 $x$）
   if (state.src[state.pos + 1] === "$") return false;
+  if (state.pos > 0 && state.src[state.pos - 1] === "$") return false;
 
   const res = isValidDelim(state, state.pos);
   if (!res.canOpen) {
@@ -102,7 +104,6 @@ function mathBlock(state: any, start: number, end: number, silent: boolean) {
 
   pos += 2;
   let firstLine = state.src.slice(pos, max);
-  if (silent) return true;
 
   // 起始行直接闭合：$$...$$（单行形态，content 不补换行，序列化逐字节还原）
   let singleLine = false;
@@ -125,6 +126,10 @@ function mathBlock(state: any, start: number, end: number, silent: boolean) {
       found = true;
     }
   }
+
+  // 未找到闭合 $$ → 不是块级公式（孤立的左 $$ 留给即时转换/回车弹窗处理）
+  if (!found) return false;
+  if (silent) return true;
 
   state.line = next + 1;
   const token = state.push("math_block", "math", 0);
@@ -179,6 +184,46 @@ export const Math = Extension.create<MathOptions>({
   name: "math",
   addOptions() {
     return { onClick: undefined, katexOptions: undefined };
+  },
+  addKeyboardShortcuts() {
+    return {
+      /**
+       * 打出左 `$$`（或先打的右 `$$`，字符相同）按回车 → 直接弹块级公式编辑框；
+       * 左 `$` 按回车 → 弹行内公式编辑框。回车被吞掉，不成换行；
+       * 分隔符留在原处，弹窗确认时由 TipTapEditor 删除并替换为公式节点（取消则还原）。
+       */
+      Enter: () => {
+        const editor = this.editor;
+        const { state } = editor;
+        const sel = state.selection;
+        if (!sel.empty) return false;
+        const $from = sel.$from;
+        const parent = $from.parent;
+        if (!parent.isTextblock || parent.type.spec.code) return false;
+        const before = parent.textBetween(0, $from.parentOffset, undefined, "￼");
+        let delimLen = 0;
+        let block = false;
+        if (before.endsWith("$$") && before[before.length - 3] !== "$" && before[before.length - 3] !== "\\") {
+          delimLen = 2;
+          block = true;
+        } else if (before.endsWith("$") && before[before.length - 2] !== "$" && before[before.length - 2] !== "\\") {
+          delimLen = 1;
+          block = false;
+        }
+        if (delimLen === 0) return false;
+        window.dispatchEvent(
+          new CustomEvent("math-dialog-open", {
+            detail: {
+              latex: "",
+              block,
+              replaceFrom: sel.from - delimLen,
+              replaceTo: sel.from,
+            },
+          }),
+        );
+        return true;
+      },
+    };
   },
   addExtensions() {
     const { onClick, katexOptions } = this.options;
@@ -243,9 +288,10 @@ export const Math = Extension.create<MathOptions>({
                 const latex = (node.attrs.latex as string) || "";
                 state.ensureNewLine();
                 if (node.attrs.multiline) {
+                  // latex 逐字节写回（getLines 产物自带尾换行/空行）；仅兜底补一个尾换行免闭合 glued
+                  const body = latex.endsWith("\n") ? latex : latex + "\n";
                   state.write("$$\n");
-                  state.text(latex, false);
-                  state.ensureNewLine();
+                  state.text(body, false);
                   state.write("$$");
                 } else {
                   state.write("$$" + latex + "$$");
