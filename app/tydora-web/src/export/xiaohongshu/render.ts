@@ -75,6 +75,76 @@ function getContentHeight(ratio: XhsRatio): number {
 /** 正文字体族映射 */
 let themeStyleInjected = false;
 let cardStyleInjected = false;
+let chromeStyleInjected = false;
+
+/**
+ * 卡片与编辑器显示同源（用户要求「样式和编辑器中显示的保持一致」）：
+ * 测量容器/卡片挂 `.tiptap-editor` 类，让 Editor/theme.css 的显示规则**原样生效**
+ * （标题层级、注音、下划线、hr 短划、链接、引用、代码块……单一来源，不再手工镜像漂移）。
+ * 本表只压掉**编辑器专属装饰与布局**（作用域 specificity 高于 theme.css 对应规则）：
+ * - 标题井号 ::after（用户明确：卡片不要井号）；
+ * - IR 行号 ::before、空段 placeholder ::before（纯编辑态装饰）；
+ * - .tiptap 的编辑布局（padding/左槽/max-width/min-height），卡片有自己的页边距；
+ * - p / a 的卡片旧值与编辑器同 specificity 而注入在后会赢 → 这里显式归位编辑器默认
+ *   （p margin 0 间距交给 flex gap；a 下划线默认 0% 与编辑器静止态一致）。
+ */
+const XHS_EDITOR_CHROME_CSS = `
+/* .tiptap-editor 类自带**编辑器外框**属性（height:100% / overflow-y:auto /
+   overscroll-behavior-y:contain / container-type:inline-size）——挂到卡片上会把卡片
+   变成"不可滚但阻断滚动链"的滚动容器，预览区滚轮被吞（用户实测）。这里归位：
+   卡片保留 overflow:hidden 供分页裁剪，测量容器离屏无需裁剪。 */
+:is(.tiptap-export-container, .xhs-card).tiptap-editor {
+  height: auto;
+  overscroll-behavior-y: auto;
+  overflow-anchor: auto;
+  container-type: normal;
+  scrollbar-width: auto;
+}
+.tiptap-export-container.tiptap-editor { overflow: visible; }
+.xhs-card.tiptap-editor { overflow: hidden; }
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap {
+  padding: 0;
+  max-width: none;
+  margin: 0;
+  min-height: 0;
+}
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap > :where(p, h1, h2, h3, h4, h5, h6, blockquote, pre, hr, .tableWrapper, .code-block-toolbar-wrapper, [data-type="frontmatter"])::before,
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap li::before {
+  content: none;
+}
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h1::after,
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h2::after,
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h3::after {
+  content: none;
+  display: none;
+}
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap p.is-editor-empty::before,
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap p.is-empty::before {
+  content: none;
+}
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap p { margin: 0; }
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap a { background-size: 0% 1px; }
+/* 旧镜像（export-typography / CARD_CONTENT_CSS）里编辑器**未声明**的属性不会被
+   specificity 盖掉，须显式归位编辑器现状（Notion 式标题：无边框无背景短线）：
+   - H2 主题色短线（用户明确：卡片要去掉）；H1 下边框；
+   - H5/H6 大写变换/字距/透明度（编辑器无这些）。 */
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h1 { border-bottom: none; }
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h2 { background: none; }
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h5,
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h6 { text-transform: none; letter-spacing: -0.01em; }
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h5 { color: var(--text-primary); }
+:is(.tiptap-export-container, .xhs-card).tiptap-editor .tiptap h6 { opacity: 1; }
+`;
+
+/** 注入编辑器装饰压制表（一次性） */
+function ensureChromeStylesheet(): void {
+  if (chromeStyleInjected) return;
+  chromeStyleInjected = true;
+  const style = document.createElement("style");
+  style.id = "xhs-editor-chrome";
+  style.textContent = XHS_EDITOR_CHROME_CSS;
+  document.head.appendChild(style);
+}
 
 /** 注入卡片主题 CSS 变量（一次性） */
 function ensureThemeStylesheet(): void {
@@ -119,7 +189,7 @@ const CARD_CONTENT_CSS = `
 .xhs-card strong, .xhs-card b { font-weight: 700; color: var(--text-strong, inherit); }
 .xhs-card img { display: block; max-width: 100%; height: auto; margin-left: auto; margin-right: auto; border-radius: 12px; }
 .xhs-card .image-node-view { display: block; text-align: center; margin-left: auto; margin-right: auto; }
-.xhs-card hr { border: none; border-top: 1px solid var(--border, #2c2c2e); margin: 26px 0; }
+/* hr 旧卡片自绘细线已撤：与编辑器同源后由 theme.css 的 .tiptap-editor hr（mask 短划）生效 ✓ */
 .xhs-card .tiptap-mathematics-render .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .xhs-card .katex { font-size: 1.05em; }
 /* 链接：与编辑器（Editor/theme.css 的 .tiptap-editor a）对齐 ✓
@@ -190,11 +260,12 @@ function applyCardBase(
 /**
  * 构图网格线覆盖层（辅助对齐/检查内容溢出）。
  * 每格为正方形、边长 = 正文字号 × 行高（1.8），正好容纳一行文字，随字号设置联动。
+ * （今与编辑器同源：行高取 --editor-line-height 默认 1.6；原注释留档）
  */
 function createGridOverlay(fontSizePx: number): HTMLElement {
   const overlay = document.createElement("div");
   overlay.className = "xhs-card-grid-overlay";
-  const cell = Math.round(fontSizePx * 1.8);
+  const cell = Math.round(fontSizePx * 1.6);
   overlay.style.backgroundSize = `${cell}px ${cell}px`;
   return overlay;
 }
@@ -284,6 +355,10 @@ function buildBodyCard(
     CONTENT_PADDING_TOP + Math.ceil(segH) + CARD_BOTTOM_BLANK,
   );
   applyCardBase(card, theme, { width, height }, XHS_FONT_FAMILIES[settings.fontFamily]);
+  // 与测量容器同挂 .tiptap-editor：chrome 压制表与 theme.css 显示规则在卡片克隆上
+  // 与测量容器**完全同权生效**（否则两套坐标系不一致 → 分页裁剪切穿行，用户实测）。
+  // 封面不挂：封面自有排版，不受编辑器标题规则影响。
+  card.classList.add("tiptap-editor");
 
   // 视口结构必须与测量容器同构（padding 22/24，顶部无偏移）：
   // 1) 高度 = 22 + 分段内容高度，overflow:hidden 在分段末尾精确裁剪；
@@ -300,7 +375,7 @@ function buildBodyCard(
     (el as HTMLElement).style.visibility = "hidden";
   });
   // 与测量容器 contentEl 一致（flow-root 阻止 margin 穿透）
-  content.style.display = "flow-root";
+  // （今编辑器 flex gap 同源，margin 本不折叠，无需内联 flow-root；原注释留档）
   viewport.appendChild(content);
   // 网格线置于最底层（内容之前插入），不遮挡正文/图片
   if (settings.gridLines) card.appendChild(createGridOverlay(settings.fontSize));
@@ -482,6 +557,7 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
 
   ensureThemeStylesheet();
   ensureCardStylesheet();
+  ensureChromeStylesheet();
   ensureXhsWebFont(opts.settings.fontFamily);
 
   const theme = getXhsTheme(opts.settings.themeId);
@@ -496,6 +572,8 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
     container.classList.add("xhs-card");
     // 卡片主题变量 + 测量尺寸（与卡片内容宽度一致）
     container.classList.add("xhs-themed");
+    // 与编辑器显示同源：theme.css 的显示规则挂 .tiptap-editor 祖先（见 XHS_EDITOR_CHROME_CSS）
+    container.classList.add("tiptap-editor");
     container.setAttribute("data-xhs-theme", theme.id);
     container.style.width = `${cardW}px`;
     container.style.padding = `${CONTENT_PADDING_TOP}px ${CONTENT_PADDING_X}px ${CARD_BOTTOM_BLANK}px`;
@@ -536,13 +614,13 @@ async function prepareXhsContent(opts: XhsBuildOpts): Promise<PreparedXhs> {
     const contentEl = container.querySelector(".tiptap-export-content") as HTMLElement | null;
     if (!contentEl) throw new Error("XHS_EMPTY");
 
-    // 统一正文字号/行高/字体（em 型标题随此缩放）；行高 1.8 与参考项目一致
+    // 统一正文字号/字体（em 型标题随此缩放）；行高 1.8 与参考项目一致
+    // （今与编辑器同源：行高改随 --editor-line-height，不再内联 1.8；原注释留档）
     contentEl.style.fontSize = `${opts.settings.fontSize}px`;
-    contentEl.style.lineHeight = "1.8";
     contentEl.style.fontFamily = XHS_FONT_FAMILIES[opts.settings.fontFamily];
     // 阻止首个子元素 margin 穿透（与卡片克隆的 flow-root 保持一致），
     // 保证测量坐标系与卡片渲染坐标系完全对齐
-    contentEl.style.display = "flow-root";
+    // （今编辑器 flex gap 同源，margin 本不折叠，无需内联 flow-root；原注释留档）
     // 加粗等文本样式显式内联，保持与文档渲染一致
     contentEl.querySelectorAll("strong, b").forEach((el) => {
       const s = el as HTMLElement;
