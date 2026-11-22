@@ -6,7 +6,94 @@ import { invoke } from "@tauri-apps/api/core";
 import { getHighlighterColor, toggleHighlighterMode } from "../highlighter";
 import { applyMarkToInlineNodes } from "./highlight-ext";
 import { findBracketMathRange, rewriteBracketMathInHtml, rewriteBracketMathInText } from "./math";
+import { matchTemplateAt, renderRegisteredTemplate, rewriteTemplates } from "../markdown-templates";
 import { suppressRubyAutoExpandOnce } from "./ruby";
+
+/** 块级容器标签：只在这些容器里扫「直接行内子节点」序列（行内元素自身归父 run，避免重复扫） */
+const REJOIN_BLOCK_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "BLOCKQUOTE", "TD", "TH", "DIV", "DD", "DT", "CAPTION", "FIGCAPTION", "BODY"]);
+/** 代码/脚本容器不动（模板字面量在那里是内容，不是语法） */
+const REJOIN_SKIP_TAGS = new Set(["PRE", "CODE", "TEXTAREA", "SCRIPT", "STYLE"]);
+/** 注册表里有渲染器的 mark 类模板（Ruby 是节点语义，跨节点拼接不适用，留给 template-live 逐节点收） */
+const REJOIN_MARK_NAMES = new Set(["Color", "Hilite", "Font", "Straight", "Wavy", "Double", "Dashed", "Dotted"]);
+
+const escapeText = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/**
+ * 网页复制的 HTML 常把一条模板字面量**劈在多个行内元素里**：
+ * `<span>{{Straight|||</span><strong><span>当てはまる</span></strong><span>}}：…</span>`
+ * （源站给词头加粗所致，用户剪贴板实测）。PM 解析后字面量断在 mark 边界上，
+ * template-live 逐文本节点扫描时每个碎片都不配平 → 永不收起（用户实测「粘贴没有自动收起」）。
+ *
+ * 这里在 PM 解析**之前**于 DOM 层把跨节点的配平模板拼回单个 mark HTML：
+ * 内层保留原有行内标记（strong/em/… 原样嵌入渲染器输出），嵌套模板交给
+ * rewriteTemplates + 注册表递归渲染；渲染不了的保持原样（不吞内容）。
+ * 只处理 mark 类模板；Ruby 跨节点不拼（节点语义），单节点内的 Ruby 仍由 template-live 收。
+ */
+export function rejoinSplitTemplateLiterals(root: HTMLElement): void {
+  const blocks = [root, ...Array.from(root.querySelectorAll<HTMLElement>("*"))].filter(
+    (el) => REJOIN_BLOCK_TAGS.has(el.tagName) && !el.closest("pre,code,textarea,script,style"),
+  );
+  for (const block of blocks) {
+    const collect = () => {
+      const segs = Array.from(block.childNodes).filter(
+        (n) =>
+          n.nodeType === 3 ||
+          (n.nodeType === 1 && !REJOIN_BLOCK_TAGS.has((n as HTMLElement).tagName) && !REJOIN_SKIP_TAGS.has((n as HTMLElement).tagName)),
+      ) as (Text | HTMLElement)[];
+      const texts = segs.map((n) => (n.nodeType === 3 ? n.nodeValue ?? "" : (n as HTMLElement).tagName === "BR" ? "\n" : (n as HTMLElement).textContent ?? ""));
+      const offs: number[] = [];
+      let acc = 0;
+      for (const t of texts) { offs.push(acc); acc += t.length; }
+      return { segs, texts, offs, full: texts.join("") };
+    };
+    let { segs, texts, offs, full } = collect();
+    const segAt = (pos: number): number => {
+      for (let k = 0; k < segs.length; k++) if (pos >= offs[k] && pos < offs[k] + texts[k].length) return k;
+      return segs.length - 1;
+    };
+    const sliceHtml = (a: number, b: number): string => {
+      let out = "";
+      for (let k = 0; k < segs.length; k++) {
+        const s0 = offs[k], s1 = s0 + texts[k].length;
+        if (s1 <= a || s0 >= b) continue;
+        const lo = Math.max(a, s0) - s0, hi = Math.min(b, s1) - s0;
+        const n = segs[k];
+        if (n.nodeType === 3) out += escapeText(texts[k].slice(lo, hi));
+        else if (lo === 0 && hi === texts[k].length) out += (n as HTMLElement).outerHTML;
+        else out += escapeText(texts[k].slice(lo, hi));
+      }
+      return out;
+    };
+    let i = 0;
+    let guard = 0;
+    while (i < full.length && guard++ < 10000) {
+      const m = matchTemplateAt(full, i);
+      if (!m) { i++; continue; }
+      const fs = segAt(m.start), ls = segAt(m.end - 1);
+      const coversBr = segs.slice(fs, ls + 1).some((n) => n.nodeType === 1 && (n as HTMLElement).tagName === "BR");
+      if (fs === ls || coversBr || !REJOIN_MARK_NAMES.has(m.name)) { i = m.end; continue; }
+      const innerStart = m.end - 2 - m.inner.length;
+      const innerHtml = sliceHtml(innerStart, m.end - 2);
+      const rendered = renderRegisteredTemplate(m, rewriteTemplates(innerHtml, (mm, ii) => renderRegisteredTemplate(mm, ii)));
+      if (!rendered) { i = m.end; continue; }
+      const tpl = block.ownerDocument.createElement("template");
+      tpl.innerHTML = rendered;
+      const newNodes = Array.from(tpl.content.childNodes);
+      const headRem = texts[fs].slice(0, m.start - offs[fs]);
+      const tailRem = texts[ls].slice(m.end - offs[ls]);
+      const ref = segs[ls].nextSibling;
+      for (let k = fs; k <= ls; k++) segs[k].parentNode?.removeChild(segs[k]);
+      const inserted: (Text | ChildNode)[] = [];
+      if (headRem) inserted.push(block.ownerDocument.createTextNode(headRem));
+      inserted.push(...newNodes);
+      if (tailRem) inserted.push(block.ownerDocument.createTextNode(tailRem));
+      for (const n of inserted) block.insertBefore(n, ref);
+      const newTextLen = newNodes.reduce((acc, n) => acc + (n.nodeType === 3 ? n.nodeValue ?? "" : (n as HTMLElement).textContent ?? "").length, 0);
+      ({ segs, texts, offs, full } = collect());
+      i = m.start + headRem.length + newTextLen;
+    }
+  }
+}
 
 /**
  * 选区里的**行内内容是否全都带这个 mark**（只看块的直接行内子节点，不进注音内部）。
@@ -200,6 +287,9 @@ export function insertClipboardHtml(editor: Editor, html: string): boolean {
     const schema = editor.schema;
     // 网页复制走 HTML 通道：先把 \[...\] 公式块改写为 $$...$$（pre/code 内不动）
     const parsed = new DOMParser().parseFromString(rewriteBracketMathInHtml(html), "text/html");
+    // 网页复制常把模板字面量劈在 span/strong 边界上（用户剪贴板实测）：PM 解析前拼回，
+    // 否则 template-live 逐文本节点扫描见不到配平字面量 → 粘贴不收起
+    rejoinSplitTemplateLiterals(parsed.body);
     const parsedDoc = PMDOMParser.fromSchema(schema).parse(parsed.body);
 
     const blocks: any[] = [];
