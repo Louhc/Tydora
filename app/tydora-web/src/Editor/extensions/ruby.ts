@@ -105,7 +105,7 @@ function adjacentRuby(view: any): number | null {
 /** 展开：注音节点 → 源码字面量 `{{Ruby|本体|读音}}`，光标保持原本所在的那一侧。
  *  纯 tr 构造器：供 appendTransaction 在 state 应用链内返回（DOM 更新前映射选区，
  *  免 DOMObserver 回读旧 DOM 造成跳光标/双插）；mouseup 等链外路径用下面的 wrapper。 */
-function buildExpandTr(state: any, pos: number): any | null {
+function buildExpandTr(state: any, pos: number, preferLeft = false): any | null {
   /**
    * ⚠️ pos 通常来自 `view.posAtDOM(el, 0)`，而注音是 `contenteditable="false"` 的行内
    * **原子叶子**：这个调用可能返回"节点**之后**"的位置（off-by-one ✓ 实测会让单击
@@ -142,7 +142,10 @@ function buildExpandTr(state: any, pos: number): any | null {
    */
   const nodeEnd = at + node.nodeSize;
   const selFrom = state.selection.from;
-  const wasBefore = selFrom <= at || (selFrom < nodeEnd && selFrom - at <= node.nodeSize / 2);
+  const wasBefore = preferLeft || selFrom <= at || (selFrom < nodeEnd && selFrom - at <= node.nodeSize / 2);
+  // ⚠️ preferLeft（用戶裁決：按 Up 落到 ruby 右緣時，直覺光标應在 ruby 塊左側）：
+  // 跨視覺行垂直移動（Up/Down）落到邊界時統一放左緣；點擊/水平移動仍走半區規則。
+  // 修訂：preferLeft 由 append 以「舊光标 x < ruby 盒中心」判定（存柱位直覺，見彼處註）。
   /**
    * ⚠️ 只把**合法 Mark 实例**带过去。
    *
@@ -167,8 +170,8 @@ function buildExpandTr(state: any, pos: number): any | null {
 }
 
 /** 链外 wrapper（mouseup 等）：立即 dispatch；update 链内一律走 appendTransaction 返回 tr */
-function expandRubyAt(view: any, pos: number): boolean {
-  const tr = buildExpandTr(view.state, pos);
+function expandRubyAt(view: any, pos: number, preferLeft = false): boolean {
+  const tr = buildExpandTr(view.state, pos, preferLeft);
   if (!tr) return false;
   view.dispatch(tr);
   return true;
@@ -179,11 +182,11 @@ function expandRubyAt(view: any, pos: number): boolean {
  * 下一帧才展另一边 = 「后面才展开两边」，要求立即）。右邻先展后光标落左节点末，
  * 再展左邻，光标留两字面量之间；至多二轮（展完光标贴字面量，adjacentRuby 即 null）。
  */
-function expandAdjacentChain(view: any): boolean {
+function expandAdjacentChain(view: any, preferLeft = false): boolean {
   let did = false;
   for (let i = 0; i < 2; i++) {
     const near = adjacentRuby(view);
-    if (near === null || !expandRubyAt(view, near)) break;
+    if (near === null || !expandRubyAt(view, near, preferLeft)) break;
     did = true;
   }
   return did;
@@ -288,18 +291,24 @@ let suppressAutoExpandOnce = false;
 
 /** rAF 同步任务：appendTransaction 只探测，改文档的 dispatch 全在这里（链外、PM flush 之后） */
 let rubySyncRaf = 0;
-let rubySyncJob: { expand: boolean; convert: boolean; docChanged: boolean; empties: boolean } | null = null;
+let rubySyncJob: { expand: boolean; convert: boolean; docChanged: boolean; empties: boolean; insertCancel: boolean; preferLeft: boolean } | null = null;
 function scheduleRubySync(
   view: any,
-  job: { expand: boolean; convert: boolean; docChanged: boolean; empties: boolean },
+  job: { expand: boolean; convert: boolean; docChanged: boolean; empties: boolean; insertCancel: boolean; preferLeft: boolean },
 ): void {
   if (rubySyncJob) {
     // expand 取**最近一次 tr** 的资格（选区 tr 紧跟插入 tr 时，旧资格不得泄漏到插入后）；
     // convert/empties 累积 OR。
-    rubySyncJob.expand = job.expand;
+    // ⚠️ 修訂（用戶實測：焦点離開才展开）：同幀內 appendTransaction 會被調多次（iter1 見純選區 tr、
+    // iter2 只 template-live 收起 tr）。latest-wins 令 iter2（internal=true、userSel=false）之
+    // expand=false 覆蓋 iter1 之 true → 聚焦時永不展、blur 另批才展。改同幀 OR；
+    // 舊意圖（插入後舊資格不得泄漏）由 insertCancel（插入型用戶 tr）顯式取消保留。
+    rubySyncJob.expand = (rubySyncJob.expand || job.expand) && !job.insertCancel;
     rubySyncJob.convert = rubySyncJob.convert || job.convert;
     rubySyncJob.docChanged = rubySyncJob.docChanged || job.docChanged;
     rubySyncJob.empties = rubySyncJob.empties || job.empties;
+    rubySyncJob.insertCancel = rubySyncJob.insertCancel || job.insertCancel;
+    rubySyncJob.preferLeft = rubySyncJob.preferLeft || job.preferLeft;
   } else {
     rubySyncJob = job;
   }
@@ -311,7 +320,7 @@ function scheduleRubySync(
     if (!j || !view || view.isDestroyed || composingHere || mouseDown) return;
     // ① 自动展开（纯选区更新路径；点击另有 mouseup 即时处理）
     if (j.expand) {
-      if (expandAdjacentChain(view)) return;
+      if (expandAdjacentChain(view, j.preferLeft)) return;
     }
     if (j.convert) {
       // ② 文档变化：只扫光标所在块（便宜）
@@ -841,7 +850,49 @@ export const Ruby = Node.create({
           const docChanged = trs.some((t: any) => t.docChanged);
           // 插入型文档变化（打字/粘贴）才跳过展开；删除型（退格/剪切）光标贴边仍按旧行为展开
           //（用户实测：删 ruby 右侧字符后不展开 = 回归）。
-          const inserted = trs.some((t: any) => t.steps.some((s: any) => s.slice && s.slice.size > 0));
+          // ⚠️ 插入閘只計**用戶 tr**：剔自家收/展 tr（TL_META / RUBY_TOGGLE_META）。
+          // 否則「光标離開上方字面量 → template-live 同批收起」之收起 tr（插入型 docChanged）
+          // 會吞掉同批純選區 tr 的展開資格（用戶實測：按 Down 落到下方 ruby 右側不展開）。
+          const userTrs = trs.filter((t: any) => !t.getMeta("tydoraTemplateLive") && !t.getMeta(RUBY_TOGGLE_META));
+          const inserted = userTrs.some((t: any) => t.steps.some((s: any) => s.slice && s.slice.size > 0));
+          const userDocChanged = userTrs.some((t: any) => t.docChanged);
+          // 用戶純選區 tr 在批 → 用戶意圖優先於一次性抑制：template-live 收起產生 ruby 時
+          // 置 suppressRubyAutoExpandOnce（防「收起後貼邊立刻又展」），但同批若有用戶移動光標
+          // （如按 Down 落到下方 ruby 右緣），該抑制不得吞掉用戶落點的展開（用戶實測＋裁決：
+          // 任何時候光標貼 ruby 邊即展）。展開只及光标鄰節，刚收起之 ruby 不貼光标 → 無循環。
+          const userSel = userTrs.some((t: any) => t.selectionSet && !t.docChanged);
+          // 跨視覺行垂直移動（Up/Down）之判定：新舊光标 coords.top 不同。
+          // 供 preferLeft：垂直落到 ruby 邊界時展开後光标放左緣（用戶裁決）。
+          let verticalArrival = false;
+          if (userSel) {
+            try {
+              const v = this.editor.view;
+              verticalArrival = v.coordsAtPos(oldState.selection.head).top !== v.coordsAtPos(newState.selection.head).top;
+            } catch {
+              verticalArrival = false;
+            }
+          }
+          // ⚠️ 修訂（用戶實測：自上行行末按 Down 應落 ruby 右側，統一放左 = 修過頭）：
+          // 垂直落邊界亦存柱位直覺 —— 舊光标 x 在 ruby 盒中心之左 → 左緣；之右 → 右緣。
+          // 僅限「落在邊界」（非本體內部）；點擊/水平移動仍走半區規則。
+          let preferLeft = false;
+          if (verticalArrival) {
+            try {
+              const v = this.editor.view;
+              const $h = newState.selection.$from;
+              const na = $h.nodeAfter;
+              const nb = $h.nodeBefore;
+              const rubyNode = na && na.type.name === "ruby" ? na : nb && nb.type.name === "ruby" ? nb : null;
+              const at = rubyNode ? (na === rubyNode ? newState.selection.head : newState.selection.head - rubyNode.nodeSize) : null;
+              if (rubyNode && at !== null) {
+                const end = at + rubyNode.nodeSize;
+                const center = (v.coordsAtPos(at).left + v.coordsAtPos(end).left) / 2;
+                preferLeft = v.coordsAtPos(oldState.selection.head).left < center;
+              }
+            } catch {
+              preferLeft = false;
+            }
+          }
           const selChanged = !newState.selection.eq(oldState.selection);
           const internal = suppressAutoExpandOnce;
           suppressAutoExpandOnce = false;
@@ -852,7 +903,7 @@ export const Ruby = Node.create({
           // 重映射到字面量端点（"打一个字光标跳走"）。
           // 删除型 docChanged（退格 / 剪切）不受此限：删后光标贴边仍按旧行为展开。
           // 收起（convertLiterals）不受"不展开"之限：越出闭区间仍照常收。
-          const wantExpand = !internal && !(docChanged && inserted);
+          const wantExpand = (!internal || userSel) && !(userDocChanged && inserted);
           const wantConvert = docChanged || selChanged || pendingLiteral;
           if (!wantExpand && !wantConvert && !docChanged) return null;
           /**
@@ -868,6 +919,8 @@ export const Ruby = Node.create({
             convert: wantConvert,
             docChanged,
             empties: docChanged,
+            insertCancel: userDocChanged && inserted,
+            preferLeft,
           });
           return null;
         },
